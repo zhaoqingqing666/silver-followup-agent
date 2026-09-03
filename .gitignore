@@ -1,0 +1,25 @@
+# IDE
+.idea/
+.vscode/*.log
+*.iml
+
+# Frontend
+frontend/node_modules/
+frontend/.vinext/
+frontend/dist/
+
+# Backend
+backend/target/
+
+# H2 runtime database (regenerated on startup from schema.sql + data.sql)
+data/
+
+# Frontend local cache (not source)
+frontend/.npm-cache/
+
+# Local secrets and OS files
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db

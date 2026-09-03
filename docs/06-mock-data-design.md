@@ -1,0 +1,9 @@
+# 模拟数据库设计
+
+H2地址：jdbc:h2:file:./data/silver-agent；用户名sa；密码留空。
+
+基础数据：USERS、HOSPITALS、DEPARTMENTS、APPOINTMENT_SLOTS、USER_SCHEDULES、FAMILY_CONTACTS、MATERIAL_TEMPLATES。
+业务结果：APPOINTMENTS、REMINDERS、FAMILY_NOTIFICATIONS。
+Agent审计：CONVERSATION_SESSIONS、CONVERSATION_MESSAGES、TOOL_CALL_LOGS。
+
+Demo每次重启后端时清空业务结果和会话记录，同时重置模拟号源。因此首次进入应显示暂无复诊预约，确认办理后才出现事项，方便重复录屏。
