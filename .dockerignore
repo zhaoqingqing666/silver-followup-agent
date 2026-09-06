@@ -1,0 +1,15 @@
+# 构建上下文排除项：只把 Dockerfile / compose 需要的源码拷进镜像
+**/.git
+**/node_modules
+**/.vinext
+**/dist
+**/target
+backend/data
+data
+.env
+.env.*
+!.env.example
+docs
+.gitignore
+.gitattributes
+*.md
