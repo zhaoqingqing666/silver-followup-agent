@@ -18,7 +18,9 @@ public class AgentController {
     public AgentController(FollowupAgentService service) { this.service = service; }
 
     @PostMapping("/conversations")
-    public AgentTurnResponse start() { return service.start(); }
+    public AgentTurnResponse start(@RequestParam(value = "userId", required = false) String userId) {
+        return service.start(userId);
+    }
 
     @GetMapping("/conversations/{conversationId}")
     public ConversationHistoryResponse resume(@PathVariable("conversationId") String conversationId) {
@@ -32,7 +34,7 @@ public class AgentController {
 
     @PostMapping("/actions")
     public AgentTurnResponse act(@Valid @RequestBody ActionRequest request) {
-        return service.act(request.conversationId(), request.action(), request.value());
+        return service.act(request.conversationId(), request.action(), request.value(), request.label());
     }
 
     @PostMapping("/confirmations")
@@ -50,6 +52,6 @@ public class AgentController {
     }
 
     public record MessageRequest(@NotBlank String conversationId, @NotBlank String message) { }
-    public record ActionRequest(@NotBlank String conversationId, @NotBlank String action, String value) { }
+    public record ActionRequest(@NotBlank String conversationId, @NotBlank String action, String value, String label) { }
     public record ConfirmationRequest(@NotBlank String conversationId, boolean approved) { }
 }

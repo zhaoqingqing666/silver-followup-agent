@@ -4,12 +4,13 @@ import { FormEvent, useEffect, useRef, useState } from 'react';
 import { CalendarSearch, ClipboardCheck, LoaderCircle, Mic, RefreshCw, Send, Sparkles } from 'lucide-react';
 import { PageHeader } from '@/components/common/page-header';
 import { confirmAgentActions, getConversationHistory, sendAgentAction, sendAgentMessage, startConversation } from '@/lib/agent-api';
-import type { AgentTurnResponse, ChatMessage, TabId } from '@/types/domain';
+import type { AgentPlanCard, AgentTurnResponse, ChatMessage, TabId } from '@/types/domain';
 import { ConfirmationCardView, PlanCard, ResultCardView } from './assistant-cards';
 import { ChatBubble } from './chat-bubble';
 import { ToolTracePanel } from './tool-trace-panel';
 
 const CONVERSATION_KEY = 'silver-agent-current-conversation';
+const PLAN_SHOWN_KEY_PREFIX = 'silver-agent-plan-shown:';
 
 interface SpeechRecognitionLike {
   lang: string;
@@ -31,6 +32,7 @@ export function AssistantView({ onNavigate }: { onNavigate: (tab: TabId) => void
   const [conversationId, setConversationId] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [turn, setTurn] = useState<AgentTurnResponse | null>(null);
+  const [visiblePlan, setVisiblePlan] = useState<AgentPlanCard | null>(null);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(true);
   const [listening, setListening] = useState(false);
@@ -41,6 +43,14 @@ export function AssistantView({ onNavigate }: { onNavigate: (tab: TabId) => void
     setTurn(response);
     setConversationId(response.conversationId);
     window.localStorage.setItem(CONVERSATION_KEY, response.conversationId);
+    const planShownKey = `${PLAN_SHOWN_KEY_PREFIX}${response.conversationId}`;
+    const planWasShown = window.localStorage.getItem(planShownKey) === 'true';
+    if (response.plan && !planWasShown) {
+      setVisiblePlan(response.plan);
+      window.localStorage.setItem(planShownKey, 'true');
+    } else {
+      setVisiblePlan(null);
+    }
     setMessages(items => [...items, { id: crypto.randomUUID(), role: 'assistant', text: response.reply }]);
   };
 
@@ -48,6 +58,7 @@ export function AssistantView({ onNavigate }: { onNavigate: (tab: TabId) => void
     setBusy(true);
     setMessages([]);
     setTurn(null);
+    setVisiblePlan(null);
     try { addAssistant(await startConversation()); }
     catch { setMessages([{ id: 'offline', role: 'assistant', text: '后端服务还没有启动。请先运行 Java 后端，再点“重新连接”。' }]); }
     finally { setBusy(false); }
@@ -65,6 +76,10 @@ export function AssistantView({ onNavigate }: { onNavigate: (tab: TabId) => void
         const history = await getConversationHistory(savedId);
         setConversationId(history.conversationId);
         setTurn(history.current);
+        const planShownKey = `${PLAN_SHOWN_KEY_PREFIX}${history.conversationId}`;
+        const planWasShown = window.localStorage.getItem(planShownKey) === 'true';
+        setVisiblePlan(planWasShown ? null : history.current.plan);
+        if (history.current.plan && !planWasShown) window.localStorage.setItem(planShownKey, 'true');
         setMessages(history.messages.map(message => ({
           id: String(message.id),
           role: message.role,
@@ -103,7 +118,7 @@ export function AssistantView({ onNavigate }: { onNavigate: (tab: TabId) => void
     }
     setMessages(items => [...items, { id: crypto.randomUUID(), role: 'user', text: label }]);
     setBusy(true);
-    try { addAssistant(await sendAgentAction(conversationId, action, value)); }
+    try { addAssistant(await sendAgentAction(conversationId, action, value, label)); }
     catch (error) { setMessages(items => [...items, { id: crypto.randomUUID(), role: 'assistant', text: error instanceof Error ? error.message : '操作没有成功，请稍后重试。' }]); }
     finally { setBusy(false); }
   };
@@ -143,11 +158,14 @@ export function AssistantView({ onNavigate }: { onNavigate: (tab: TabId) => void
   };
 
   return <main className="flex min-h-dvh flex-col pb-[180px]">
-    <PageHeader title="复诊助手" subtitle="一次只问一件事" onBack={() => onNavigate('home')} />
+    <PageHeader title="复诊助手" subtitle="一次只问一件事" onBack={() => onNavigate('home')}
+      onHelp={() => void sendAction('CONTACT_HUMAN', '', '联系人工帮助')} />
 
-    <div className="border-b bg-[#fffaf3] px-5 py-3">
+    <div className="sticky top-[76px] z-40 border-b bg-[#fffaf3]/95 px-5 py-3 backdrop-blur">
       <div className="flex items-center gap-2 text-sm font-semibold text-[#76533d]"><Sparkles className="size-4 text-primary" />当前步骤：{stageLabels[turn?.stage ?? ''] ?? '正在连接'}</div>
-      <div className="mt-3 grid grid-cols-2 gap-2">
+    </div>
+    <div className="border-b bg-[#fffaf3] px-5 py-3">
+      <div className="grid grid-cols-2 gap-2">
         <button onClick={() => void (turn?.stage === 'COMPLETED' ? begin() : sendAction('CONTINUE', '', '我想预约复诊'))} className="flex min-h-12 items-center justify-center gap-2 rounded-2xl bg-primary text-base font-bold text-white"><CalendarSearch className="size-5" />{turn?.stage === 'COMPLETED' ? '再次预约' : '预约复诊'}</button>
         <button onClick={() => onNavigate('tasks')} className="flex min-h-12 items-center justify-center gap-2 rounded-2xl border bg-white text-base font-bold"><ClipboardCheck className="size-5 text-primary" />事项查询</button>
       </div>
@@ -159,7 +177,7 @@ export function AssistantView({ onNavigate }: { onNavigate: (tab: TabId) => void
         {busy && <div className="flex items-center gap-2 text-base text-muted-foreground"><LoaderCircle className="size-5 animate-spin" />复诊助手正在处理…</div>}
       </section>
 
-      {turn?.plan && <PlanCard plan={turn.plan} />}
+      {visiblePlan && <PlanCard plan={visiblePlan} />}
       {turn?.confirmation && <ConfirmationCardView card={turn.confirmation} busy={busy} onConfirm={() => void confirm(true)} onCancel={() => void confirm(false)} />}
       {turn?.result && <ResultCardView result={turn.result} />}
       {turn && <ToolTracePanel traces={turn.toolTraces} />}

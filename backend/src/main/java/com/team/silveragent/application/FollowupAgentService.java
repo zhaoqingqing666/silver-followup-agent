@@ -10,13 +10,18 @@ import com.team.silveragent.domain.model.AgentTurnResponse.QuickReply;
 import com.team.silveragent.domain.model.AgentTurnResponse.ResultCard;
 import com.team.silveragent.domain.model.ConversationHistoryResponse;
 import com.team.silveragent.domain.model.ToolModels.Conflict;
+import com.team.silveragent.domain.model.ToolModels.DepartmentProfile;
+import com.team.silveragent.domain.model.ToolModels.HospitalProfile;
 import com.team.silveragent.domain.model.ToolModels.Slot;
 import com.team.silveragent.domain.tool.AppointmentTool;
+import com.team.silveragent.domain.tool.DepartmentCatalogTool;
 import com.team.silveragent.domain.tool.FamilyNotificationTool;
+import com.team.silveragent.domain.tool.HospitalCatalogTool;
 import com.team.silveragent.domain.tool.MaterialChecklistTool;
 import com.team.silveragent.domain.tool.ScheduleTool;
 import com.team.silveragent.domain.tool.TravelTool;
 import com.team.silveragent.infrastructure.mock.ToolTraceStore;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
@@ -31,11 +36,12 @@ import java.util.concurrent.ConcurrentHashMap;
 
 @Service
 public class FollowupAgentService {
-    private static final String USER_ID = "user-001";
     private static final DateTimeFormatter DATE_LABEL = DateTimeFormatter.ofPattern("M月d日");
     private static final DateTimeFormatter TIME_LABEL = DateTimeFormatter.ofPattern("HH:mm");
 
     private final AppointmentTool appointmentTool;
+    private final HospitalCatalogTool hospitalCatalogTool;
+    private final DepartmentCatalogTool departmentCatalogTool;
     private final ScheduleTool scheduleTool;
     private final TravelTool travelTool;
     private final FamilyNotificationTool familyTool;
@@ -44,10 +50,14 @@ public class FollowupAgentService {
     private final DeepSeekFactExtractor extractor;
     private final ConversationStore conversations;
     private final AppointmentRecordStore appointmentRecords;
+    private final CareCatalogRepository catalog;
+    private final String defaultUserId;
     private final Map<String, ConversationState> sessions = new ConcurrentHashMap<>();
 
     public FollowupAgentService(
             AppointmentTool appointmentTool,
+            HospitalCatalogTool hospitalCatalogTool,
+            DepartmentCatalogTool departmentCatalogTool,
             ScheduleTool scheduleTool,
             TravelTool travelTool,
             FamilyNotificationTool familyTool,
@@ -55,8 +65,12 @@ public class FollowupAgentService {
             ToolTraceStore traces,
             DeepSeekFactExtractor extractor,
             ConversationStore conversations,
-            AppointmentRecordStore appointmentRecords) {
+            AppointmentRecordStore appointmentRecords,
+            CareCatalogRepository catalog,
+            @Value("${demo.user-id:user-001}") String defaultUserId) {
         this.appointmentTool = appointmentTool;
+        this.hospitalCatalogTool = hospitalCatalogTool;
+        this.departmentCatalogTool = departmentCatalogTool;
         this.scheduleTool = scheduleTool;
         this.travelTool = travelTool;
         this.familyTool = familyTool;
@@ -65,20 +79,23 @@ public class FollowupAgentService {
         this.extractor = extractor;
         this.conversations = conversations;
         this.appointmentRecords = appointmentRecords;
+        this.catalog = catalog;
+        this.defaultUserId = defaultUserId;
     }
 
     public AgentTurnResponse start() {
+        return start(defaultUserId);
+    }
+
+    public AgentTurnResponse start(String requestedUserId) {
+        String userId = requestedUserId == null || requestedUserId.isBlank() ? defaultUserId : requestedUserId;
+        CareCatalogRepository.UserProfile user = catalog.user(userId)
+                .orElseThrow(() -> new IllegalArgumentException("没有找到当前用户，请检查模拟用户数据"));
         String id = UUID.randomUUID().toString();
-        ConversationState state = new ConversationState(id);
+        ConversationState state = new ConversationState(id, user.id());
         sessions.put(id, state);
-        String greeting = "您好，我是复诊助手。您可以直接告诉我完整需求，也可以跟着我一步一步办理。请问想去哪家医院复诊？";
-        AgentTurnResponse response = AgentTurnResponse.message(id, state.stage.name(), greeting, List.of(
-                q("市第一医院", "SET_HOSPITAL", "市第一医院"),
-                q("市人民医院", "SET_HOSPITAL", "市人民医院"),
-                q("我还没想好", "ASK_HUMAN_INPUT", "")));
-        conversations.save(state, response);
-        conversations.addMessage(id, "assistant", greeting);
-        return response;
+        return askHospital(state, "您好，" + user.name() +
+                "。我是复诊助手。您可以直接说完整需求，也可以跟着我一步一步办理。请问想去哪家医院复诊？");
     }
 
     public ConversationHistoryResponse resume(String conversationId) {
@@ -117,28 +134,21 @@ public class FollowupAgentService {
             state.stage = ConversationState.Stage.AWAITING_CONFIRMATION;
             return respondWithCancelCard(state);
         }
+        if ("QUERY_HOSPITALS".equals(facts.intent()) || "QUERY_HOSPITAL_INFO".equals(facts.intent())) {
+            return showHospitals(state, facts.hospital());
+        }
+        if ("QUERY_DEPARTMENTS".equals(facts.intent())) {
+            return showDepartments(state, facts.hospital());
+        }
+        if ("REQUEST_RECOMMENDATION".equals(facts.intent())) {
+            return recommendHospitals(state, facts.department());
+        }
 
         ConversationState.Stage previousStage = state.stage;
         applyFacts(state, facts);
         if (previousStage == ConversationState.Stage.COMPLETED
                 && "CREATE_FOLLOWUP".equals(facts.intent())) {
-            return start();
-        }
-        if (facts.selectedTime() != null
-                && (previousStage == ConversationState.Stage.SELECT_PERIOD
-                || previousStage == ConversationState.Stage.CONFIRM_SLOT
-                || previousStage == ConversationState.Stage.SELECT_SLOT
-                || previousStage == ConversationState.Stage.NO_SLOT)) {
-            Slot spokenSlot = state.alternatives.stream()
-                    .filter(item -> (facts.date() == null || item.date().equals(facts.date()))
-                            && item.time().equals(facts.selectedTime()))
-                    .findFirst().orElse(null);
-            if (spokenSlot != null) return selectSlot(state, spokenSlot.id());
-        }
-        if ((previousStage == ConversationState.Stage.SELECT_PERIOD
-                || previousStage == ConversationState.Stage.CONFIRM_SLOT)
-                && facts.timePreference() != null) {
-            return recommendPeriod(state, facts.timePreference());
+            return start(state.userId);
         }
         if (previousStage == ConversationState.Stage.CONFIRM_SLOT && state.recommendedSlot != null) {
             if (Boolean.TRUE.equals(facts.acceptRecommendedTime())) {
@@ -147,6 +157,18 @@ public class FollowupAgentService {
             if (Boolean.FALSE.equals(facts.acceptRecommendedTime())) {
                 return showPeriodSlots(state, state.timePreference);
             }
+        }
+        if (facts.selectedTime() != null
+                && (previousStage == ConversationState.Stage.SELECT_PERIOD
+                || previousStage == ConversationState.Stage.CONFIRM_SLOT
+                || previousStage == ConversationState.Stage.SELECT_SLOT
+                || previousStage == ConversationState.Stage.NO_SLOT)) {
+            return recommendSpecificTime(state, facts.selectedTime());
+        }
+        if ((previousStage == ConversationState.Stage.SELECT_PERIOD
+                || previousStage == ConversationState.Stage.CONFIRM_SLOT)
+                && facts.timePreference() != null) {
+            return recommendPeriod(state, facts.timePreference());
         }
         if (previousStage == ConversationState.Stage.NO_SLOT && facts.date() != null) {
             state.selectedSlot = null;
@@ -173,14 +195,15 @@ public class FollowupAgentService {
     /**
      * 明确按钮入口：不调用大模型，直接按action和value更新状态。
      */
-    public AgentTurnResponse act(String conversationId, String action, String value) {
+    public AgentTurnResponse act(String conversationId, String action, String value, String label) {
         ConversationState state = requireSession(conversationId);
         String safeValue = value == null ? "" : value.trim();
-        conversations.addMessage(state.id, "user", "[按钮] " + action + (safeValue.isBlank() ? "" : "：" + safeValue));
+        String displayLabel = label == null || label.isBlank() ? (safeValue.isBlank() ? "继续办理" : safeValue) : label.trim();
+        conversations.addMessage(state.id, "user", "[按钮] " + action + "：" + displayLabel);
 
         switch (action) {
-            case "SET_HOSPITAL" -> state.hospital = safeValue;
-            case "SET_DEPARTMENT" -> state.department = safeValue;
+            case "SET_HOSPITAL" -> chooseHospital(state, safeValue);
+            case "SET_DEPARTMENT" -> chooseDepartment(state, safeValue);
             case "SET_DATE" -> { state.date = LocalDate.parse(safeValue); return querySlots(state); }
             case "SET_PERIOD" -> { return recommendPeriod(state, safeValue); }
             case "SHOW_PERIOD_SLOTS" -> { return showPeriodSlots(state, safeValue); }
@@ -191,7 +214,7 @@ public class FollowupAgentService {
             case "SET_NOTIFY" -> state.notifyFamily = Boolean.parseBoolean(safeValue);
             case "START_PLAN" -> { return state.selectedSlot == null ? querySlots(state) : checkSchedule(state); }
             case "RETRY_QUERY" -> { return querySlots(state); }
-            case "NEW_BOOKING" -> { return start(); }
+            case "NEW_BOOKING" -> { return start(state.userId); }
             case "SELECT_SLOT" -> { return selectSlot(state, safeValue); }
             case "KEEP_CONFLICT" -> { return buildConfirmation(state); }
             case "CHANGE_DATE" -> {
@@ -248,20 +271,20 @@ public class FollowupAgentService {
 
         try {
             if ("CANCEL".equals(state.pendingAction)) {
-                appointmentTool.cancel(state.id, state.appointmentId, USER_ID);
+                appointmentTool.cancel(state.id, state.appointmentId, state.userId);
                 state.stage = ConversationState.Stage.CANCELLED;
                 state.pendingAction = "CREATE";
                 return respond(state, "预约已取消，原模拟号源已经释放。", List.of(q("重新开始", "CHANGE_HOSPITAL", "")));
             }
 
-            String appointmentId = appointmentTool.submit(state.id, state.selectedSlot.id(), USER_ID);
+            String appointmentId = appointmentTool.submit(state.id, state.selectedSlot.id(), state.userId);
             state.appointmentId = appointmentId;
             LocalDateTime appointmentAt = LocalDateTime.of(state.selectedSlot.date(), state.selectedSlot.time());
 
-            scheduleTool.createReminder(state.id, USER_ID, "复诊材料准备提醒", appointmentAt.minusDays(1));
+            scheduleTool.createReminder(state.id, state.userId, "复诊材料准备提醒", appointmentAt.minusDays(1));
             String reminderStatus = "已创建复诊提醒";
             if (Boolean.TRUE.equals(state.needTravel) && state.travelPlan != null) {
-                scheduleTool.createReminder(state.id, USER_ID, "复诊出发提醒", state.travelPlan.departureAt().minusMinutes(10));
+                scheduleTool.createReminder(state.id, state.userId, "复诊出发提醒", state.travelPlan.departureAt().minusMinutes(10));
                 reminderStatus = "已创建复诊及出发提醒";
             }
 
@@ -296,11 +319,7 @@ public class FollowupAgentService {
     private AgentTurnResponse advance(ConversationState state, ExtractedFacts facts) {
         if (state.hospital == null) return askHospital(state, acknowledgement(facts, "请告诉我就诊医院。"));
         if (state.department == null) {
-            state.stage = ConversationState.Stage.ASK_DEPARTMENT;
-            return respond(state, acknowledgement(facts, "好的。请问复诊哪个科室？"), List.of(
-                    q("心内科", "SET_DEPARTMENT", "心内科"),
-                    q("内分泌科", "SET_DEPARTMENT", "内分泌科"),
-                    q("神经内科", "SET_DEPARTMENT", "神经内科")));
+            return askDepartment(state, acknowledgement(facts, "好的。请问复诊哪个科室？"));
         }
         if (state.date == null) return askDate(state, acknowledgement(facts, "请问希望哪一天复诊？"));
         if (state.selectedSlot == null) {
@@ -334,8 +353,10 @@ public class FollowupAgentService {
         }
         if (state.notifyFamily == null) {
             state.stage = ConversationState.Stage.ASK_NOTIFY;
-            return respond(state, acknowledgement(facts, "预约完成后，需要通知您的女儿吗？"), List.of(
-                    q("通知女儿", "SET_NOTIFY", "true"),
+            loadPrimaryContact(state);
+            String target = state.contact == null ? "家属" : state.contact.relationship() + state.contact.name();
+            return respond(state, acknowledgement(facts, "预约完成后，需要通知" + target + "吗？"), List.of(
+                    q("通知" + target, "SET_NOTIFY", "true"),
                     q("不用通知", "SET_NOTIFY", "false")));
         }
 
@@ -352,18 +373,20 @@ public class FollowupAgentService {
 
     private AgentTurnResponse querySlots(ConversationState state) {
         List<Slot> slots = appointmentTool.queryAvailableSlots(
-                state.id, state.hospital, state.department, state.date);
+                state.id, state.hospitalId, state.department, state.date);
         state.selectedSlot = null;
         state.recommendedSlot = null;
         if (!slots.isEmpty()) {
             state.alternatives = slots;
+            if (state.requestedTime != null) return recommendSpecificTime(state, state.requestedTime);
+            if (state.timePreference != null) return recommendPeriod(state, state.timePreference);
             state.stage = ConversationState.Stage.SELECT_PERIOD;
             return respondWithPlan(state, periodSummary(state.date, slots), periodReplies(slots));
         }
 
         state.stage = ConversationState.Stage.NO_SLOT;
         state.alternatives = appointmentTool.queryAlternatives(
-                state.id, state.hospital, state.department, state.date);
+                state.id, state.hospitalId, state.department, state.date);
         if (!state.alternatives.isEmpty()) {
             List<QuickReply> choices = new ArrayList<>(
                     slotReplies(state.alternatives.stream().limit(3).toList()));
@@ -402,6 +425,34 @@ public class FollowupAgentService {
                         q("看看其他" + periodLabel(normalized) + "时间", "SHOW_PERIOD_SLOTS", normalized),
                         q("改选" + periodLabel("MORNING".equals(normalized) ? "AFTERNOON" : "MORNING"),
                                 "SET_PERIOD", "MORNING".equals(normalized) ? "AFTERNOON" : "MORNING")));
+    }
+
+    private AgentTurnResponse recommendSpecificTime(ConversationState state, LocalTime requestedTime) {
+        if (state.alternatives.isEmpty()) return querySlots(state);
+        Slot exact = state.alternatives.stream()
+                .filter(item -> item.time().equals(requestedTime)).findFirst().orElse(null);
+        Slot recommendation = exact != null ? exact : state.alternatives.stream()
+                .min((left, right) -> Long.compare(
+                        Math.abs(java.time.Duration.between(requestedTime, left.time()).toMinutes()),
+                        Math.abs(java.time.Duration.between(requestedTime, right.time()).toMinutes())))
+                .orElse(null);
+        if (recommendation == null) {
+            return respondWithPlan(state, "当前没有可推荐的号源，请重新选择日期。",
+                    List.of(q("重新选择日期", "CHANGE_DATE", "")));
+        }
+        state.requestedTime = requestedTime;
+        state.timePreference = requestedTime.isBefore(LocalTime.NOON) ? "MORNING" : "AFTERNOON";
+        state.recommendedSlot = recommendation;
+        state.stage = ConversationState.Stage.CONFIRM_SLOT;
+        String reply = exact != null
+                ? requestedTime.format(TIME_LABEL) + "还有预约号，这个时间可以吗？"
+                : "您想要的" + requestedTime.format(TIME_LABEL) + "暂时没有号。最接近的" +
+                recommendation.time().format(TIME_LABEL) + "还有号，这个时间可以吗？";
+        return respondWithPlan(state, reply, List.of(
+                q("这个时间可以", "SELECT_SLOT", recommendation.id()),
+                q("看看其他" + periodLabel(state.timePreference) + "时间",
+                        "SHOW_PERIOD_SLOTS", state.timePreference),
+                q("重新选择日期", "CHANGE_DATE", "")));
     }
 
     private AgentTurnResponse showPeriodSlots(ConversationState state, String preference) {
@@ -457,16 +508,17 @@ public class FollowupAgentService {
         }
         state.selectedSlot = selected;
         state.recommendedSlot = null;
+        state.requestedTime = null;
         state.date = selected.date();
         return advance(state, ExtractedFacts.empty());
     }
 
     private AgentTurnResponse checkSchedule(ConversationState state) {
         LocalDateTime start = LocalDateTime.of(state.selectedSlot.date(), state.selectedSlot.time());
-        List<Conflict> conflicts = scheduleTool.findConflicts(state.id, USER_ID, start, start.plusMinutes(60));
+        List<Conflict> conflicts = scheduleTool.findConflicts(state.id, state.userId, start, start.plusMinutes(60));
         if (!conflicts.isEmpty()) {
             state.stage = ConversationState.Stage.CONFLICT;
-            List<Slot> sameDay = appointmentTool.queryAvailableSlots(state.id, state.hospital, state.department, state.date)
+            List<Slot> sameDay = appointmentTool.queryAvailableSlots(state.id, state.hospitalId, state.department, state.date)
                     .stream().filter(item -> !item.id().equals(state.selectedSlot.id())).toList();
             state.alternatives = sameDay;
             List<QuickReply> choices = new ArrayList<>(slotReplies(sameDay.stream().limit(2).toList()));
@@ -481,10 +533,10 @@ public class FollowupAgentService {
     private AgentTurnResponse buildConfirmation(ConversationState state) {
         LocalDateTime appointmentAt = LocalDateTime.of(state.selectedSlot.date(), state.selectedSlot.time());
         if (Boolean.TRUE.equals(state.needTravel)) {
-            state.travelPlan = travelTool.plan(state.id, USER_ID, state.hospital,
+            state.travelPlan = travelTool.plan(state.id, state.userId, state.hospital,
                     appointmentAt, state.transport == null ? "打车" : state.transport);
         }
-        if (Boolean.TRUE.equals(state.notifyFamily)) state.contact = familyTool.findPrimaryContact(state.id, USER_ID);
+        if (Boolean.TRUE.equals(state.notifyFamily) && state.contact == null) loadPrimaryContact(state);
         state.stage = ConversationState.Stage.AWAITING_CONFIRMATION;
 
         List<String> operations = new ArrayList<>();
@@ -520,19 +572,125 @@ public class FollowupAgentService {
 
     private AgentTurnResponse askHospital(ConversationState state, String message) {
         state.stage = ConversationState.Stage.ASK_HOSPITAL;
-        return respond(state, message, List.of(
-                q("市第一医院", "SET_HOSPITAL", "市第一医院"),
-                q("市人民医院", "SET_HOSPITAL", "市人民医院"),
-                q("我还没想好", "ASK_HUMAN_INPUT", "")));
+        List<QuickReply> choices = new ArrayList<>(catalog.hospitals().stream()
+                .limit(3).map(item -> q(item.name(), "SET_HOSPITAL", item.id())).toList());
+        choices.add(q("我还没想好", "ASK_HUMAN_INPUT", ""));
+        return respond(state, message, choices);
+    }
+
+    private AgentTurnResponse askDepartment(ConversationState state, String message) {
+        state.stage = ConversationState.Stage.ASK_DEPARTMENT;
+        List<QuickReply> choices = new ArrayList<>(catalog.departments(state.hospitalId).stream()
+                .limit(3).map(item -> q(item.name(), "SET_DEPARTMENT", item.id())).toList());
+        choices.add(q("我自己说科室", "ASK_HUMAN_INPUT", ""));
+        return respond(state, message, choices);
     }
 
     private AgentTurnResponse askDate(ConversationState state, String message) {
         state.stage = ConversationState.Stage.ASK_DATE;
-        int year = LocalDate.now().getYear();
-        return respond(state, message, List.of(
-                q("9月18日", "SET_DATE", year + "-09-18"),
-                q("9月19日", "SET_DATE", year + "-09-19"),
-                q("9月20日", "SET_DATE", year + "-09-20")));
+        List<QuickReply> choices = new ArrayList<>(catalog.availableDates(
+                        state.hospitalId, state.department, LocalDate.now(), 3).stream()
+                .map(date -> q(date.format(DATE_LABEL), "SET_DATE", date.toString())).toList());
+        choices.add(q("我自己说日期", "ASK_HUMAN_INPUT", ""));
+        return respond(state, message, choices);
+    }
+
+    private AgentTurnResponse showHospitals(ConversationState state, String requestedHospital) {
+        List<HospitalProfile> rows = hospitalCatalogTool.listHospitals(state.id);
+        if (requestedHospital != null) {
+            var matched = catalog.hospital(requestedHospital);
+            if (matched.isPresent()) {
+                rows = rows.stream().filter(item -> item.id().equals(matched.get().id())).toList();
+            }
+        }
+        if (rows.isEmpty()) {
+            return respond(state, "暂时没有找到这家医院的模拟资料。" + resumeHint(state), List.of());
+        }
+        String summary = rows.stream().limit(3).map(this::hospitalSummary)
+                .collect(java.util.stream.Collectors.joining("；"));
+        List<QuickReply> choices = rows.stream().limit(3)
+                .map(item -> q("选择" + item.name(), "SET_HOSPITAL", item.id())).toList();
+        return respond(state, "目前的模拟医院资料如下：" + summary + "。" + resumeHint(state), choices);
+    }
+
+    private AgentTurnResponse showDepartments(ConversationState state, String requestedHospital) {
+        if (requestedHospital != null) {
+            catalog.hospital(requestedHospital).ifPresent(item -> {
+                state.hospitalId = item.id();
+                state.hospital = item.name();
+                state.departmentId = null;
+                state.department = null;
+            });
+        }
+        if (state.hospitalId == null) {
+            return showHospitals(state, null);
+        }
+        List<DepartmentProfile> rows = departmentCatalogTool.listDepartments(state.id, state.hospitalId);
+        if (rows.isEmpty()) {
+            return respond(state, state.hospital + "暂时没有配置可预约科室，请选择其他医院。",
+                    List.of(q("查看其他医院", "CHANGE_HOSPITAL", "")));
+        }
+        String names = rows.stream().map(item -> item.name() + "（" + joinOrDefault(item.specialtyTags(), "常规复诊") + "）")
+                .collect(java.util.stream.Collectors.joining("、"));
+        List<QuickReply> choices = rows.stream().limit(3)
+                .map(item -> q(item.name(), "SET_DEPARTMENT", item.id())).toList();
+        return respond(state, state.hospital + "目前可办理：" + names + "。请选择医生要求您复诊的科室。", choices);
+    }
+
+    private AgentTurnResponse recommendHospitals(ConversationState state, String requestedDepartment) {
+        String department = requestedDepartment != null ? requestedDepartment : state.department;
+        if (department == null) {
+            List<HospitalProfile> rows = hospitalCatalogTool.listHospitals(state.id);
+            String summary = rows.stream().limit(3).map(this::hospitalSummary)
+                    .collect(java.util.stream.Collectors.joining("；"));
+            List<QuickReply> choices = rows.stream().limit(3)
+                    .map(item -> q("了解" + item.name(), "SET_HOSPITAL", item.id())).toList();
+            return respond(state, "我不能判断哪家医院‘最好’，但可以根据数据库中的科室特色、适老服务和号源帮您筛选。"
+                    + summary + "。请先告诉我医生要求复诊的科室。", choices);
+        }
+        List<HospitalProfile> rows = hospitalCatalogTool.findHospitalsForDepartment(state.id, department);
+        if (rows.isEmpty()) {
+            return respond(state, "模拟数据库中暂时没有开设" + department + "的医院。您可以换一个科室，或联系人工帮助。",
+                    List.of(q("查看医院", "CHANGE_HOSPITAL", ""), q("联系人工", "CONTACT_HUMAN", "")));
+        }
+        state.department = department;
+        state.departmentId = null;
+        List<String> reasons = new ArrayList<>();
+        for (HospitalProfile item : rows.stream().limit(3).toList()) {
+            DepartmentProfile departmentProfile = departmentCatalogTool
+                    .listDepartments(state.id, item.id()).stream()
+                    .filter(candidate -> candidate.name().equals(department))
+                    .findFirst().orElse(null);
+            String departmentStrength = departmentProfile == null
+                    ? "提供该科室的常规复诊服务"
+                    : "该科室主要覆盖" + joinOrDefault(departmentProfile.specialtyTags(), departmentProfile.followupScope());
+            reasons.add(item.name() + "：" + departmentStrength + "；适老服务有" +
+                    joinOrDefault(item.elderlyServices(), "人工服务"));
+        }
+        String summary = String.join("。", reasons);
+        List<QuickReply> choices = rows.stream().limit(3)
+                .map(item -> q("选择" + item.name(), "SET_HOSPITAL", item.id())).toList();
+        return respond(state, "根据“" + department + "”和模拟医院资料，我找到了以下选择。" + summary
+                + "。这是办理信息筛选，不是医疗诊断，请选择您原就诊医院或医生建议的医院。", choices);
+    }
+
+    private String hospitalSummary(HospitalProfile item) {
+        return item.name() + (item.level() == null ? "" : "（" + item.level() + "）") +
+                "，特色为" + joinOrDefault(item.specialtyTags(), "常规复诊服务") +
+                "，提供" + joinOrDefault(item.elderlyServices(), "人工服务");
+    }
+
+    private String joinOrDefault(List<String> values, String fallback) {
+        return values == null || values.isEmpty() ? fallback : String.join("、", values);
+    }
+
+    private String resumeHint(ConversationState state) {
+        return switch (state.stage) {
+            case ASK_HOSPITAL -> "您可以从中选择一家医院。";
+            case ASK_DEPARTMENT -> "您还需要选择复诊科室。";
+            case ASK_DATE -> "医院和科室已经保留，接下来仍需确认日期。";
+            default -> "原来的办理进度已经保留。";
+        };
     }
 
     private AgentTurnResponse respond(ConversationState state, String reply, List<QuickReply> quickReplies) {
@@ -567,8 +725,20 @@ public class FollowupAgentService {
     }
 
     private void applyFacts(ConversationState state, ExtractedFacts facts) {
-        if (facts.hospital() != null) state.hospital = facts.hospital();
-        if (facts.department() != null) state.department = facts.department();
+        if (facts.hospital() != null) catalog.hospital(facts.hospital()).ifPresent(item -> {
+            if (!item.id().equals(state.hospitalId)) {
+                state.departmentId = null;
+                state.department = null;
+            }
+            state.hospitalId = item.id();
+            state.hospital = item.name();
+        });
+        if (facts.department() != null && state.hospitalId != null) {
+            catalog.department(state.hospitalId, facts.department()).ifPresent(item -> {
+                state.departmentId = item.id();
+                state.department = item.name();
+            });
+        }
         if (facts.date() != null) state.date = facts.date();
         if (facts.acceptAlternative() != null) state.acceptAlternative = facts.acceptAlternative();
         if (facts.needCompanion() != null) state.needCompanion = facts.needCompanion();
@@ -576,6 +746,7 @@ public class FollowupAgentService {
         if (facts.notifyFamily() != null) state.notifyFamily = facts.notifyFamily();
         if (facts.transport() != null) state.transport = facts.transport();
         if (facts.timePreference() != null) state.timePreference = facts.timePreference();
+        if (facts.selectedTime() != null) state.requestedTime = facts.selectedTime();
     }
 
     private void resetAfterDate(ConversationState state) {
@@ -583,6 +754,7 @@ public class FollowupAgentService {
         state.selectedSlot = null;
         state.recommendedSlot = null;
         state.timePreference = null;
+        state.requestedTime = null;
         state.alternatives = List.of();
         state.travelPlan = null;
         state.materials = List.of();
@@ -590,12 +762,15 @@ public class FollowupAgentService {
     }
 
     private void resetAfterHospital(ConversationState state) {
+        state.hospitalId = null;
         state.hospital = null;
+        state.departmentId = null;
         state.department = null;
         state.date = null;
         state.selectedSlot = null;
         state.recommendedSlot = null;
         state.timePreference = null;
+        state.requestedTime = null;
         state.alternatives = List.of();
         state.travelPlan = null;
         state.materials = List.of();
@@ -607,6 +782,7 @@ public class FollowupAgentService {
         if (state != null) return state;
         state = conversations.find(id).orElseThrow(() ->
                 new IllegalArgumentException("会话不存在或已过期，请重新开始"));
+        normalizeCatalogSelections(state);
         sessions.put(id, state);
         return state;
     }
@@ -625,7 +801,9 @@ public class FollowupAgentService {
     }
 
     private String knownFacts(ConversationState state) {
-        return "医院=" + valueOrPending(state.hospital) +
+        return "用户=" + state.userId +
+                "；医院ID=" + valueOrPending(state.hospitalId) +
+                "；医院=" + valueOrPending(state.hospital) +
                 "；科室=" + valueOrPending(state.department) +
                 "；日期=" + (state.date == null ? "待确认" : state.date) +
                 "；接受附近日期=" + state.acceptAlternative +
@@ -636,6 +814,52 @@ public class FollowupAgentService {
                 "；时段偏好=" + valueOrPending(state.timePreference) +
                 "；数据库可用号源=" + state.alternatives.stream().map(this::slotLabel).toList() +
                 "；当前推荐号源=" + slotLabel(state.recommendedSlot);
+    }
+
+    private void chooseHospital(ConversationState state, String idOrName) {
+        CareCatalogRepository.Hospital hospital = catalog.hospital(idOrName)
+                .orElseThrow(() -> new IllegalArgumentException("没有找到这个模拟医院，请重新选择"));
+        String requestedDepartment = state.department;
+        state.hospitalId = hospital.id();
+        state.hospital = hospital.name();
+        state.departmentId = null;
+        state.department = null;
+        if (requestedDepartment != null) {
+            catalog.department(hospital.id(), requestedDepartment).ifPresent(item -> {
+                state.departmentId = item.id();
+                state.department = item.name();
+            });
+        }
+    }
+
+    private void chooseDepartment(ConversationState state, String idOrName) {
+        CareCatalogRepository.Department department = catalog.department(state.hospitalId, idOrName)
+                .orElseThrow(() -> new IllegalArgumentException("这家医院没有配置该科室，请重新选择"));
+        state.departmentId = department.id();
+        state.department = department.name();
+    }
+
+    private void loadPrimaryContact(ConversationState state) {
+        try {
+            state.contact = familyTool.findPrimaryContact(state.id, state.userId);
+        } catch (RuntimeException ignored) {
+            state.contact = null;
+        }
+    }
+
+    private void normalizeCatalogSelections(ConversationState state) {
+        if (state.hospitalId == null && state.hospital != null) {
+            catalog.hospital(state.hospital).ifPresent(item -> {
+                state.hospitalId = item.id();
+                state.hospital = item.name();
+            });
+        }
+        if (state.departmentId == null && state.department != null && state.hospitalId != null) {
+            catalog.department(state.hospitalId, state.department).ifPresent(item -> {
+                state.departmentId = item.id();
+                state.department = item.name();
+            });
+        }
     }
 
     private String valueOrPending(String value) {

@@ -1,8 +1,15 @@
+'use client';
+
 import { ChevronLeft, Headphones } from 'lucide-react';
 
-export function PageHeader({ title, subtitle, onBack }: { title: string; subtitle?: string; onBack?: () => void }) {
+export function PageHeader({ title, subtitle, onBack, onHelp }: {
+  title: string;
+  subtitle?: string;
+  onBack?: () => void;
+  onHelp?: () => void;
+}) {
   return (
-    <header className="flex min-h-[76px] items-center gap-3 border-b border-border/70 bg-card/70 px-4 py-3 backdrop-blur">
+    <header className="sticky top-0 z-50 flex min-h-[76px] items-center gap-3 border-b border-border/70 bg-card/95 px-4 py-3 shadow-sm backdrop-blur">
       {onBack && (
         <button
           type="button"
@@ -19,12 +26,12 @@ export function PageHeader({ title, subtitle, onBack }: { title: string; subtitl
       </div>
       <button
         type="button"
-        className="flex min-h-11 items-center gap-1 rounded-2xl px-3 text-[15px] font-medium text-primary active:bg-accent"
+        onClick={onHelp ?? (() => window.alert('这里是比赛演示的人工帮助入口，当前页面信息已经为您保留。'))}
+        className="flex min-h-12 items-center gap-2 rounded-2xl border-2 border-primary/60 bg-secondary px-4 text-[17px] font-bold text-primary shadow-sm active:bg-accent"
       >
-        <Headphones className="size-5" aria-hidden="true" />
+        <Headphones className="size-6" aria-hidden="true" />
         人工帮助
       </button>
     </header>
   );
 }
-

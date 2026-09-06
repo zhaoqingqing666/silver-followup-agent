@@ -22,13 +22,14 @@ public class MockTravelTool implements TravelTool {
     @Override
     public TravelPlan plan(String conversationId, String userId, String hospital,
                            LocalDateTime appointmentAt, String transport) {
-        String origin = single("SELECT home_address FROM users WHERE id=?", userId, "幸福小区（模拟）");
-        String destination = single("""
+        String origin = requiredSingle("SELECT home_address FROM users WHERE id=?", userId, "没有配置用户出发地址");
+        String destination = requiredSingle("""
                 SELECT address FROM hospitals
                 WHERE REPLACE(name,'（模拟）','')=?
-                """, cleanHospital(hospital), hospital + "（模拟地址）");
+                """, cleanHospital(hospital), "没有配置医院地址");
         Integer configured = duration(origin, destination, transport);
-        int duration = configured != null ? configured : fallbackDuration(transport);
+        if (configured == null) throw new IllegalStateException("没有配置该交通方式的模拟路线");
+        int duration = configured;
         LocalDateTime departure = appointmentAt.minusMinutes(duration + 20L);
         TravelPlan result = new TravelPlan(transport, duration, departure,
                 "从" + origin + "前往" + destination + "，预计" + duration +
@@ -48,14 +49,12 @@ public class MockTravelTool implements TravelTool {
         return rows.isEmpty() ? null : rows.get(0);
     }
 
-    private String single(String sql, String parameter, String fallback) {
+    private String requiredSingle(String sql, String parameter, String errorMessage) {
         List<String> rows = jdbc.query(sql, (rs, row) -> rs.getString(1), parameter);
-        return rows.isEmpty() ? fallback : rows.get(0);
-    }
-
-    private int fallbackDuration(String transport) {
-        return "步行".equals(transport) ? 70 : "公交".equals(transport) ? 50 :
-                "家属开车".equals(transport) ? 30 : 35;
+        if (rows.isEmpty() || rows.get(0) == null || rows.get(0).isBlank()) {
+            throw new IllegalStateException(errorMessage);
+        }
+        return rows.get(0);
     }
 
     private String cleanHospital(String hospital) {

@@ -33,7 +33,7 @@ class ConversationStore {
             jdbc.update("""
                     MERGE INTO conversation_sessions(id,user_id,stage,state_json,updated_at,last_response_json)
                     KEY(id) VALUES (?,?,?,?,?,?)
-                    """, state.id, "user-001", state.stage.name(), stateJson,
+                    """, state.id, state.userId, state.stage.name(), stateJson,
                     Timestamp.valueOf(LocalDateTime.now()), responseJson);
         } catch (Exception error) {
             throw new IllegalStateException("保存会话状态失败", error);
@@ -98,24 +98,29 @@ class ConversationStore {
     }
 
     private record Snapshot(
-            ConversationState.Stage stage, String hospital, String department, LocalDate date,
+            ConversationState.Stage stage, String userId, String hospitalId, String hospital,
+            String departmentId, String department, LocalDate date,
             Boolean acceptAlternative, Boolean needCompanion, Boolean needTravel, Boolean notifyFamily,
             String transport, Slot selectedSlot, Slot recommendedSlot, String timePreference,
+            java.time.LocalTime requestedTime,
             List<Slot> alternatives, TravelPlan travelPlan,
             Contact contact, List<String> materials, String pendingAction, String appointmentId
     ) {
         static Snapshot from(ConversationState state) {
-            return new Snapshot(state.stage, state.hospital, state.department, state.date,
+            return new Snapshot(state.stage, state.userId, state.hospitalId, state.hospital,
+                    state.departmentId, state.department, state.date,
                     state.acceptAlternative, state.needCompanion, state.needTravel, state.notifyFamily,
                     state.transport, state.selectedSlot, state.recommendedSlot, state.timePreference,
-                    state.alternatives, state.travelPlan,
+                    state.requestedTime, state.alternatives, state.travelPlan,
                     state.contact, state.materials, state.pendingAction, state.appointmentId);
         }
 
         ConversationState toState(String id) {
-            ConversationState state = new ConversationState(id);
+            ConversationState state = new ConversationState(id, userId == null ? "user-001" : userId);
             state.stage = stage;
+            state.hospitalId = hospitalId;
             state.hospital = hospital;
+            state.departmentId = departmentId;
             state.department = department;
             state.date = date;
             state.acceptAlternative = acceptAlternative;
@@ -126,6 +131,7 @@ class ConversationStore {
             state.selectedSlot = selectedSlot;
             state.recommendedSlot = recommendedSlot;
             state.timePreference = timePreference;
+            state.requestedTime = requestedTime;
             state.alternatives = alternatives == null ? List.of() : alternatives;
             state.travelPlan = travelPlan;
             state.contact = contact;

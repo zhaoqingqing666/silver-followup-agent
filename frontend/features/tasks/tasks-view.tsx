@@ -26,7 +26,7 @@ export function TasksView({ onNavigate }: { onNavigate: (tab: TabId) => void }) 
         id: 'material-' + (preferred?.appointmentId ?? 'none') + '-' + index,
         label,
         prepared: false,
-        required: index < 4,
+        required: preferred?.requiredMaterials.includes(label) ?? false,
       })));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '无法读取复诊事项');
@@ -46,7 +46,7 @@ export function TasksView({ onNavigate }: { onNavigate: (tab: TabId) => void }) 
   const selectAppointment = (row: AppointmentSummary) => {
     setSelectedId(row.appointmentId);
     setMaterials(row.materials.map((label, index) => ({
-      id: 'material-' + row.appointmentId + '-' + index, label, prepared: false, required: index < 4,
+      id: 'material-' + row.appointmentId + '-' + index, label, prepared: false, required: row.requiredMaterials.includes(label),
     })));
   };
 

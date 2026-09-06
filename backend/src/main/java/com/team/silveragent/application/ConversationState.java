@@ -5,6 +5,7 @@ import com.team.silveragent.domain.model.ToolModels.Slot;
 import com.team.silveragent.domain.model.ToolModels.TravelPlan;
 
 import java.time.LocalDate;
+import java.time.LocalTime;
 import java.util.List;
 
 final class ConversationState {
@@ -16,8 +17,11 @@ final class ConversationState {
     }
 
     final String id;
+    String userId;
     Stage stage = Stage.ASK_HOSPITAL;
+    String hospitalId;
     String hospital;
+    String departmentId;
     String department;
     LocalDate date;
     Boolean acceptAlternative;
@@ -28,6 +32,7 @@ final class ConversationState {
     Slot selectedSlot;
     Slot recommendedSlot;
     String timePreference;
+    LocalTime requestedTime;
     List<Slot> alternatives = List.of();
     TravelPlan travelPlan;
     Contact contact;
@@ -35,5 +40,10 @@ final class ConversationState {
     String pendingAction = "CREATE";
     String appointmentId;
 
-    ConversationState(String id) { this.id = id; }
+    ConversationState(String id) { this(id, "user-001"); }
+
+    ConversationState(String id, String userId) {
+        this.id = id;
+        this.userId = userId;
+    }
 }

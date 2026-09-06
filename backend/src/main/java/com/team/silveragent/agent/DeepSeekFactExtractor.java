@@ -96,12 +96,15 @@ public class DeepSeekFactExtractor implements FactExtractor {
                 结合最近对话理解本轮用户真正意图，不要重复询问已知信息。
                 JSON字段：
                 intent：CREATE_FOLLOWUP、PROVIDE_INFORMATION、CHANGE_HOSPITAL、CHANGE_DATE、
+                QUERY_HOSPITALS、QUERY_HOSPITAL_INFO、QUERY_DEPARTMENTS、REQUEST_RECOMMENDATION、
                 ASK_MATERIALS、CANCEL_TASK、CANCEL_APPOINTMENT、MEDICAL_ADVICE、EMERGENCY、UNKNOWN；
                 hospital、department、date、acceptAlternative、needCompanion、needTravel、
                 notifyFamily、transport、selectedTime、timePreference、acceptRecommendedTime、acknowledgement。
                 date必须为YYYY-MM-DD；用户没说年份时结合当前日期推断最近的未来日期。
                 selectedTime为HH:mm。timePreference只能是MORNING、AFTERNOON或null。
                 当流程为CONFIRM_SLOT，用户同意或拒绝推荐时间时设置acceptRecommendedTime。
+                用户询问有哪些医院时使用QUERY_HOSPITALS；询问某医院资料时使用QUERY_HOSPITAL_INFO；
+                询问一家医院有哪些科室时使用QUERY_DEPARTMENTS；要求推荐医院时使用REQUEST_RECOMMENDATION。
                 可用号源只能从已知业务信息中理解，绝不能自行编造。未知字段填null。布尔字段只能是true、false或null。
                 acknowledgement只简短确认你理解到的内容，不能声称已查询、已预约、已提醒或已通知，
                 不能诊断、解读检查、推荐药物或调整剂量。

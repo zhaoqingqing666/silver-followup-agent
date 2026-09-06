@@ -2,23 +2,25 @@
 
 import { useEffect, useState } from 'react';
 import { CalendarCheck2, ChevronRight, ClipboardCheck, Headphones, HeartHandshake, Mic, Route } from 'lucide-react';
-import { getAppointments } from '@/lib/appointment-api';
+import { getAppointments, getUserProfile } from '@/lib/appointment-api';
 import type { AppointmentSummary, TabId } from '@/types/domain';
 
 interface HomeViewProps { onNavigate: (tab: TabId) => void }
 
 export function HomeView({ onNavigate }: HomeViewProps) {
   const [appointment, setAppointment] = useState<AppointmentSummary | null>(null);
+  const [userName, setUserName] = useState('您好');
 
   useEffect(() => {
     void getAppointments().then(rows => setAppointment(rows.find(row => row.status === 'CONFIRMED') ?? null)).catch(() => setAppointment(null));
+    void getUserProfile().then(user => setUserName(user.name)).catch(() => setUserName('您好'));
   }, []);
 
   return (
     <main className="space-y-6 px-5 pb-8 pt-6">
       <header className="flex items-center justify-between">
-        <div><p className="text-base text-muted-foreground">下午好</p><h1 className="text-2xl font-bold tracking-tight">王阿姨</h1></div>
-        <button aria-label="咨询人工" className="flex min-h-12 items-center gap-2 rounded-2xl border bg-card px-3 font-semibold text-primary shadow-sm"><Headphones className="size-5" />人工帮助</button>
+        <div><p className="text-base text-muted-foreground">下午好</p><h1 className="text-2xl font-bold tracking-tight">{userName}</h1></div>
+        <button onClick={() => window.alert('这里是比赛演示的人工帮助入口，当前页面信息已经为您保留。')} aria-label="咨询人工" className="flex min-h-12 items-center gap-2 rounded-2xl border-2 border-primary/60 bg-secondary px-4 text-[17px] font-bold text-primary shadow-sm"><Headphones className="size-6" />人工帮助</button>
       </header>
 
       <section className="overflow-hidden rounded-3xl bg-gradient-to-br from-[#c86436] to-[#de8b55] p-5 text-white shadow-lg shadow-orange-900/10">

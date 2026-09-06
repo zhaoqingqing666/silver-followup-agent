@@ -1,4 +1,5 @@
 import type { AgentTurnResponse, ConversationHistoryResponse } from '@/types/domain';
+import { DEMO_USER_ID } from '@/lib/app-config';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:8080';
 
@@ -15,7 +16,7 @@ async function request(path: string, init?: RequestInit): Promise<AgentTurnRespo
 }
 
 export function startConversation() {
-  return request('/api/agent/conversations', { method: 'POST' });
+  return request('/api/agent/conversations?userId=' + encodeURIComponent(DEMO_USER_ID), { method: 'POST' });
 }
 
 export function sendAgentMessage(conversationId: string, message: string) {
@@ -25,10 +26,10 @@ export function sendAgentMessage(conversationId: string, message: string) {
   });
 }
 
-export function sendAgentAction(conversationId: string, action: string, value = '') {
+export function sendAgentAction(conversationId: string, action: string, value = '', label = '') {
   return request('/api/agent/actions', {
     method: 'POST',
-    body: JSON.stringify({ conversationId, action, value }),
+    body: JSON.stringify({ conversationId, action, value, label }),
   });
 }
 

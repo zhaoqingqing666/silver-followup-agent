@@ -23,7 +23,7 @@ public class AppointmentRecordStore {
     }
 
     public List<AppointmentView> allFor(String userId) {
-        return jdbc.query("""
+        List<AppointmentView> rows = jdbc.query("""
                 SELECT a.id,s.hospital_name,s.department,s.appointment_date,s.appointment_time,
                        a.departure_time,a.transport,a.reminder_status,a.family_status,a.materials,
                        a.status,a.created_at
@@ -35,8 +35,20 @@ public class AppointmentRecordStore {
                 rs.getDate(4).toLocalDate(), rs.getTime(5).toLocalTime(),
                 rs.getTimestamp(6) == null ? null : rs.getTimestamp(6).toLocalDateTime(),
                 rs.getString(7), rs.getString(8), rs.getString(9),
-                splitMaterials(rs.getString(10)), rs.getString(11),
+                splitMaterials(rs.getString(10)), List.of(), rs.getString(11),
                 rs.getTimestamp(12).toLocalDateTime()), userId);
+        return rows.stream().map(row -> new AppointmentView(
+                row.appointmentId(), row.hospital(), row.department(), row.date(), row.time(),
+                row.departureAt(), row.transport(), row.reminderStatus(), row.familyStatus(),
+                row.materials(), requiredMaterials(row.department()), row.status(), row.createdAt())).toList();
+    }
+
+    private List<String> requiredMaterials(String department) {
+        return jdbc.query("""
+                SELECT material_name FROM material_templates
+                WHERE (department='通用' OR department=?) AND required=TRUE
+                ORDER BY sort_order
+                """, (rs, row) -> rs.getString(1), department);
     }
 
     private List<String> splitMaterials(String value) {
@@ -48,6 +60,6 @@ public class AppointmentRecordStore {
             java.time.LocalDate date, java.time.LocalTime time,
             LocalDateTime departureAt, String transport,
             String reminderStatus, String familyStatus, List<String> materials,
-            String status, LocalDateTime createdAt
+            List<String> requiredMaterials, String status, LocalDateTime createdAt
     ) { }
 }

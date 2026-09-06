@@ -4,15 +4,17 @@
 MERGE INTO users KEY(id) VALUES
 ('user-001','王阿姨','幸福小区（模拟）','家属开车');
 
-MERGE INTO hospitals KEY(id) VALUES
-('h001','市第一医院（模拟）','健康路1号（模拟）'),
-('h002','市人民医院（模拟）','人民路88号（模拟）');
+MERGE INTO hospitals (id,name,address,hospital_level,description,specialty_tags,elderly_services,enabled) KEY(id) VALUES
+('h001','市第一医院（模拟）','健康路1号（模拟）','三级甲等','以心血管、神经系统疾病和老年慢病复诊服务为特色。','心血管,神经内科,老年慢病管理','老年服务窗口,轮椅通道,志愿者引导',TRUE),
+('h002','市人民医院（模拟）','人民路88号（模拟）','三级甲等','提供内分泌、骨科和常见慢性病复诊服务。','内分泌,骨科,慢性病随访','无障碍电梯,人工挂号窗口,家属等候区',TRUE);
 
-MERGE INTO departments KEY(id) VALUES
-('d001','h001','心内科'),
-('d002','h001','神经内科'),
-('d003','h002','内分泌科'),
-('d004','h002','骨科');
+MERGE INTO departments (id,hospital_id,name,description,specialty_tags,followup_scope,location,enabled) KEY(id) VALUES
+('d001','h001','心内科','提供心血管慢性疾病复诊和随访服务。','高血压,冠心病,心律失常','已由医生安排的心血管相关复诊','门诊楼三层',TRUE),
+('d002','h001','神经内科','提供神经系统疾病复诊和康复随访服务。','脑血管病,头痛,神经康复','已由医生安排的神经内科复诊','门诊楼四层',TRUE),
+('d003','h002','内分泌科','提供内分泌慢性疾病复诊和指标随访服务。','糖尿病,甲状腺疾病,代谢管理','已由医生安排的内分泌科复诊','门诊楼二层',TRUE),
+('d004','h002','骨科','提供骨科术后和慢性骨关节疾病复诊服务。','关节,脊柱,术后复查','已由医生安排的骨科复诊','门诊楼五层',TRUE),
+('d005','h001','内分泌科','提供糖尿病和甲状腺疾病的常规复诊服务。','糖尿病,甲状腺疾病','已由医生安排的内分泌科复诊','门诊楼三层',TRUE),
+('d006','h002','心内科','提供常见心血管慢性疾病的复诊随访服务。','高血压,冠心病','已由医生安排的心内科复诊','门诊楼四层',TRUE);
 
 INSERT INTO appointment_slots(id,hospital_id,hospital_name,department,appointment_date,appointment_time,available)
 SELECT 'slot-0918-0900','h001','市第一医院（模拟）','心内科','2026-09-18','09:00:00',TRUE

@@ -20,6 +20,7 @@ export interface AppointmentSummary {
   reminderStatus: string | null;
   familyStatus: string | null;
   materials: string[];
+  requiredMaterials: string[];
   status: string;
   createdAt: string;
 }
@@ -102,4 +103,11 @@ export interface ConversationHistoryResponse {
     createdAt: string;
   }>;
   current: AgentTurnResponse;
+}
+
+export interface UserProfile {
+  id: string;
+  name: string;
+  homeAddress: string | null;
+  preferredTransport: string | null;
 }

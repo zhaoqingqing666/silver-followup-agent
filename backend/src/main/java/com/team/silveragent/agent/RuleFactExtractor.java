@@ -1,5 +1,6 @@
 package com.team.silveragent.agent;
 
+import com.team.silveragent.application.CareCatalogRepository;
 import org.springframework.stereotype.Component;
 
 import java.time.DateTimeException;
@@ -11,16 +12,19 @@ import java.util.regex.Pattern;
 
 @Component
 public class RuleFactExtractor implements FactExtractor {
-    private static final List<String> HOSPITALS = List.of("市第一医院", "市人民医院", "中心医院");
-    private static final List<String> DEPARTMENTS = List.of("心内科", "内分泌科", "神经内科", "骨科", "眼科");
+    private final CareCatalogRepository catalog;
     private static final Pattern CN_DATE = Pattern.compile("(\\d{1,2})月(\\d{1,2})[日号]?");
     private static final Pattern ISO_DATE = Pattern.compile("(20\\d{2})-(\\d{1,2})-(\\d{1,2})");
     private static final Pattern TIME = Pattern.compile("(\\d{1,2})[:：点时](\\d{1,2})?");
 
+    public RuleFactExtractor(CareCatalogRepository catalog) {
+        this.catalog = catalog;
+    }
+
     @Override
     public ExtractedFacts extract(String message, AgentContext context) {
-        String hospital = HOSPITALS.stream().filter(message::contains).findFirst().orElse(null);
-        String department = DEPARTMENTS.stream().filter(message::contains).findFirst().orElse(null);
+        String hospital = catalog.hospitalNames().stream().filter(message::contains).findFirst().orElse(null);
+        String department = catalog.departmentNames().stream().filter(message::contains).findFirst().orElse(null);
         String intent = detectIntent(message);
         Boolean stageAnswer = genericYesNo(message);
         return new ExtractedFacts(intent, hospital, department, parseDate(message, context.currentDate()),
@@ -40,6 +44,10 @@ public class RuleFactExtractor implements FactExtractor {
         if (containsAny(value, "怎么用药", "药量", "诊断", "检查结果", "是不是得了")) return "MEDICAL_ADVICE";
         if (containsAny(value, "取消整个", "不办了", "停止办理")) return "CANCEL_TASK";
         if (containsAny(value, "取消预约", "取消这次")) return "CANCEL_APPOINTMENT";
+        if (containsAny(value, "有哪些科室", "有什么科室", "开设哪些科室", "科室列表")) return "QUERY_DEPARTMENTS";
+        if (containsAny(value, "有哪些医院", "有什么医院", "医院列表")) return "QUERY_HOSPITALS";
+        if (containsAny(value, "医院怎么样", "医院介绍", "医院资料", "了解医院")) return "QUERY_HOSPITAL_INFO";
+        if (containsAny(value, "推荐", "哪家医院好", "怎么选医院", "选哪家医院")) return "REQUEST_RECOMMENDATION";
         if (containsAny(value, "换医院", "修改医院")) return "CHANGE_HOSPITAL";
         if (containsAny(value, "换日期", "改日期", "改成", "不行了")) return "CHANGE_DATE";
         if (containsAny(value, "材料", "带什么", "准备什么")) return "ASK_MATERIALS";

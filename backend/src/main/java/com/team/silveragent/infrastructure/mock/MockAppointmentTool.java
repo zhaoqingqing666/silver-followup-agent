@@ -25,30 +25,30 @@ public class MockAppointmentTool implements AppointmentTool {
     }
 
     @Override
-    public List<Slot> queryAvailableSlots(String conversationId, String hospital, String department, LocalDate date) {
-        Map<String, Object> input = Map.of("hospital", hospital, "department", department, "date", date);
+    public List<Slot> queryAvailableSlots(String conversationId, String hospitalId, String department, LocalDate date) {
+        Map<String, Object> input = Map.of("hospitalId", hospitalId, "department", department, "date", date);
         List<Slot> result = jdbc.query("""
                 SELECT id,hospital_id,hospital_name,department,appointment_date,appointment_time
                 FROM appointment_slots
-                WHERE REPLACE(hospital_name,'（模拟）','')=? AND department=?
+                WHERE hospital_id=? AND department=?
                   AND appointment_date=? AND available=TRUE
                 ORDER BY appointment_time
-                """, slotMapper(), cleanHospital(hospital), department, Date.valueOf(date));
+                """, slotMapper(), hospitalId, department, Date.valueOf(date));
         traces.record(conversationId, "appointment.querySlots", input, result, true);
         return result;
     }
 
     @Override
-    public List<Slot> queryAlternatives(String conversationId, String hospital, String department, LocalDate date) {
-        Map<String, Object> input = Map.of("hospital", hospital, "department", department,
+    public List<Slot> queryAlternatives(String conversationId, String hospitalId, String department, LocalDate date) {
+        Map<String, Object> input = Map.of("hospitalId", hospitalId, "department", department,
                 "from", date.minusDays(3), "to", date.plusDays(3));
         List<Slot> result = jdbc.query("""
                 SELECT id,hospital_id,hospital_name,department,appointment_date,appointment_time
                 FROM appointment_slots
-                WHERE REPLACE(hospital_name,'（模拟）','')=? AND department=?
+                WHERE hospital_id=? AND department=?
                   AND appointment_date BETWEEN ? AND ? AND available=TRUE
                 ORDER BY appointment_date,appointment_time
-                """, slotMapper(), cleanHospital(hospital), department,
+                """, slotMapper(), hospitalId, department,
                 Date.valueOf(date.minusDays(3)), Date.valueOf(date.plusDays(3)));
         traces.record(conversationId, "appointment.queryAlternatives", input, result, true);
         return result;
@@ -89,7 +89,4 @@ public class MockAppointmentTool implements AppointmentTool {
                 rs.getString(4), rs.getDate(5).toLocalDate(), rs.getTime(6).toLocalTime());
     }
 
-    private String cleanHospital(String hospital) {
-        return hospital.replace("（模拟）", "").replace("(模拟)", "");
-    }
 }
