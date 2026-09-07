@@ -84,6 +84,7 @@ public class CareCatalogRepository {
         return jdbc.query("""
                 SELECT DISTINCT appointment_date FROM appointment_slots
                 WHERE hospital_id=? AND department=? AND appointment_date>=? AND available=TRUE
+                  AND (appointment_date > CURRENT_DATE OR appointment_time > CURRENT_TIME)
                 ORDER BY appointment_date LIMIT ?
                 """, (rs, row) -> rs.getDate(1).toLocalDate(),
                 hospitalId, department, java.sql.Date.valueOf(from), limit);

@@ -6,6 +6,7 @@ import java.util.List;
 
 public interface AppointmentTool {
     List<Slot> queryAvailableSlots(String conversationId, String hospitalId, String department, LocalDate date);
+    List<Slot> queryUpcomingSlots(String conversationId, String hospitalId, String department, LocalDate from, LocalDate to);
     List<Slot> queryAlternatives(String conversationId, String hospitalId, String department, LocalDate date);
     String submit(String conversationId, String slotId, String userId);
     String cancel(String conversationId, String appointmentId, String userId);

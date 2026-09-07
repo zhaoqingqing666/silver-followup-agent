@@ -6,6 +6,8 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 
+import java.time.LocalDate;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 @SpringBootTest(properties = "spring.datasource.url=jdbc:h2:mem:silver-agent-test;DB_CLOSE_DELAY=-1")
@@ -16,13 +18,19 @@ class SilverAgentApplicationTests {
     void normalFlowRequiresConfirmationAndCreatesResult() {
         AgentTurnResponse turn = service.start();
         String id = turn.conversationId();
-        service.chat(id, "市第一医院");
-        service.chat(id, "心内科");
-        service.chat(id, "9月18日");
-        service.chat(id, "可以换日期");
-        service.chat(id, "需要陪同");
-        service.chat(id, "需要出行提醒");
-        turn = service.chat(id, "通知女儿");
+        LocalDate date = nextWeekday();
+        service.act(id, "SET_HOSPITAL", "h001", "市第一医院");
+        service.act(id, "SET_DEPARTMENT", "d001", "心内科");
+        turn = service.act(id, "SET_DATE", date.toString(), date.toString());
+        turn = service.act(id, "SET_PERIOD", "MORNING", "上午");
+        String slotId = turn.quickReplies().get(0).value();
+        service.act(id, "SELECT_SLOT", slotId, "这个时间可以");
+        service.act(id, "SET_ALTERNATIVE", "true", "可以换日期");
+        service.act(id, "SET_COMPANION", "true", "需要陪同");
+        service.act(id, "SET_TRAVEL", "true", "需要出行提醒");
+        service.act(id, "SET_TRANSPORT", "家属开车", "家属开车");
+        service.act(id, "SET_NOTIFY", "true", "通知女儿");
+        turn = service.act(id, "START_PLAN", "", "开始办理");
 
         assertThat(turn.stage()).isEqualTo("AWAITING_CONFIRMATION");
         assertThat(turn.confirmation()).isNotNull();
@@ -40,13 +48,10 @@ class SilverAgentApplicationTests {
     void noSlotReturnsAlternativeInsteadOfEndingConversation() {
         AgentTurnResponse turn = service.start();
         String id = turn.conversationId();
-        service.chat(id, "市第一医院");
-        service.chat(id, "心内科");
-        service.chat(id, "9月19日");
-        service.chat(id, "可以换日期");
-        service.chat(id, "不需要陪同");
-        service.chat(id, "不需要出行提醒");
-        turn = service.chat(id, "不用通知");
+        LocalDate weekend = nextWeekendWithoutSeed();
+        service.act(id, "SET_HOSPITAL", "h001", "市第一医院");
+        service.act(id, "SET_DEPARTMENT", "d001", "心内科");
+        turn = service.act(id, "SET_DATE", weekend.toString(), weekend.toString());
 
         assertThat(turn.stage()).isEqualTo("NO_SLOT");
         assertThat(turn.quickReplies()).isNotEmpty();
@@ -59,5 +64,33 @@ class SilverAgentApplicationTests {
         AgentTurnResponse refused = service.chat(turn.conversationId(), "检查结果是不是说明我得病了");
         assertThat(refused.reply()).contains("不能诊断");
         assertThat(refused.toolTraces()).isEmpty();
+    }
+
+    @Test
+    void sideQueryCanReturnToInterruptedBookingFlow() {
+        AgentTurnResponse turn = service.start();
+        String id = turn.conversationId();
+        service.act(id, "SET_HOSPITAL", "h002", "市人民医院");
+
+        AgentTurnResponse queried = service.chat(id, "我的复诊时间是什么时候");
+        assertThat(queried.quickReplies()).extracting(AgentTurnResponse.QuickReply::action)
+                .contains("RESUME_INTERRUPTED");
+
+        AgentTurnResponse resumed = service.act(id, "RESUME_INTERRUPTED", "", "继续刚才办理");
+        assertThat(resumed.stage()).isEqualTo("ASK_DEPARTMENT");
+        assertThat(resumed.reply()).contains("科室");
+    }
+
+    private LocalDate nextWeekday() {
+        LocalDate date = LocalDate.now().plusDays(1);
+        while (date.getDayOfWeek().getValue() >= 6) date = date.plusDays(1);
+        return date;
+    }
+
+    private LocalDate nextWeekendWithoutSeed() {
+        LocalDate date = LocalDate.now().plusDays(1);
+        while (date.getDayOfWeek().getValue() < 6) date = date.plusDays(1);
+        if (date.equals(LocalDate.of(2026, 9, 19))) date = date.plusDays(1);
+        return date;
     }
 }

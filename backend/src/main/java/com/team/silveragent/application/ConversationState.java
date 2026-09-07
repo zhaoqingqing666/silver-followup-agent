@@ -39,6 +39,12 @@ final class ConversationState {
     List<String> materials = List.of();
     String pendingAction = "CREATE";
     String appointmentId;
+    String pendingAppointmentId;
+    Stage interruptedStage;
+    String interruptedPendingAction;
+    String interruptedPendingAppointmentId;
+    String sideTask;
+    String returnPolicy;
 
     ConversationState(String id) { this(id, "user-001"); }
 

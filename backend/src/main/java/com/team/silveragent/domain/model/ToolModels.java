@@ -20,4 +20,13 @@ public final class ToolModels {
     public record DepartmentProfile(String id, String hospitalId, String name,
                                     String description, List<String> specialtyTags,
                                     String followupScope, String location) { }
+    public record AppointmentMaterial(String id, String appointmentId, String materialCode,
+                                      String materialName, boolean required, String status,
+                                      String confirmSource, String photoUrl,
+                                      LocalDateTime updatedAt) { }
+    public record AppointmentSummary(String appointmentId, String hospital, String department,
+                                     LocalDate date, LocalTime time, String status,
+                                     LocalDateTime departureAt, String transport,
+                                     String reminderStatus, String familyStatus,
+                                     List<String> materials) { }
 }

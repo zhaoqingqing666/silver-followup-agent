@@ -26,7 +26,12 @@ public class ToolTraceStore {
     }
 
     public List<ToolTrace> findByConversation(String conversationId) {
-        return jdbc.query("SELECT tool_name,request_json,response_json,success FROM tool_call_logs WHERE conversation_id=? ORDER BY id",
+        return jdbc.query("""
+                SELECT tool_name,request_json,response_json,success FROM (
+                  SELECT id,tool_name,request_json,response_json,success
+                  FROM tool_call_logs WHERE conversation_id=? ORDER BY id DESC LIMIT 12
+                ) recent ORDER BY id
+                """,
                 (rs, row) -> new ToolTrace(rs.getString(1), rs.getString(2), rs.getString(3), rs.getBoolean(4)), conversationId);
     }
 

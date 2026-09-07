@@ -25,6 +25,8 @@ flowchart LR
 
 `FollowUpOrchestrator` 是协调者，不负责实现所有细节。它读取当前状态，调用恰当模块，再组合统一响应。
 
+当前代码中的实际对应关系是：`application/AgentOrchestrator.java` 负责中控路由，`application/FollowupAgentService.java` 负责编排和确认门禁，`agent/DeepSeekFactExtractor.java` 负责自然语言理解，`domain/tool/` 定义工具边界，`infrastructure/mock/` 提供 H2 模拟实现。
+
 ## 二、后端 IDEA 分包
 
 ```text
@@ -183,7 +185,7 @@ frontend/
 - IDEA：创建和运行 `backend`。
 - Spring Boot：提供 Java Web API 和模块容器。
 - Spring AI：后期接入大模型、结构化输出和 Tool Calling。
-- Vue：实现适老化页面。
+- React + TypeScript：实现适老化移动端页面。
 - GitHub：管理整个根目录。
 - 本地 JSON 或内存仓库：第一版模拟数据。
 

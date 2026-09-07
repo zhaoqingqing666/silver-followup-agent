@@ -77,6 +77,27 @@ CREATE TABLE IF NOT EXISTS material_templates (
   sort_order INT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS appointment_materials (
+  id VARCHAR(50) PRIMARY KEY,
+  appointment_id VARCHAR(50) NOT NULL,
+  material_code VARCHAR(50) NOT NULL,
+  material_name VARCHAR(120) NOT NULL,
+  required BOOLEAN NOT NULL,
+  status VARCHAR(30) NOT NULL,
+  confirm_source VARCHAR(30),
+  photo_url VARCHAR(500),
+  updated_at TIMESTAMP NOT NULL,
+  UNIQUE (appointment_id, material_code)
+);
+
+CREATE TABLE IF NOT EXISTS user_preferences (
+  user_id VARCHAR(40) PRIMARY KEY,
+  auto_speak_enabled BOOLEAN NOT NULL,
+  speech_rate DOUBLE PRECISION NOT NULL,
+  speech_volume DOUBLE PRECISION NOT NULL,
+  updated_at TIMESTAMP NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS travel_routes (
   id VARCHAR(50) PRIMARY KEY,
   origin VARCHAR(200) NOT NULL,

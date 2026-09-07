@@ -1,5 +1,6 @@
 import { CalendarCheck2, Check, ClipboardList, Clock3, MapPin, UsersRound } from 'lucide-react';
 import type { AgentConfirmationCard, AgentPlanCard, AgentResultCard } from '@/types/domain';
+import { MaterialChecklist } from '@/features/materials/material-checklist';
 
 export function PlanCard({ plan }: { plan: AgentPlanCard }) {
   return <section className="rounded-3xl border border-[#e8c7a4] bg-[#fff8ed] p-5 shadow-sm">
@@ -46,8 +47,8 @@ export function ResultCardView({ result }: { result: AgentResultCard }) {
       <p className="flex gap-3"><CalendarCheck2 className="mt-1 size-5 shrink-0 text-green-800" /><span><strong>{result.date} {result.time}</strong><br />{result.hospital} · {result.department}</span></p>
       <p className="flex gap-3"><Clock3 className="mt-1 size-5 shrink-0 text-green-800" /><span>建议出发：<strong>{result.departureTime}</strong><br />{result.reminderStatus}</span></p>
       <p className="flex gap-3"><UsersRound className="mt-1 size-5 shrink-0 text-green-800" /><span>{result.familyStatus}</span></p>
-      <div className="flex gap-3"><ClipboardList className="mt-1 size-5 shrink-0 text-green-800" /><div><strong>携带材料</strong><p>{result.materials.join('、')}</p></div></div>
       <p className="flex gap-3 text-sm text-muted-foreground"><MapPin className="mt-1 size-4 shrink-0" />模拟预约编号：{result.appointmentId}</p>
     </div>
+    <MaterialChecklist appointmentId={result.appointmentId} compact />
   </section>;
 }
