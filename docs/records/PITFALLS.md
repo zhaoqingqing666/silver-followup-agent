@@ -10,6 +10,27 @@
 
 只记录能够帮助下一个人复现和解决的问题，不写“今天很累”“代码有问题”之类无法行动的内容。
 
+## 2026-09-07 用户资料与家属联系人展示
+
+- 现象：设置页曾写死“张阿姨 / 女儿 / 138****1234”，而 H2 中的演示用户实为“王阿姨”，家属为“小丽（女儿）”；联系人电话也并非真实可读号。
+- 根因：早期实现把用户资料散落在页面，违背“业务数据以 H2 为唯一来源”（DECISIONS 2026-09-06）。
+- 处理：`GET /api/users/{userId}` 返回体新增 `contacts`（脱敏电话），设置页改为读取后端；不在页面写死用户或家属。
+- 复现提醒：任何页面出现用户名、家属、医院、号源、地址、材料等展示文字，都应来自 H2，不要写死在组件里。
+
+## 2026-09-07 Docker 虚拟磁盘损坏污染依赖卷
+
+- 现象：Dev Containers 无法启动开发容器，报 `hosts: input/output error`；`docker system df` 连镜像列表都读不出，同样 I/O error。容器内前端依赖卷 `frontend/node_modules` 出现 7452 个 0 字节文件（含 96 个 package.json），`npm run build` 报 `Invalid package config @jridgewell/sourcemap-codec`。
+- 根因：Docker Desktop（WSL2）底层虚拟磁盘在异常关机/升级后损坏，containerd 元数据与依赖卷文件被截断成空文件。docker-desktop 发行版内 `/var/lib/docker`、`/var/lib/desktop-containerd` 均不存在，属数据盘未正确挂载。
+- 解决：① `docker system df` 先排除空间不足；② 重启 Docker Desktop / `wsl --shutdown` 后数据盘恢复；③ 依赖卷内损坏文件无法逐个修，清空 `node_modules` 内容（挂载点不能 rm 整目录）后 `npm ci` 重建，0 漏洞。
+- 无效尝试：`docker rm` 损坏容器在磁盘损坏期间会二次 I/O 失败，需先重启 Docker 再删。
+- 是否需要修改文档/测试：`PROGRESS.md` 需在容器验收后把“待验收”改为通过。
+
+## 2026-09-07 默认主联系人加载为死代码
+
+- 现象：`FollowupAgentService.loadPrimaryContact`（会把一个主联系人放入 state）已定义但**从未被调用**，属死代码。
+- 结论：当前不存在“默认联系人被当作已确认对象”的路径——`SET_NOTIFY=false` 清空 contact，`SET_CONTACT` 要求从候选人显式选择，`ready()` 也要求 `notifyFamily && contact != null`。16 项回归测试锁定该行为。
+- 留意点：容器内开启模型联调（`agent.llm.enabled=true`）时，若模型自由语言路径能影响 notify/contact 字段，仍需验证不会把主联系人误读为用户指定。未来可顺手删除该死代码；删除后不影响任何现有测试。
+
 ## 记录模板
 
 ### PIT-XXX 简短标题

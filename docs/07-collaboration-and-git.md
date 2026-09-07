@@ -1,5 +1,9 @@
 # 三人协作与Git规则
 
+> 开发环境：团队统一用 **VS Code 开发容器**（`.devcontainer/`），或一键部署用
+> **docker compose**（根目录 `compose.yml`）。JDK/Node/依赖都固定在容器镜像里，
+> 先读根目录 `README.md` 与 `README.devcontainer.md`，保证三台电脑启动方式一致。
+
 ## 一、模块负责人
 
 | 角色 | 主要目录 | 主要职责 |

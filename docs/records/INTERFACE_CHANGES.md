@@ -2,6 +2,21 @@
 
 任何前后端共享字段、接口路径、枚举或日期格式变化都记录在这里。
 
+## 2026-09-07 用户资料返回家属联系人
+
+- `GET /api/users/{userId}` 返回体新增可选字段 `contacts`（数组，含 id/name/relationship/maskedPhone）。
+- 兼容性：追加可选字段，不破坏旧客户端；未配置联系人的用户返回空数组。
+- 后端只返回脱敏电话，不含明文；`maskedPhone` 统一为 `138****1234` 样式。
+- 前端 `UserProfile` 类型增加 `contacts?: FamilyContact[]`；设置页改从此接口读取用户与家属信息。
+
+## 2026-09-07 确认凭据与失败恢复
+
+- `/api/agent/confirmations` 必须传 `confirmationId`，来自当前确认卡；返回修改也需要凭据。属于破坏兼容变更，前后端须同步更新。
+- 新增 `EMERGENCY_PAUSED`、`PARTIAL`、`TOOL_ERROR` 阶段，以及联系人选择、偏好修改、已预约修改和补办操作。
+- `plan.taskStatuses` 与七项任务对应；`PARTIAL` 的结果卡仅表示预约已保留，并非全部成功。
+- 对话卡片日期现在带年份。数据库预约接口日期仍使用 ISO 格式。
+- 容器内联调和构建待完成。
+
 ## API-CHANGE-001 建立对话式智能体接口
 
 - 日期：2026-09-03

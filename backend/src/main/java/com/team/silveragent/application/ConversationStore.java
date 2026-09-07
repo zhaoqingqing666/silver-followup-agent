@@ -107,7 +107,9 @@ class ConversationStore {
             Contact contact, List<String> materials, String pendingAction, String appointmentId,
             String pendingAppointmentId, ConversationState.Stage interruptedStage,
             String interruptedPendingAction, String interruptedPendingAppointmentId,
-            String sideTask, String returnPolicy
+            String sideTask, String returnPolicy, String confirmationId, String originalAppointmentId,
+            boolean materialReminderDone, boolean departureReminderDone,
+            boolean notificationDone, boolean scheduleChecked
     ) {
         static Snapshot from(ConversationState state) {
             return new Snapshot(state.stage, state.userId, state.hospitalId, state.hospital,
@@ -118,7 +120,9 @@ class ConversationStore {
                     state.contact, state.materials, state.pendingAction, state.appointmentId,
                     state.pendingAppointmentId, state.interruptedStage,
                     state.interruptedPendingAction, state.interruptedPendingAppointmentId,
-                    state.sideTask, state.returnPolicy);
+                    state.sideTask, state.returnPolicy, state.confirmationId, state.originalAppointmentId,
+                    state.materialReminderDone, state.departureReminderDone,
+                    state.notificationDone, state.scheduleChecked);
         }
 
         ConversationState toState(String id) {
@@ -150,6 +154,12 @@ class ConversationStore {
             state.interruptedPendingAppointmentId = interruptedPendingAppointmentId;
             state.sideTask = sideTask;
             state.returnPolicy = returnPolicy;
+            state.confirmationId = confirmationId;
+            state.originalAppointmentId = originalAppointmentId;
+            state.materialReminderDone = materialReminderDone;
+            state.departureReminderDone = departureReminderDone;
+            state.notificationDone = notificationDone;
+            state.scheduleChecked = scheduleChecked;
             return state;
         }
     }

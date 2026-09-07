@@ -20,10 +20,10 @@ public record AgentTurnResponse(
 
     public record PlanCard(String hospital, String department, String date, String selectedTime,
                            List<String> tasks, List<String> materials, String departureTime,
-                           String familyContact) { }
+                           String familyContact, List<String> taskStatuses) { }
 
     public record ConfirmationCard(String title, List<String> operations, String impact,
-                                   String confirmText, String cancelText) { }
+                                   String confirmText, String cancelText, String confirmationId) { }
 
     public record ResultCard(String appointmentId, String hospital, String department, String date,
                              String time, List<String> materials, String departureTime,

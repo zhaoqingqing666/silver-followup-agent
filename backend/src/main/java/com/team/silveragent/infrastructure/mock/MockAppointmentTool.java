@@ -76,11 +76,13 @@ public class MockAppointmentTool implements AppointmentTool {
     @Override
     @Transactional
     public String submit(String conversationId, String slotId, String userId) {
+        List<String> existing = jdbc.query("SELECT id FROM appointments WHERE conversation_id=? AND user_id=? AND status='CONFIRMED'", (rs, row) -> rs.getString(1), conversationId, userId);
+        if (!existing.isEmpty()) return existing.get(0);
         int changed = jdbc.update("UPDATE appointment_slots SET available=FALSE WHERE id=? AND available=TRUE", slotId);
         if (changed != 1) throw new IllegalStateException("该号源刚刚已不可用，请重新选择");
         String id = "AP-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
-        jdbc.update("INSERT INTO appointments(id,slot_id,user_id,status,created_at) VALUES (?,?,?,?,?)",
-                id, slotId, userId, "CONFIRMED", Timestamp.valueOf(LocalDateTime.now()));
+        jdbc.update("INSERT INTO appointments(id,slot_id,user_id,status,created_at,conversation_id) VALUES (?,?,?,?,?,?)",
+                id, slotId, userId, "CONFIRMED", Timestamp.valueOf(LocalDateTime.now()), conversationId);
         traces.record(conversationId, "appointment.submit", Map.of("slotId", slotId, "userId", userId),
                 Map.of("appointmentId", id, "status", "CONFIRMED"), true);
         return id;
@@ -97,10 +99,27 @@ public class MockAppointmentTool implements AppointmentTool {
                 appointmentId, userId);
         if (changed != 1) throw new IllegalStateException("没有找到可取消的预约");
         jdbc.update("UPDATE appointment_slots SET available=TRUE WHERE id=?", slotId);
+        jdbc.update("UPDATE reminders SET status='CANCELLED' WHERE appointment_id=?", appointmentId);
+        jdbc.update("UPDATE appointments SET reminder_status='关联提醒已取消' WHERE id=?", appointmentId);
         traces.record(conversationId, "appointment.cancel",
                 Map.of("appointmentId", appointmentId, "userId", userId),
                 Map.of("status", "CANCELLED", "slotReleased", true), true);
         return "CANCELLED";
+    }
+
+    @Override
+    @Transactional
+    public String reschedule(String conversationId, String appointmentId, String slotId, String userId) {
+        String oldSlot = jdbc.queryForObject("SELECT slot_id FROM appointments WHERE id=? AND user_id=? AND status='CONFIRMED'", String.class, appointmentId, userId);
+        if (!slotId.equals(oldSlot)) {
+            int changed = jdbc.update("UPDATE appointment_slots SET available=FALSE WHERE id=? AND available=TRUE", slotId);
+            if (changed != 1) throw new IllegalStateException("新号源不可用，原预约保留");
+            jdbc.update("UPDATE appointment_slots SET available=TRUE WHERE id=?", oldSlot);
+        }
+        jdbc.update("UPDATE appointments SET slot_id=?,conversation_id=? WHERE id=?", slotId, conversationId, appointmentId);
+        jdbc.update("UPDATE reminders SET status='CANCELLED' WHERE appointment_id=?", appointmentId);
+        traces.record(conversationId, "appointment.reschedule", Map.of("appointmentId", appointmentId, "slotId", slotId), Map.of("status", "CONFIRMED"), true);
+        return appointmentId;
     }
 
     private org.springframework.jdbc.core.RowMapper<Slot> slotMapper() {

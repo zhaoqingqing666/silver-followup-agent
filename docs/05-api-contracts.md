@@ -24,14 +24,30 @@ label 是可选的用户可读文字；value 可以继续使用 hospitalId、dep
 ## 确认关键操作
 
 POST /api/agent/confirmations
-请求：{"conversationId":"会话ID","approved":true}
+请求：{"conversationId":"会话ID","approved":true,"confirmationId":"当前确认卡返回的凭据"}
 只有确认接口可以触发提交或取消预约、创建提醒和通知家属。
+
+`confirmation.confirmationId` 是当前计划的随机确认凭据，修改后失效，确认执行前即消费；`approved=false` 也必须携带凭据。未另设数字 `planVersion`。旧客户端缺少凭据将被拒绝，前后端必须一同更新。通知工具日志名为 `family.notify`。
+
+新增阶段：`EMERGENCY_PAUSED`、`PARTIAL`、`TOOL_ERROR`。新增操作：`SET_CONTACT`（当前用户联系人 ID）、`EDIT_PREFERENCES`、`EDIT_BOOKING`、`RETRY_EXECUTION`。`plan.taskStatuses` 与 `plan.tasks` 按下标对应。`PARTIAL` 也可能返回事项卡，前端不得一律标为全部完成。
 
 ## 查询用户资料
 
 GET /api/users/user-001
 
-返回姓名、模拟住址和偏好交通方式；首页不得写死用户姓名。
+返回姓名、模拟住址、偏好交通方式和展示用家属联系人（`contacts`，电话为脱敏掩码）。首页与设置页均从此接口读取，不得在页面写死用户姓名或家属信息。
+
+```json
+{
+  "id": "user-001",
+  "name": "王阿姨",
+  "homeAddress": "幸福小区（模拟）",
+  "preferredTransport": "家属开车",
+  "contacts": [{ "id": "family-001", "name": "小丽", "relationship": "女儿", "maskedPhone": "138****1234" }]
+}
+```
+
+`contacts` 为 2026-09-07 新增的可选字段；后端只返回脱敏电话，不含明文。Agent 流程中家属候选人仍走内部联系人查询，与此接口无耦合。
 
 ## 查询真实事项
 

@@ -12,14 +12,21 @@ frontend/dist/
 backend/target/
 
 # H2 runtime database (regenerated on startup from schema.sql + data.sql)
+# 容器内开发/部署时后端工作目录是 /app，H2 落到具名卷，不走本目录
+backend/data/
 data/
 
 # Frontend local cache (not source)
 frontend/.npm-cache/
 
-# Local secrets and OS files
+# Docker compose 本地配置：把 .env.example 复制为 .env 再填真实密钥
 .env
 .env.*
 !.env.example
+
+# Dev container 本机私有配置（不进仓库）
+.devcontainer/.env
+
+# Local secrets and OS files
 .DS_Store
 Thumbs.db

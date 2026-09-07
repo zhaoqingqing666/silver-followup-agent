@@ -1,0 +1,52 @@
+name: silver-followup
+
+services:
+  # ------- 后端 Java API（Spring Boot + H2，监听 8080）-------
+  backend:
+    build:
+      context: .
+      target: silver-api
+    image: silver-api:dev
+    container_name: silver-backend
+    restart: unless-stopped
+    environment:
+      # H2 文件库与数据库控制台保持可用
+      SPRING_DATASOURCE_URL: jdbc:h2:file:/app/data/silver-agent
+      # false = 纯本地规则；true = 让模型理解自然语言（失败自动回退）
+      AGENT_LLM_ENABLED: ${AGENT_LLM_ENABLED:-false}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-flash}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      # CORS 白名单：允许浏览器里的前端页面跨域调用
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+    ports:
+      - "8080:8080"
+    volumes:
+      - h2-data:/app/data
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080; printf 'GET /api/demo/health HTTP/1.0\\r\\n\\r\\n' >&3; grep -q '200' <&3"]
+      interval: 30s
+      timeout: 5s
+      start_period: 40s
+      retries: 3
+
+  # ------- 前端（vinext 生产服务器，监听 3000，宿主映射同端口）-------
+  frontend:
+    build:
+      context: .
+      target: silver-web
+      args:
+        # 浏览器访问后端的地址在构建期烧进 JS；换机器演示时改根目录 .env 再重build
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8080}
+    image: silver-web:dev
+    container_name: silver-frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      # 默认仍访问 localhost:3000；若本机 3000 已被占用，可临时设置 FRONTEND_PORT=3001
+      - "${FRONTEND_PORT:-3000}:3000"
+
+volumes:
+  h2-data:

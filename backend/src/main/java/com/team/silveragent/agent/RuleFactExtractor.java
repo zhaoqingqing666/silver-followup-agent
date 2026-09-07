@@ -27,6 +27,9 @@ public class RuleFactExtractor implements FactExtractor {
         String hospital = catalog.hospitalNames().stream().filter(message::contains).findFirst().orElse(null);
         String department = catalog.departmentNames().stream().filter(message::contains).findFirst().orElse(null);
         String intent = detectIntent(message);
+        if ("ASK_ALTERNATIVE".equals(context.stage()) || "NO_SLOT".equals(context.stage())) {
+            if (containsAny(message, "换日期", "其他日期", "只要这一天")) intent = "PROVIDE_INFORMATION";
+        }
         Boolean stageAnswer = genericYesNo(message);
         return new ExtractedFacts(intent, hospital, department, parseDate(message, context.currentDate()),
                 "ASK_ALTERNATIVE".equals(context.stage()) ? first(stageAnswer, yesNo(message, "换日期", "其他日期", "附近日期")) : yesNo(message, "换日期", "其他日期", "附近日期"),
@@ -42,7 +45,7 @@ public class RuleFactExtractor implements FactExtractor {
 
     private String detectIntent(String value) {
         if (containsAny(value, "胸痛", "呼吸困难", "昏迷", "大出血", "喘不上气")) return "EMERGENCY";
-        if (containsAny(value, "怎么用药", "药量", "诊断", "检查结果", "是不是得了")) return "MEDICAL_ADVICE";
+        if (containsAny(value, "怎么用药", "药量", "诊断", "检查结果", "是不是得了", "吃什么药", "推荐药", "加量", "减量", "治疗方案", "停药")) return "MEDICAL_ADVICE";
         if (containsAny(value, "取消整个", "不办了", "停止办理", "不想预约了", "退出预约", "先不约了")) return "CANCEL_TASK";
         if (value.contains("取消") && containsAny(value, "预约", "复诊")) return "CANCEL_APPOINTMENT";
         if (containsAny(value, "取消预约", "取消这次预约", "取消已经预约", "取消已预约")) return "CANCEL_APPOINTMENT";
@@ -66,6 +69,18 @@ public class RuleFactExtractor implements FactExtractor {
     }
 
     private LocalDate parseDate(String message, LocalDate today) {
+        if (message.contains("后天")) return today.plusDays(2);
+        if (message.contains("明天")) return today.plusDays(1);
+        if (message.contains("今天")) return today;
+        Matcher relative = Pattern.compile("(下周|本周|这周|周|星期)([一二三四五六日天])").matcher(message);
+        if (relative.find()) {
+            int day = "一二三四五六日天".indexOf(relative.group(2)) + 1;
+            if (day == 8) day = 7;
+            LocalDate monday = today.with(java.time.temporal.TemporalAdjusters.previousOrSame(java.time.DayOfWeek.MONDAY));
+            LocalDate result = monday.plusDays(day - 1);
+            if (relative.group(1).equals("下周") || result.isBefore(today)) result = result.plusWeeks(1);
+            return result;
+        }
         Matcher iso = ISO_DATE.matcher(message);
         if (iso.find()) return safeDate(Integer.parseInt(iso.group(1)), Integer.parseInt(iso.group(2)), Integer.parseInt(iso.group(3)));
         Matcher shortDate = SHORT_DATE.matcher(message);
@@ -106,7 +121,7 @@ public class RuleFactExtractor implements FactExtractor {
     }
 
     private Boolean genericYesNo(String value) {
-        if (containsAny(value, "不需要", "不用", "不要", "不想", "不接受", "否")) return false;
+        if (containsAny(value, "不需要", "不用", "不要", "不想", "不接受", "否", "只要这一天")) return false;
         if (containsAny(value, "需要", "可以", "接受", "好的", "好", "是")) return true;
         return null;
     }

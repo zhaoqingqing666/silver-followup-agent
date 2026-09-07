@@ -93,8 +93,30 @@ public class CareCatalogRepository {
     public Optional<UserProfile> user(String userId) {
         List<UserProfile> rows = jdbc.query("SELECT id,name,home_address,preferred_transport FROM users WHERE id=?",
                 (rs, row) -> new UserProfile(rs.getString(1), rs.getString(2),
-                        rs.getString(3), rs.getString(4)), userId);
+                        rs.getString(3), rs.getString(4),
+                        familyMembers(rs.getString(1))), userId);
         return rows.stream().findFirst();
+    }
+
+    /**
+     * 读取用于展示的家属联系人（仅脱敏电话，不返回明文）。
+     * 与 {@link #contacts(String)} 分工：contacts 供 Agent 流程做候选人选择，只含姓名与关系；
+     * 本方法供用户资料页展示家属，电话在 Java 层脱敏。
+     */
+    private List<com.team.silveragent.domain.model.ToolModels.Contact> familyMembers(String userId) {
+        return jdbc.query("SELECT id,name,relationship,phone FROM family_contacts WHERE user_id=? ORDER BY id",
+                (rs, row) -> new com.team.silveragent.domain.model.ToolModels.Contact(rs.getString(1),
+                        rs.getString(2), rs.getString(3), maskPhone(rs.getString(4))), userId);
+    }
+
+    private String maskPhone(String phone) {
+        if (phone == null || phone.length() < 8) return phone == null ? "" : phone;
+        return phone.substring(0, 3) + "****" + phone.substring(phone.length() - 4);
+    }
+
+    public List<com.team.silveragent.domain.model.ToolModels.Contact> contacts(String userId) {
+        return jdbc.query("SELECT id,name,relationship,phone FROM family_contacts WHERE user_id=? ORDER BY id",
+                (rs, row) -> new com.team.silveragent.domain.model.ToolModels.Contact(rs.getString(1), rs.getString(2), rs.getString(3), "已隐藏"), userId);
     }
 
     private String clean(String value) {
@@ -118,5 +140,6 @@ public class CareCatalogRepository {
     public record Department(String id, String hospitalId, String name, String description,
                              List<String> specialtyTags, String followupScope,
                              String location) { }
-    public record UserProfile(String id, String name, String homeAddress, String preferredTransport) { }
+    public record UserProfile(String id, String name, String homeAddress, String preferredTransport,
+                              List<com.team.silveragent.domain.model.ToolModels.Contact> contacts) { }
 }

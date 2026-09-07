@@ -151,3 +151,9 @@ CREATE TABLE IF NOT EXISTS tool_call_logs (
 );
 
 ALTER TABLE tool_call_logs ADD COLUMN IF NOT EXISTS response_json CLOB;
+
+ALTER TABLE appointments ADD COLUMN IF NOT EXISTS conversation_id VARCHAR(50);
+ALTER TABLE reminders ADD COLUMN IF NOT EXISTS conversation_id VARCHAR(50);
+ALTER TABLE reminders ADD COLUMN IF NOT EXISTS appointment_id VARCHAR(50);
+ALTER TABLE reminders ADD COLUMN IF NOT EXISTS status VARCHAR(30) DEFAULT 'CREATED';
+ALTER TABLE family_notifications ADD COLUMN IF NOT EXISTS conversation_id VARCHAR(50);

@@ -1,0 +1,50 @@
+{
+  "name": "silver-followup-dev",
+  "build": { "dockerfile": "Dockerfile" },
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
+  "workspaceFolder": "/workspace",
+  // 后端、前端都在容器内运行，与宿主机无关，保证三台电脑结果一致
+  "runArgs": [
+    "--name", "silver-followup-dev",
+    "--add-host", "host.docker.internal:host-gateway"
+  ],
+  "remoteUser": "vscode",
+  "containerEnv": {
+    // 前端开发时默认访问宿主映射到 8080 的后端
+    "NEXT_PUBLIC_API_BASE_URL": "http://localhost:8080",
+    "AGENT_LLM_ENABLED": "false",
+    "SPRING_DATASOURCE_URL": "jdbc:h2:file:/workspace/backend/data/silver-agent"
+  },
+  "mounts": [
+    // H2 数据放具名卷，不写进 bind mount 的仓库目录（避免本地 .gitignore 落空）
+    "source=silver-backend-data,target=/workspace/backend/data,type=volume",
+    "source=silver-frontend-dependencies,target=/workspace/frontend/node_modules,type=volume",
+    "source=silver-backend-target,target=/workspace/backend/target,type=volume",
+    "source=silver-maven-cache,target=/home/vscode/.m2,type=volume",
+    "source=silver-npm-cache,target=/home/vscode/.npm,type=volume"
+  ],
+  "forwardPorts": [8080, 3000, 5005],
+  "portsAttributes": {
+    "3000": { "label": "前端开发服务器", "onAutoForward": "notify" },
+    "8080": { "label": "后端 API", "onAutoForward": "notify" },
+    "5005": { "label": "后端远程调试 (JDWP)", "onAutoForward": "notify" }
+  },
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash",
+        "java.configuration.updateBuildConfiguration": "automatic"
+      },
+      "extensions": [
+        "vscjava.vscode-java-pack",
+        "vmware.vscode-spring-boot",
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode",
+        "EditorConfig.EditorConfig"
+      ]
+    }
+  },
+  // 容器启动后自动执行：装前端依赖 + 预拉 Maven 依赖 + 把 H2 数据卷给 vscode 用户
+  // （前端 dev / 后端 spring-boot:run 在 VS Code 终端里手动跑，见 README.devcontainer.md）
+  "postCreateCommand": "bash .devcontainer/setup.sh"
+}

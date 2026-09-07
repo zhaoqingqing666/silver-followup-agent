@@ -22,7 +22,7 @@ const stageLabels: Record<string, string> = {
   ASK_HOSPITAL: '确认医院', ASK_DEPARTMENT: '确认科室', ASK_DATE: '确认日期',
   ASK_ALTERNATIVE: '补充偏好', ASK_COMPANION: '陪同安排', ASK_TRAVEL: '出行安排',
   ASK_NOTIFY: '家属通知', ASK_TRANSPORT: '交通方式', READY_TO_PLAN: '检查计划', SELECT_PERIOD: '选择上午或下午', CONFIRM_SLOT: '确认推荐时间', SELECT_SLOT: '选择具体时间', NO_SLOT: '更换时间', CONFLICT: '处理冲突',
-  AWAITING_CONFIRMATION: '等待确认', COMPLETED: '办理完成', CANCELLED: '已取消',
+  EMERGENCY_PAUSED: '已暂停，请及时求助', PARTIAL: '部分完成', TOOL_ERROR: '需要重试或修改', AWAITING_CONFIRMATION: '等待确认', COMPLETED: '办理完成', CANCELLED: '已取消',
 };
 
 export function AssistantView({ active, onNavigate, voicePreference }: {
@@ -37,6 +37,7 @@ export function AssistantView({ active, onNavigate, voicePreference }: {
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [listening, setListening] = useState(false);
+  const [choicePage, setChoicePage] = useState(0);
   const recognition = useRef<SpeechRecognitionLike | null>(null);
   const bottomAnchor = useRef<HTMLDivElement | null>(null);
   const initialized = useRef(false);
@@ -44,6 +45,7 @@ export function AssistantView({ active, onNavigate, voicePreference }: {
 
   const addAssistant = (response: AgentTurnResponse) => {
     setTurn(response);
+    setChoicePage(0);
     setConversationId(response.conversationId);
     if (response.plan && !planShown.current) {
       setVisiblePlan(response.plan);
@@ -117,22 +119,22 @@ export function AssistantView({ active, onNavigate, voicePreference }: {
   const submit = (event: FormEvent) => { event.preventDefault(); void sendText(input); };
 
   const confirm = async (approved: boolean) => {
-    if (!conversationId || busy) return;
+    if (!conversationId || busy || !turn?.confirmation) return;
     stopSpeech();
     setMessages(items => [...items, { id: crypto.randomUUID(), role: 'user', text: approved ? '我确认执行这些操作' : '暂不执行' }]);
     setBusy(true);
     try {
-      const response = await confirmAgentActions(conversationId, approved);
+      const response = await confirmAgentActions(conversationId, approved, turn.confirmation.confirmationId);
       addAssistant(response);
       if (response.result) window.dispatchEvent(new Event('silver-agent-appointments-updated'));
     }
-    catch { setMessages(items => [...items, { id: crypto.randomUUID(), role: 'assistant', text: '确认操作没有成功，请重试。系统不会重复预约。' }]); }
+    catch { setMessages(items => [...items, { id: crypto.randomUUID(), role: 'assistant', text: '暂时未收到办理结果，请重新连接查看当前进度。' }]); }
     finally { setBusy(false); }
   };
 
   const startVoice = () => {
     const Constructor = (window as unknown as { webkitSpeechRecognition?: new () => SpeechRecognitionLike }).webkitSpeechRecognition;
-    if (!Constructor) { setInput('我想预约复诊'); return; }
+    if (!Constructor) { setInput('我想预约复诊'); setMessages(items => [...items, { id: crypto.randomUUID(), role: 'assistant', text: '当前浏览器不支持语音，已填入一条模拟语音文字，请检查后发送。' }]); return; }
     const instance = new Constructor();
     recognition.current = instance;
     instance.lang = 'zh-CN';
@@ -163,6 +165,10 @@ export function AssistantView({ active, onNavigate, voicePreference }: {
       </div>
     </div>
 
+    <div className="flex gap-2 border-b px-5 py-2">
+      <button disabled={busy} onClick={() => void sendAction('CHANGE_DATE', '', '返回修改日期')} className="min-h-12 flex-1 rounded-xl border text-base">返回修改</button>
+      <button disabled={busy} onClick={() => void sendAction('CANCEL_TASK', '', '取消办理')} className="min-h-12 flex-1 rounded-xl border text-base">取消办理</button>
+    </div>
     <div className="flex-1 space-y-4 px-5 py-5">
       <section aria-label="对话记录" className="space-y-3">
         {messages.map(message => <ChatBubble key={message.id} message={message} />)}
@@ -171,11 +177,12 @@ export function AssistantView({ active, onNavigate, voicePreference }: {
 
       {visiblePlan && <PlanCard plan={visiblePlan} />}
       {turn?.confirmation && <ConfirmationCardView card={turn.confirmation} busy={busy} onConfirm={() => void confirm(true)} onCancel={() => void confirm(false)} />}
-      {turn?.result && <ResultCardView result={turn.result} />}
+      {turn?.result && <ResultCardView result={turn.result} partial={turn.stage === 'PARTIAL'} />}
       {!!turn?.quickReplies.length && !turn.confirmation && <section aria-label="快捷回答" className="flex flex-wrap gap-2">
-        {turn.quickReplies.slice(0, 4).map(choice => <button key={choice.label + choice.action + choice.value} disabled={busy} onClick={() => void sendAction(choice.action, choice.value, choice.label)} className="min-h-12 rounded-2xl border border-[#dfb98f] bg-white px-4 text-base font-semibold text-[#6c3d24] shadow-sm disabled:opacity-50">{choice.label}</button>)}
+        {turn.quickReplies.slice(choicePage * 3, choicePage * 3 + 3).map(choice => <button key={choice.label + choice.action + choice.value} disabled={busy} onClick={() => void sendAction(choice.action, choice.value, choice.label)} className="min-h-12 rounded-2xl border border-[#dfb98f] bg-white px-4 text-base font-semibold text-[#6c3d24] shadow-sm disabled:opacity-50">{choice.label}</button>)}
       </section>}
 
+      {(turn?.quickReplies.length ?? 0) > 3 && !turn?.confirmation && <button disabled={busy} onClick={() => setChoicePage(page => (page + 1) % Math.ceil((turn?.quickReplies.length ?? 0) / 3))} className="min-h-12 rounded-2xl border bg-white px-4 text-base font-bold">查看更多选项</button>}
       {!conversationId && !busy && <button onClick={() => void begin()} className="flex min-h-13 w-full items-center justify-center gap-2 rounded-2xl border bg-white text-base font-bold"><RefreshCw className="size-5" />重新连接</button>}
       <div ref={bottomAnchor} aria-hidden="true" className="h-px" />
     </div>

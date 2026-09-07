@@ -33,10 +33,10 @@ export function sendAgentAction(conversationId: string, action: string, value = 
   });
 }
 
-export function confirmAgentActions(conversationId: string, approved: boolean) {
+export function confirmAgentActions(conversationId: string, approved: boolean, confirmationId: string) {
   return request('/api/agent/confirmations', {
     method: 'POST',
-    body: JSON.stringify({ conversationId, approved }),
+    body: JSON.stringify({ conversationId, approved, confirmationId }),
   });
 }
 

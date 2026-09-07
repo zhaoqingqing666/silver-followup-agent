@@ -13,7 +13,7 @@ final class ConversationState {
         ASK_HOSPITAL, ASK_DEPARTMENT, ASK_DATE, ASK_ALTERNATIVE,
         ASK_COMPANION, ASK_TRAVEL, ASK_TRANSPORT, ASK_NOTIFY,
         READY_TO_PLAN, SELECT_PERIOD, CONFIRM_SLOT, SELECT_SLOT, NO_SLOT, CONFLICT,
-        AWAITING_CONFIRMATION, COMPLETED, CANCELLED
+        AWAITING_CONFIRMATION, COMPLETED, CANCELLED, EMERGENCY_PAUSED, PARTIAL, TOOL_ERROR
     }
 
     final String id;
@@ -45,6 +45,12 @@ final class ConversationState {
     String interruptedPendingAppointmentId;
     String sideTask;
     String returnPolicy;
+    String confirmationId;
+    String originalAppointmentId;
+    boolean materialReminderDone;
+    boolean departureReminderDone;
+    boolean notificationDone;
+    boolean scheduleChecked;
 
     ConversationState(String id) { this(id, "user-001"); }
 

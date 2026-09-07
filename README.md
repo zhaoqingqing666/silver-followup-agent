@@ -4,9 +4,18 @@
 
 > 所有医院、用户、号源、路线和通知均为模拟数据。本项目不提供疾病诊断或用药建议。
 
-## 为什么选 Java，而不是 Python
+需求基线见 [Requirement.md](Requirement.md)。当前设计、源码与需求差距、待实现方案和验收优先级见 [Design.md](Design.md)。已有主流程不代表全部要求已验收，尤其需补齐紧急暂停、确认版本绑定和部分失败恢复。
 
-三位成员已经学过 Java，因此主后端采用 **Java 17 + Spring Boot 3.5.6**。大模型通过标准 HTTP API 接入，不需要 Python。前端采用 **React 19 + TypeScript**；IDEA 和 VS Code 都能打开整个仓库。
+## 技术栈与运行方式
+
+三位成员已经学过 Java，主后端采用 **Java 17 + Spring Boot 3.5.6**，大模型通过标准 HTTP API 接入，不需要 Python。前端采用 **React 19 + TypeScript**（基于 vite 的 vinext）。
+
+本项目同时在 **Docker 容器**里运行与开发：
+
+- **日常团队开发**：VS Code + Dev Containers 插件，把整个仓库放进一个容器，
+  前端、后端、JDK、Node 都在容器里，保证三台电脑结果一致（推荐，见下文）。
+- **一键部署 / 给评委演示**：根目录 `docker compose up` 同时起前端（vinext 生产服务器）与后端（Java）。
+- 项目依赖安装、构建和测试均在开发容器内执行，不使用宿主机工具链。
 
 ## 项目结构
 
@@ -15,39 +24,75 @@ silver-followup-agent/
 ├─ frontend/        手机端界面；页面按业务拆分
 ├─ backend/         Java API；应用层、领域层、模拟工具分离
 ├─ docs/            需求、页面、Agent 流程、接口与协作规范
-├─ .env.example     密钥示例，真实密钥不得上传
+├─ .devcontainer/   VS Code 开发容器配置（团队开发入口）
+├─ .env.example     密钥与部署配置示例，真实密钥不得上传
+├─ compose.yml      docker compose：一键起 前端 + 后端
+├─ Dockerfile       前后端多阶段构建镜像
 └─ README.md
 ```
 
 前端包含首页、复诊助手、复诊事项卡和适老设置。对话过程中按需展示计划卡、异常卡、明确确认卡、工具调用记录和最终事项卡。后端执行“理解需求 → 补问缺失信息 → 查询号源 → 日程检查 → 计划出行 → 用户确认 → 提交预约 → 创建提醒 → 通知家属”。
 
-## 第一次运行
+## 一、团队开发：VS Code 开发容器（推荐）
 
-### 1. 先启动后端（推荐 IDEA）
+不用在自己电脑上装 JDK / Node，只要求装 Docker Desktop（Windows 开启 WSL2）。
 
-安装 JDK 17。在 IDEA 中打开根目录，等待 Maven 读取 `backend/pom.xml`，运行：
-
-```text
-backend/src/main/java/com/team/silveragent/SilverAgentApplication.java
-```
-
-看到 `Started SilverAgentApplication` 后，访问 `http://localhost:8080/api/demo/health`。H2 数据保存在 `backend/data/`，数据库控制台为 `http://localhost:8080/h2-console`。
-
-### 2. 再启动前端（VS Code 或 IDEA 终端）
-
-需要 Node.js 22.13 或更高版本。
+1. 用 VS Code 打开仓库根目录，装 **Dev Containers** 扩展。
+2. `Ctrl+Shift+P` → **Dev Containers: Reopen in Container**。首次自动构建容器（几分钟）。
+3. 在容器内开 VS Code 集成终端：
 
 ```bash
-cd frontend
-npm.cmd ci
-npm.cmd run dev
+# 终端 1：后端（端口 8080）
+cd backend && mvn spring-boot:run
+
+# 终端 2：前端（端口 3000）
+cd frontend && npm run dev
 ```
 
-浏览器打开 `http://localhost:3000`。构建检查使用 `npm run build`。
+浏览器打开 `http://localhost:3000`。健康检查 `http://localhost:8080/api/demo/health`；
+H2 控制台 `http://localhost:8080/h2-console`（数据放具名卷，不写进仓库目录）。
 
-### 3. 可选：启用 DeepSeek
+详细说明（端口转发、远程调试 5005、真机联调、换机器）见 **[README.devcontainer.md](README.devcontainer.md)**。
 
-不配置密钥时，项目自动使用本地规则，四类工具仍会真实执行。需要模型理解自由表达时，在 IDEA 后端运行配置的环境变量中填写：
+## 二、一键部署 / 演示：docker compose
+
+根目录已有 `Dockerfile`（后端 Java 多阶段构建、前端 vinext 生产服务器）与 `compose.yml`。前端基于 vinext，浏览器与后端直接通信，中间不经过额外反向代理。
+
+```bash
+# 首次：构建并后台启动 前端(http://localhost:3000) + 后端(http://localhost:8080)
+docker compose up -d --build
+
+# 查看状态/日志
+docker compose ps
+docker compose logs -f backend
+
+# 关闭（保留 h2-data 卷，便于重启不重建镜像）
+docker compose down
+
+# 彻底重置（清空卷 + 重建）
+docker compose down -v && docker compose up -d --build
+```
+
+- H2 运行时文件放在具名卷 `h2-data`，不写进仓库；启动时按 `schema.sql` + `data.sql`
+  补齐表结构和模拟数据，保留已有预约、会话及号源占用。上面的 `down -v` 会删除卷中全部演示记录，仅在确需重置时使用。
+- 后端健康检查通过后，前端容器才会就绪（`depends_on: condition`）。
+- 需要 DeepSeek 时，把 `.env.example` 复制为 `.env` 并填入密钥（见“可选：启用 DeepSeek”）。
+- 到另一台机器演示、改过 `.env` 里 `NEXT_PUBLIC_API_BASE_URL` 时，前端要**重新构建**：
+
+```bash
+docker compose build frontend && docker compose up -d frontend
+```
+
+## 三、容器内验证
+
+在 VS Code 的容器窗口选择 **Terminal → Run Task → Dev Container: 验证项目**，执行后端测试、前端类型检查和生产构建。首次打开或更新开发容器配置时，选择 **Dev Containers: Rebuild and Reopen in Container**。
+
+## 可选：启用 DeepSeek
+
+不配置密钥时，项目自动使用本地规则，四类工具仍会真实执行。需要模型理解自由表达时：
+
+- 开发容器 / compose：在根目录把 `.env.example` 复制为 `.env`，填好密钥，重启对应进程或 `docker compose up -d --build`。
+- 本地 IDEA：在运行配置的环境变量中填写。
 
 ```text
 AGENT_LLM_ENABLED=true
@@ -56,7 +101,7 @@ DEEPSEEK_MODEL=deepseek-v4-flash
 DEEPSEEK_API_KEY=只填本机的新密钥
 ```
 
-不要修改 `.env.example` 填入密钥，也不要把密钥提交 GitHub。
+不要修改 `.env.example` 填入密钥，也不要把密钥提交 GitHub。`.env` 已被 .gitignore 排除。
 
 ## 三个人怎样配合
 
