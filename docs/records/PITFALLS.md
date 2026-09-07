@@ -28,8 +28,9 @@
 ## 2026-09-07 默认主联系人加载为死代码
 
 - 现象：`FollowupAgentService.loadPrimaryContact`（会把一个主联系人放入 state）已定义但**从未被调用**，属死代码。
-- 结论：当前不存在“默认联系人被当作已确认对象”的路径——`SET_NOTIFY=false` 清空 contact，`SET_CONTACT` 要求从候选人显式选择，`ready()` 也要求 `notifyFamily && contact != null`。16 项回归测试锁定该行为。
-- 留意点：容器内开启模型联调（`agent.llm.enabled=true`）时，若模型自由语言路径能影响 notify/contact 字段，仍需验证不会把主联系人误读为用户指定。未来可顺手删除该死代码；删除后不影响任何现有测试。
+- 处理：2026-09-07 已删除整条死代码链（`loadPrimaryContact`、接口 `FamilyNotificationTool.findPrimaryContact`、mock 实现及 `mask` 私有方法），容器内 `mvn test` 16/16 通过。提交见 `refactor/remove-dead-primary-contact`。
+- 结论：删除前后都不存在“默认联系人被当作已确认对象”的路径——`SET_NOTIFY=false` 清空 contact，`SET_CONTACT` 要求从候选人显式选择，`ready()` 也要求 `notifyFamily && contact != null`。
+- 留意点：容器内开启模型联调（`agent.llm.enabled=true`）时，若模型自由语言路径能影响 notify/contact 字段，仍需验证不会把主联系人误读为用户指定。
 
 ## 记录模板
 
