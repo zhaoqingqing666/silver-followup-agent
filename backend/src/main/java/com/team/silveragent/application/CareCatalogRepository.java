@@ -96,6 +96,11 @@ public class CareCatalogRepository {
         return rows.stream().findFirst();
     }
 
+    public List<com.team.silveragent.domain.model.ToolModels.Contact> contacts(String userId) {
+        return jdbc.query("SELECT id,name,relationship,phone FROM family_contacts WHERE user_id=? ORDER BY id",
+                (rs, row) -> new com.team.silveragent.domain.model.ToolModels.Contact(rs.getString(1), rs.getString(2), rs.getString(3), "已隐藏"), userId);
+    }
+
     private String clean(String value) {
         return value == null ? "" : value.replace("（模拟）", "").replace("(模拟)", "").trim();
     }

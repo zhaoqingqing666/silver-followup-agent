@@ -24,8 +24,12 @@ label 是可选的用户可读文字；value 可以继续使用 hospitalId、dep
 ## 确认关键操作
 
 POST /api/agent/confirmations
-请求：{"conversationId":"会话ID","approved":true}
+请求：{"conversationId":"会话ID","approved":true,"confirmationId":"当前确认卡返回的凭据"}
 只有确认接口可以触发提交或取消预约、创建提醒和通知家属。
+
+`confirmation.confirmationId` 是当前计划的随机确认凭据，修改后失效，确认执行前即消费；`approved=false` 也必须携带凭据。未另设数字 `planVersion`。旧客户端缺少凭据将被拒绝，前后端必须一同更新。通知工具日志名为 `family.notify`。
+
+新增阶段：`EMERGENCY_PAUSED`、`PARTIAL`、`TOOL_ERROR`。新增操作：`SET_CONTACT`（当前用户联系人 ID）、`EDIT_PREFERENCES`、`EDIT_BOOKING`、`RETRY_EXECUTION`。`plan.taskStatuses` 与 `plan.tasks` 按下标对应。`PARTIAL` 也可能返回事项卡，前端不得一律标为全部完成。
 
 ## 查询用户资料
 

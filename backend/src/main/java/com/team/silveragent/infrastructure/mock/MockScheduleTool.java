@@ -35,10 +35,14 @@ public class MockScheduleTool implements ScheduleTool {
     }
 
     @Override
+    @org.springframework.transaction.annotation.Transactional
     public String createReminder(String conversationId, String userId, String title, LocalDateTime remindAt) {
-        String id = "RM-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
-        jdbc.update("INSERT INTO reminders(id,user_id,title,remind_at,created_at) VALUES (?,?,?,?,?)",
-                id, userId, title, Timestamp.valueOf(remindAt), Timestamp.valueOf(LocalDateTime.now()));
+        String id = "RM-" + UUID.nameUUIDFromBytes((conversationId + title + remindAt).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        List<String> existing = jdbc.query("SELECT id FROM reminders WHERE id=? AND status='CREATED'", (rs, row) -> rs.getString(1), id);
+        if (!existing.isEmpty()) return id;
+        String appointmentId = jdbc.queryForObject("SELECT id FROM appointments WHERE conversation_id=? AND status='CONFIRMED' ORDER BY created_at DESC LIMIT 1", String.class, conversationId);
+        jdbc.update("MERGE INTO reminders(id,user_id,title,remind_at,created_at,conversation_id,appointment_id,status) KEY(id) VALUES (?,?,?,?,?,?,?,?)",
+                id, userId, title, Timestamp.valueOf(remindAt), Timestamp.valueOf(LocalDateTime.now()), conversationId, appointmentId, "CREATED");
         traces.record(conversationId, "schedule.createReminder",
                 Map.of("userId", userId, "title", title, "remindAt", remindAt),
                 Map.of("reminderId", id, "status", "CREATED"), true);

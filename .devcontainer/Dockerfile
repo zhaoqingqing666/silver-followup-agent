@@ -4,7 +4,7 @@ FROM mcr.microsoft.com/devcontainers/base:ubuntu-22.04
 
 # 版本与仓库约定一致：Java 17（后端）、Node 22.13+（前端）
 RUN apt-get update && export DEBIAN_FRONTEND=noninteractive \
-    && apt-get install -y --no-install-recommends curl wget git openjdk-17-jdk \
+    && apt-get install -y --no-install-recommends curl wget git openjdk-17-jdk maven \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && npm install -g npm@10 \

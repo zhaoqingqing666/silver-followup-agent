@@ -2,6 +2,8 @@
 
 本文件把命题要求转换成可实现、可验证的项目项。表中的“最低实现”表示 Demo 至少要做到什么，不代表必须连接真实医院或真实通信平台。
 
+需求来源：[Requirement.md](../Requirement.md)。本表保留需求编号和目标方案；实现状态、源码证据与缺口以 [Design.md 第 2 节](../Design.md#2-按-requirementmd-对齐) 为准。`ConfirmationGate`、`MissingFieldChecker` 等为概念职责，当前集中在 `FollowupAgentService`；现有领域工具接口共七个，并非下表早期描述的五个。
+
 ## 一、总体任务
 
 | 编号 | 要求含义 | 最低实现 | 页面证据 | 后端/Agent证据 |

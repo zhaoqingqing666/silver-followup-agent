@@ -4,6 +4,8 @@
 
 > 所有医院、用户、号源、路线和通知均为模拟数据。本项目不提供疾病诊断或用药建议。
 
+需求基线见 [Requirement.md](Requirement.md)。当前设计、源码与需求差距、待实现方案和验收优先级见 [Design.md](Design.md)。已有主流程不代表全部要求已验收，尤其需补齐紧急暂停、确认版本绑定和部分失败恢复。
+
 ## 技术栈与运行方式
 
 三位成员已经学过 Java，主后端采用 **Java 17 + Spring Boot 3.5.6**，大模型通过标准 HTTP API 接入，不需要 Python。前端采用 **React 19 + TypeScript**（基于 vite 的 vinext）。
@@ -13,7 +15,7 @@
 - **日常团队开发**：VS Code + Dev Containers 插件，把整个仓库放进一个容器，
   前端、后端、JDK、Node 都在容器里，保证三台电脑结果一致（推荐，见下文）。
 - **一键部署 / 给评委演示**：根目录 `docker compose up` 同时起前端（vinext 生产服务器）与后端（Java）。
-- 也保留本地 IDEA + npm 的方式，给不想用 Docker 的成员备用。
+- 项目依赖安装、构建和测试均在开发容器内执行，不使用宿主机工具链。
 
 ## 项目结构
 
@@ -71,8 +73,8 @@ docker compose down
 docker compose down -v && docker compose up -d --build
 ```
 
-- H2 运行时文件放在具名卷 `h2-data`，不写进仓库；每次启动按 `schema.sql` + `data.sql`
-  重建演示数据（与本地运行行为一致）。重置演示数据用上面的 `down -v`。
+- H2 运行时文件放在具名卷 `h2-data`，不写进仓库；启动时按 `schema.sql` + `data.sql`
+  补齐表结构和模拟数据，保留已有预约、会话及号源占用。上面的 `down -v` 会删除卷中全部演示记录，仅在确需重置时使用。
 - 后端健康检查通过后，前端容器才会就绪（`depends_on: condition`）。
 - 需要 DeepSeek 时，把 `.env.example` 复制为 `.env` 并填入密钥（见“可选：启用 DeepSeek”）。
 - 到另一台机器演示、改过 `.env` 里 `NEXT_PUBLIC_API_BASE_URL` 时，前端要**重新构建**：
@@ -81,11 +83,9 @@ docker compose down -v && docker compose up -d --build
 docker compose build frontend && docker compose up -d frontend
 ```
 
-## 三、本地（不装 Docker，备用）
+## 三、容器内验证
 
-此方式与原 README 一致：后端用 IDEA 打开根目录运行
-`backend/src/main/java/com/team/silveragent/SilverAgentApplication.java`（JDK 17），
-前端用 `npm.cmd ci && npm.cmd run dev`（Node ≥22.13）。H2 数据会落在 `backend/data/`（已加入 .gitignore）。
+在 VS Code 的容器窗口选择 **Terminal → Run Task → Dev Container: 验证项目**，执行后端测试、前端类型检查和生产构建。首次打开或更新开发容器配置时，选择 **Dev Containers: Rebuild and Reopen in Container**。
 
 ## 可选：启用 DeepSeek
 

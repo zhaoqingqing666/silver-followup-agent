@@ -39,7 +39,7 @@ public class AgentController {
 
     @PostMapping("/confirmations")
     public AgentTurnResponse confirm(@Valid @RequestBody ConfirmationRequest request) {
-        return service.confirm(request.conversationId(), request.approved());
+        return service.confirm(request.conversationId(), request.approved(), request.confirmationId());
     }
 
     @GetMapping("/model-status")
@@ -53,5 +53,5 @@ public class AgentController {
 
     public record MessageRequest(@NotBlank String conversationId, @NotBlank String message) { }
     public record ActionRequest(@NotBlank String conversationId, @NotBlank String action, String value, String label) { }
-    public record ConfirmationRequest(@NotBlank String conversationId, boolean approved) { }
+    public record ConfirmationRequest(@NotBlank String conversationId, boolean approved, @NotBlank String confirmationId) { }
 }

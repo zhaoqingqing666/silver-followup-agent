@@ -3,6 +3,12 @@
 团队统一用 **Docker 容器**做开发环境，前端、后端、JDK、Node 全在容器里，
 不依赖成员宿主机装了什么东西，保证三台电脑结果一致。
 
+构建、安装依赖和测试均在 VS Code Dev Container 的终端内执行，不在 Windows 宿主机执行 Maven/npm。工作目录固定为 `/workspace`；`frontend/node_modules` 和 `backend/target` 使用容器卷，避免混入宿主机平台文件。更新 `.devcontainer` 配置后需在 VS Code 执行 **Dev Containers: Rebuild Container**。
+
+容器内验证：`mvn -f backend/pom.xml test -Dagent.llm.enabled=false`，然后在 `frontend` 目录执行 `npx tsc --noEmit` 和 `npm run build`。
+
+也可选择 **Terminal → Run Task**，运行“Dev Container: 后端服务”“Dev Container: 前端服务”或“Dev Container: 验证项目”。这些任务仅用于容器内终端。
+
 > 需要本机已装 Docker Desktop（Windows）并开启 WSL2，VS Code 装
 > “Dev Containers”扩展（`ms-vscode-remote.remote-containers`）。
 
@@ -14,7 +20,7 @@
 4. 构建完成后，VS Code 会在容器内自动执行 `npm ci` 与 Maven 依赖预拉取。
 
 容器配置在 `.devcontainer/`：`devcontainer.json` 声明端口与 VS Code 插件，
-`Dockerfile` 固定 JDK 17 + Node 22。
+`Dockerfile` 安装 JDK 17、Maven 与 Node 22；`setup.sh` 自动安装锁定的前端依赖并缓存 Maven 依赖。
 
 ## 二、日常启动
 
@@ -69,7 +75,7 @@ mvn spring-boot:run -Dspring-boot.run.jvmArguments="-agentlib:jdwp=transport=dt_
 ## 六、换机器、换成员
 
 - 提交 `package-lock.json` 与 `pom.xml`，其他人“在容器中重新打开”后依赖自动一致。
-- 容器配置改动要进仓库：`docker compose down` 后重新打开即重建。
+- 容器配置改动要进仓库：在 VS Code 执行 **Dev Containers: Rebuild Container**；这里的开发容器不由根目录的部署 compose 管理。
 - 具体启动步骤、跨域、密钥配置与 IDEA 方式对比，见根目录 `README.md`。
 
 ## 常见问题

@@ -6,18 +6,19 @@ export function PlanCard({ plan }: { plan: AgentPlanCard }) {
     <p className="text-sm font-bold text-primary">复诊办理计划</p>
     <h2 className="mt-1 text-xl font-bold">{plan.hospital} · {plan.department}</h2>
     <p className="mt-2 text-lg"><strong>{plan.date} {plan.selectedTime}</strong></p>
+    <p className="mt-2 text-base">建议出发：{plan.departureTime} · 通知对象：{plan.familyContact}</p>
     <div className="mt-4 grid gap-2">
       {plan.tasks.map((task, index) => <div key={task} className="flex items-center gap-3 rounded-2xl bg-white/80 px-3 py-2">
         <span className="grid size-7 shrink-0 place-items-center rounded-full bg-[#f3ddc5] font-bold text-primary">{index + 1}</span>
-        <span className="text-base">{task}</span>
+        <span className="flex-1 text-base">{task}</span><span className="text-sm font-semibold">{plan.taskStatuses?.[index] ?? '待确认'}</span>
       </div>)}
     </div>
     {!!plan.materials.length && <div className="mt-4 rounded-2xl border border-[#efd4b3] bg-white p-4">
       <div className="flex items-center gap-2 font-bold text-[#5d3c29]"><ClipboardList className="size-5 text-primary" />复诊材料清单</div>
       <ul className="mt-2 grid gap-2">
-        {plan.materials.map((material, index) => <li key={material} className="flex items-start gap-2 text-base leading-6">
+        {plan.materials.map((material) => <li key={material} className="flex items-start gap-2 text-base leading-6">
           <Check className="mt-0.5 size-5 shrink-0 text-primary" />
-          <span>{material}{index < 4 && <strong className="ml-2 text-sm text-primary">必带</strong>}</span>
+          <span>{material}</span>
         </li>)}
       </ul>
     </div>}
@@ -39,9 +40,9 @@ export function ConfirmationCardView({ card, busy, onConfirm, onCancel }: {
   </section>;
 }
 
-export function ResultCardView({ result }: { result: AgentResultCard }) {
+export function ResultCardView({ result, partial = false }: { result: AgentResultCard; partial?: boolean }) {
   return <section className="rounded-3xl border border-[#b7d6b0] bg-[#edf8e9] p-5 shadow-sm">
-    <div className="flex items-center gap-3"><span className="grid size-12 place-items-center rounded-full bg-[#4f8548] text-white"><Check /></span><div><p className="text-sm font-semibold text-green-800">办理完成</p><h2 className="text-xl font-bold">复诊事项卡</h2></div></div>
+    <div className="flex items-center gap-3"><span className="grid size-12 place-items-center rounded-full bg-[#4f8548] text-white"><Check /></span><div><p className="text-sm font-semibold text-green-800">{partial ? '预约已保留，部分事项待补办' : '办理完成'}</p><h2 className="text-xl font-bold">复诊事项卡</h2></div></div>
     <div className="mt-4 space-y-3 text-[17px] leading-7">
       <p className="flex gap-3"><CalendarCheck2 className="mt-1 size-5 shrink-0 text-green-800" /><span><strong>{result.date} {result.time}</strong><br />{result.hospital} · {result.department}</span></p>
       <p className="flex gap-3"><Clock3 className="mt-1 size-5 shrink-0 text-green-800" /><span>建议出发：<strong>{result.departureTime}</strong><br />{result.reminderStatus}</span></p>

@@ -57,12 +57,14 @@ export interface AgentPlanCard {
   date: string;
   selectedTime: string;
   tasks: string[];
+  taskStatuses: string[];
   materials: string[];
   departureTime: string;
   familyContact: string;
 }
 
 export interface AgentConfirmationCard {
+  confirmationId: string;
   title: string;
   operations: string[];
   impact: string;
