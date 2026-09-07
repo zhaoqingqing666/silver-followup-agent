@@ -1026,14 +1026,6 @@ public class FollowupAgentService {
         state.department = department.name();
     }
 
-    private void loadPrimaryContact(ConversationState state) {
-        try {
-            state.contact = familyTool.findPrimaryContact(state.id, state.userId);
-        } catch (RuntimeException ignored) {
-            state.contact = null;
-        }
-    }
-
     private void normalizeCatalogSelections(ConversationState state) {
         if (state.hospitalId == null && state.hospital != null) {
             catalog.hospital(state.hospital).ifPresent(item -> {
