@@ -27,9 +27,21 @@ export interface AppointmentSummary {
 
 export interface MaterialItem {
   id: string;
-  label: string;
-  prepared: boolean;
+  appointmentId: string;
+  materialCode: string;
+  materialName: string;
   required: boolean;
+  status: 'NOT_PREPARED' | 'PREPARED' | 'PHOTO_CONFIRMED';
+  confirmSource: string | null;
+  photoUrl: string | null;
+  updatedAt: string;
+}
+
+export interface VoicePreference {
+  userId: string;
+  autoSpeakEnabled: boolean;
+  speechRate: number;
+  speechVolume: number;
 }
 
 export interface ChatMessage {

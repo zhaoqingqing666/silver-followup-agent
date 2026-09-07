@@ -32,9 +32,27 @@ public class MockAppointmentTool implements AppointmentTool {
                 FROM appointment_slots
                 WHERE hospital_id=? AND department=?
                   AND appointment_date=? AND available=TRUE
+                  AND (appointment_date > CURRENT_DATE OR appointment_time > CURRENT_TIME)
                 ORDER BY appointment_time
                 """, slotMapper(), hospitalId, department, Date.valueOf(date));
         traces.record(conversationId, "appointment.querySlots", input, result, true);
+        return result;
+    }
+
+    @Override
+    public List<Slot> queryUpcomingSlots(String conversationId, String hospitalId, String department,
+                                         LocalDate from, LocalDate to) {
+        Map<String, Object> input = Map.of("hospitalId", hospitalId, "department", department,
+                "from", from, "to", to);
+        List<Slot> result = jdbc.query("""
+                SELECT id,hospital_id,hospital_name,department,appointment_date,appointment_time
+                FROM appointment_slots
+                WHERE hospital_id=? AND department=?
+                  AND appointment_date BETWEEN ? AND ? AND available=TRUE
+                  AND (appointment_date > CURRENT_DATE OR appointment_time > CURRENT_TIME)
+                ORDER BY appointment_date,appointment_time
+                """, slotMapper(), hospitalId, department, Date.valueOf(from), Date.valueOf(to));
+        traces.record(conversationId, "appointment.queryUpcomingSlots", input, result, true);
         return result;
     }
 
@@ -47,6 +65,7 @@ public class MockAppointmentTool implements AppointmentTool {
                 FROM appointment_slots
                 WHERE hospital_id=? AND department=?
                   AND appointment_date BETWEEN ? AND ? AND available=TRUE
+                  AND (appointment_date > CURRENT_DATE OR appointment_time > CURRENT_TIME)
                 ORDER BY appointment_date,appointment_time
                 """, slotMapper(), hospitalId, department,
                 Date.valueOf(date.minusDays(3)), Date.valueOf(date.plusDays(3)));

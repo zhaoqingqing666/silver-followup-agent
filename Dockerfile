@@ -18,15 +18,12 @@ RUN mvn -B -f backend/pom.xml clean package -DskipTests
 # ---------- 阶段 2：后端运行时 ----------
 FROM eclipse-temurin:17-jre AS silver-api
 WORKDIR /app
-# 基础镜像不含 wget/curl，装上 curl 供健康检查使用
-RUN apt-get update && apt-get install -y --no-install-recommends curl \
-    && rm -rf /var/lib/apt/lists/*
 # H2 文件库放到挂载卷的持久化目录（相对路径会让数据落到容器内不确定位置）
 ENV SPRING_DATASOURCE_URL=jdbc:h2:file:/app/data/silver-agent
 COPY --from=api-build /src/backend/target/*.jar /app/app.jar
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
-  CMD ["sh", "-c", "curl -fsS http://localhost:8080/api/demo/health || exit 1"]
+  CMD ["bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080; printf 'GET /api/demo/health HTTP/1.0\\r\\n\\r\\n' >&3; grep -q '200' <&3"]
 # 本地运行与容器部署的默认值保持一致，便于排查
 ENTRYPOINT ["java", "-jar", "/app/app.jar"]
 

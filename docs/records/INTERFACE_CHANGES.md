@@ -82,3 +82,27 @@
 - 新请求示例：{"conversationId":"会话ID","action":"SET_HOSPITAL","value":"h001","label":"市第一医院"}。
 - value 仍作为稳定数据库 ID，label 只负责展示；未提供 label 的旧请求仍可使用。
 - 自由语言意图新增 QUERY_HOSPITALS、QUERY_HOSPITAL_INFO、QUERY_DEPARTMENTS、REQUEST_RECOMMENDATION。
+
+## 2026-09-06 材料状态与语音偏好
+
+- 新增 GET /api/users/{userId}/appointments/{appointmentId}/materials。
+- 新增 PATCH /api/users/{userId}/appointments/{appointmentId}/materials/{materialId}。
+- 材料状态枚举：NOT_PREPARED、PREPARED、PHOTO_CONFIRMED。
+- 新增 GET、PUT /api/users/{userId}/preferences，保存自动播报、语速和音量。
+- 兼容性：仅新增接口；原预约列表和智能体接口未删除字段。
+
+## 2026-09-06 可预约号源查询
+
+- 自由语言意图新增 QUERY_AVAILABLE_SLOTS。
+- 结构化动作新增 SHOW_AVAILABLE_DATES，无 value。
+- 预约工具新增 queryUpcomingSlots(conversationId, hospitalId, department, from, to)。
+- 查询范围为当天至一个月后；已过去的当天时段不会返回。
+- 兼容性：仅新增意图、动作和内部工具方法，原接口字段不变。
+
+## 2026-09-06 中控与我的预约支线
+
+- 自由语言意图新增 QUERY_APPOINTMENTS、RESTART_TASK、RESUME_TASK、CHANGE_DEPARTMENT、CHANGE_TIME、CONFIRM_ACTION、DENY_ACTION。
+- POST /api/agent/actions 新增 QUERY_APPOINTMENTS、SELECT_APPOINTMENT_TO_CANCEL、RESUME_INTERRUPTED、CHANGE_DEPARTMENT、CHANGE_TIME。
+- 新增后端内部工具 appointment.queryMine，可按 userId、date、hospital、department 查询已确认预约。
+- AgentTurnResponse 未新增或删除字段；查询到单条预约时复用 result 卡，多条时返回摘要和预约ID绑定的快捷操作。
+- 兼容性：仅增加动作与意图，原前端字段结构不变。

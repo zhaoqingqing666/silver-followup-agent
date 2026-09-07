@@ -15,6 +15,7 @@ public class RuleFactExtractor implements FactExtractor {
     private final CareCatalogRepository catalog;
     private static final Pattern CN_DATE = Pattern.compile("(\\d{1,2})月(\\d{1,2})[日号]?");
     private static final Pattern ISO_DATE = Pattern.compile("(20\\d{2})-(\\d{1,2})-(\\d{1,2})");
+    private static final Pattern SHORT_DATE = Pattern.compile("(?<!\\d)(\\d{1,2})\\s*[./-]\\s*(\\d{1,2})(?!\\d)");
     private static final Pattern TIME = Pattern.compile("(\\d{1,2})[:：点时](\\d{1,2})?");
 
     public RuleFactExtractor(CareCatalogRepository catalog) {
@@ -45,14 +46,23 @@ public class RuleFactExtractor implements FactExtractor {
     private String detectIntent(String value) {
         if (containsAny(value, "胸痛", "呼吸困难", "昏迷", "大出血", "喘不上气")) return "EMERGENCY";
         if (containsAny(value, "怎么用药", "药量", "诊断", "检查结果", "是不是得了", "吃什么药", "推荐药", "加量", "减量", "治疗方案", "停药")) return "MEDICAL_ADVICE";
-        if (containsAny(value, "取消整个", "不办了", "停止办理")) return "CANCEL_TASK";
-        if (containsAny(value, "取消预约", "取消这次")) return "CANCEL_APPOINTMENT";
+        if (containsAny(value, "取消整个", "不办了", "停止办理", "不想预约了", "退出预约", "先不约了")) return "CANCEL_TASK";
+        if (value.contains("取消") && containsAny(value, "预约", "复诊")) return "CANCEL_APPOINTMENT";
+        if (containsAny(value, "取消预约", "取消这次预约", "取消已经预约", "取消已预约")) return "CANCEL_APPOINTMENT";
+        if (containsAny(value, "确认", "执行操作", "确定执行")) return "CONFIRM_ACTION";
+        if (containsAny(value, "不执行", "暂不执行", "返回修改", "先别执行")) return "DENY_ACTION";
+        if (containsAny(value, "我的预约", "我的复诊时间", "预约情况", "查预约", "查询预约", "已经约了")) return "QUERY_APPOINTMENTS";
+        if (containsAny(value, "重新开始", "重新办理", "从头开始")) return "RESTART_TASK";
+        if (containsAny(value, "继续刚才", "继续办理", "接着办理")) return "RESUME_TASK";
+        if (containsAny(value, "有哪些时间", "什么时候有号", "哪天有号", "可预约时间", "可预约日期", "查询号源")) return "QUERY_AVAILABLE_SLOTS";
         if (containsAny(value, "有哪些科室", "有什么科室", "开设哪些科室", "科室列表")) return "QUERY_DEPARTMENTS";
         if (containsAny(value, "有哪些医院", "有什么医院", "医院列表")) return "QUERY_HOSPITALS";
         if (containsAny(value, "医院怎么样", "医院介绍", "医院资料", "了解医院")) return "QUERY_HOSPITAL_INFO";
         if (containsAny(value, "推荐", "哪家医院好", "怎么选医院", "选哪家医院")) return "REQUEST_RECOMMENDATION";
         if (containsAny(value, "换医院", "修改医院")) return "CHANGE_HOSPITAL";
+        if (containsAny(value, "换科室", "修改科室", "改科室")) return "CHANGE_DEPARTMENT";
         if (containsAny(value, "换日期", "改日期", "改成", "不行了")) return "CHANGE_DATE";
+        if (containsAny(value, "换时间", "修改时间", "改时间")) return "CHANGE_TIME";
         if (containsAny(value, "材料", "带什么", "准备什么")) return "ASK_MATERIALS";
         if (containsAny(value, "复诊", "预约")) return "CREATE_FOLLOWUP";
         return "PROVIDE_INFORMATION";
@@ -73,6 +83,14 @@ public class RuleFactExtractor implements FactExtractor {
         }
         Matcher iso = ISO_DATE.matcher(message);
         if (iso.find()) return safeDate(Integer.parseInt(iso.group(1)), Integer.parseInt(iso.group(2)), Integer.parseInt(iso.group(3)));
+        Matcher shortDate = SHORT_DATE.matcher(message);
+        if (shortDate.find()) {
+            int month = Integer.parseInt(shortDate.group(1));
+            int day = Integer.parseInt(shortDate.group(2));
+            LocalDate candidate = safeDate(today.getYear(), month, day);
+            if (candidate != null && candidate.isBefore(today.minusDays(1))) candidate = safeDate(today.getYear() + 1, month, day);
+            return candidate;
+        }
         Matcher cn = CN_DATE.matcher(message);
         if (!cn.find()) return null;
         int month = Integer.parseInt(cn.group(1));

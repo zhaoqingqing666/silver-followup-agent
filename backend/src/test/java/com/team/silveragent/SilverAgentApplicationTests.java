@@ -225,4 +225,32 @@ class SilverAgentApplicationTests {
             assertThat(count("family_notifications")).isEqualTo(1);
         } finally { pool.shutdownNow(); }
     }
+
+    @Test
+    void sideQueryCanReturnToInterruptedBookingFlow() {
+        AgentTurnResponse turn = service.start();
+        String id = turn.conversationId();
+        service.act(id, "SET_HOSPITAL", "h002", "市人民医院");
+
+        AgentTurnResponse queried = service.chat(id, "我的复诊时间是什么时候");
+        assertThat(queried.quickReplies()).extracting(AgentTurnResponse.QuickReply::action)
+                .contains("RESUME_INTERRUPTED");
+
+        AgentTurnResponse resumed = service.act(id, "RESUME_INTERRUPTED", "", "继续刚才办理");
+        assertThat(resumed.stage()).isEqualTo("ASK_DEPARTMENT");
+        assertThat(resumed.reply()).contains("科室");
+    }
+
+    private LocalDate nextWeekday() {
+        LocalDate date = LocalDate.now().plusDays(1);
+        while (date.getDayOfWeek().getValue() >= 6) date = date.plusDays(1);
+        return date;
+    }
+
+    private LocalDate nextWeekendWithoutSeed() {
+        LocalDate date = LocalDate.now().plusDays(1);
+        while (date.getDayOfWeek().getValue() < 6) date = date.plusDays(1);
+        if (date.equals(LocalDate.of(2026, 9, 19))) date = date.plusDays(1);
+        return date;
+    }
 }

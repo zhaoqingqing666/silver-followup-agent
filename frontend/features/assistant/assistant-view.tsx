@@ -3,14 +3,11 @@
 import { FormEvent, useEffect, useRef, useState } from 'react';
 import { CalendarSearch, ClipboardCheck, LoaderCircle, Mic, RefreshCw, Send, Sparkles } from 'lucide-react';
 import { PageHeader } from '@/components/common/page-header';
-import { confirmAgentActions, getConversationHistory, sendAgentAction, sendAgentMessage, startConversation } from '@/lib/agent-api';
-import type { AgentPlanCard, AgentTurnResponse, ChatMessage, TabId } from '@/types/domain';
+import { confirmAgentActions, sendAgentAction, sendAgentMessage, startConversation } from '@/lib/agent-api';
+import { speakText, stopSpeech } from '@/lib/speech-service';
+import type { AgentPlanCard, AgentTurnResponse, ChatMessage, TabId, VoicePreference } from '@/types/domain';
 import { ConfirmationCardView, PlanCard, ResultCardView } from './assistant-cards';
 import { ChatBubble } from './chat-bubble';
-import { ToolTracePanel } from './tool-trace-panel';
-
-const CONVERSATION_KEY = 'silver-agent-current-conversation';
-
 
 interface SpeechRecognitionLike {
   lang: string;
@@ -28,28 +25,47 @@ const stageLabels: Record<string, string> = {
   EMERGENCY_PAUSED: '已暂停，请及时求助', PARTIAL: '部分完成', TOOL_ERROR: '需要重试或修改', AWAITING_CONFIRMATION: '等待确认', COMPLETED: '办理完成', CANCELLED: '已取消',
 };
 
-export function AssistantView({ onNavigate }: { onNavigate: (tab: TabId) => void }) {
+export function AssistantView({ active, onNavigate, voicePreference }: {
+  active: boolean;
+  onNavigate: (tab: TabId) => void;
+  voicePreference: VoicePreference;
+}) {
   const [conversationId, setConversationId] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [turn, setTurn] = useState<AgentTurnResponse | null>(null);
   const [visiblePlan, setVisiblePlan] = useState<AgentPlanCard | null>(null);
   const [input, setInput] = useState('');
-  const [busy, setBusy] = useState(true);
+  const [busy, setBusy] = useState(false);
   const [listening, setListening] = useState(false);
   const [choicePage, setChoicePage] = useState(0);
   const recognition = useRef<SpeechRecognitionLike | null>(null);
   const bottomAnchor = useRef<HTMLDivElement | null>(null);
+  const initialized = useRef(false);
+  const planShown = useRef(false);
 
   const addAssistant = (response: AgentTurnResponse) => {
     setTurn(response);
     setChoicePage(0);
     setConversationId(response.conversationId);
-    window.localStorage.setItem(CONVERSATION_KEY, response.conversationId);
-    setVisiblePlan(response.plan);
-    setMessages(items => [...items, { id: crypto.randomUUID(), role: 'assistant', text: response.reply }]);
+    if (response.plan && !planShown.current) {
+      setVisiblePlan(response.plan);
+      planShown.current = true;
+    } else {
+      setVisiblePlan(null);
+    }
+    const messageId = crypto.randomUUID();
+    setMessages(items => [...items, { id: messageId, role: 'assistant', text: response.reply }]);
+    if (active && voicePreference.autoSpeakEnabled) {
+      speakText(response.reply, messageId, {
+        rate: voicePreference.speechRate,
+        volume: voicePreference.speechVolume,
+      });
+    }
   };
 
   const begin = async () => {
+    initialized.current = true;
+    planShown.current = false;
     setBusy(true);
     setMessages([]);
     setTurn(null);
@@ -60,32 +76,15 @@ export function AssistantView({ onNavigate }: { onNavigate: (tab: TabId) => void
   };
 
   useEffect(() => {
-    const restore = async () => {
-      const savedId = window.localStorage.getItem(CONVERSATION_KEY);
-      if (!savedId) {
-        await begin();
-        return;
-      }
-      setBusy(true);
-      try {
-        const history = await getConversationHistory(savedId);
-        setConversationId(history.conversationId);
-        setTurn(history.current);
-        setVisiblePlan(history.current.plan);
-        setMessages(history.messages.map(message => ({
-          id: String(message.id),
-          role: message.role,
-          text: message.content,
-        })));
-      } catch {
-        window.localStorage.removeItem(CONVERSATION_KEY);
-        await begin();
-        return;
-      }
-      setBusy(false);
-    };
-    void restore();
-  }, []);
+    if (active && !initialized.current) void begin();
+    if (!active) stopSpeech();
+  }, [active]);
+
+  useEffect(() => {
+    if (!voicePreference.autoSpeakEnabled) stopSpeech();
+  }, [voicePreference.autoSpeakEnabled]);
+
+  useEffect(() => () => stopSpeech(), []);
 
   useEffect(() => {
     bottomAnchor.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
@@ -94,6 +93,7 @@ export function AssistantView({ onNavigate }: { onNavigate: (tab: TabId) => void
   const sendText = async (raw: string) => {
     const value = raw.trim();
     if (!value || !conversationId || busy) return;
+    stopSpeech();
     setMessages(items => [...items, { id: crypto.randomUUID(), role: 'user', text: value }]);
     setInput('');
     setBusy(true);
@@ -104,6 +104,7 @@ export function AssistantView({ onNavigate }: { onNavigate: (tab: TabId) => void
 
   const sendAction = async (action: string, value: string, label: string) => {
     if (!conversationId || busy) return;
+    stopSpeech();
     if (action === 'OPEN_TASKS') {
       onNavigate('tasks');
       return;
@@ -119,6 +120,7 @@ export function AssistantView({ onNavigate }: { onNavigate: (tab: TabId) => void
 
   const confirm = async (approved: boolean) => {
     if (!conversationId || busy || !turn?.confirmation) return;
+    stopSpeech();
     setMessages(items => [...items, { id: crypto.randomUUID(), role: 'user', text: approved ? '我确认执行这些操作' : '暂不执行' }]);
     setBusy(true);
     try {
@@ -176,8 +178,6 @@ export function AssistantView({ onNavigate }: { onNavigate: (tab: TabId) => void
       {visiblePlan && <PlanCard plan={visiblePlan} />}
       {turn?.confirmation && <ConfirmationCardView card={turn.confirmation} busy={busy} onConfirm={() => void confirm(true)} onCancel={() => void confirm(false)} />}
       {turn?.result && <ResultCardView result={turn.result} partial={turn.stage === 'PARTIAL'} />}
-      {turn && <ToolTracePanel traces={turn.toolTraces} />}
-
       {!!turn?.quickReplies.length && !turn.confirmation && <section aria-label="快捷回答" className="flex flex-wrap gap-2">
         {turn.quickReplies.slice(choicePage * 3, choicePage * 3 + 3).map(choice => <button key={choice.label + choice.action + choice.value} disabled={busy} onClick={() => void sendAction(choice.action, choice.value, choice.label)} className="min-h-12 rounded-2xl border border-[#dfb98f] bg-white px-4 text-base font-semibold text-[#6c3d24] shadow-sm disabled:opacity-50">{choice.label}</button>)}
       </section>}
