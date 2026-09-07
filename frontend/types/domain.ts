@@ -112,4 +112,13 @@ export interface UserProfile {
   name: string;
   homeAddress: string | null;
   preferredTransport: string | null;
+  /** 展示用家属联系人；电话为后端脱敏掩码，不含明文。 */
+  contacts?: FamilyContact[];
+}
+
+export interface FamilyContact {
+  id: string;
+  name: string;
+  relationship: string;
+  maskedPhone: string;
 }

@@ -369,7 +369,7 @@ public class FollowupAgentService {
         appointmentRecords.complete(state.appointmentId, state, reminders, family);
         ResultCard card = new ResultCard(state.appointmentId, state.hospital, state.department,
                 state.date.format(DATE_LABEL), state.selectedSlot.time().format(TIME_LABEL), state.materials,
-                state.travelPlan == null ? "尚未计算" : state.travelPlan.departureAt().format(TIME_LABEL), reminders, family);
+                state.travelPlan == null ? "未提供出发建议（路线或时间信息不足）" : state.travelPlan.departureAt().format(TIME_LABEL), reminders, family);
         return finish(state, new AgentTurnResponse(state.id, state.stage.name(), message, bookedActions(state),
                 plan(state), null, card, traces.findByConversation(state.id)));
     }

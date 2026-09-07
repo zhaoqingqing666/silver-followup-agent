@@ -45,7 +45,7 @@ export function ResultCardView({ result, partial = false }: { result: AgentResul
     <div className="flex items-center gap-3"><span className="grid size-12 place-items-center rounded-full bg-[#4f8548] text-white"><Check /></span><div><p className="text-sm font-semibold text-green-800">{partial ? '预约已保留，部分事项待补办' : '办理完成'}</p><h2 className="text-xl font-bold">复诊事项卡</h2></div></div>
     <div className="mt-4 space-y-3 text-[17px] leading-7">
       <p className="flex gap-3"><CalendarCheck2 className="mt-1 size-5 shrink-0 text-green-800" /><span><strong>{result.date} {result.time}</strong><br />{result.hospital} · {result.department}</span></p>
-      <p className="flex gap-3"><Clock3 className="mt-1 size-5 shrink-0 text-green-800" /><span>建议出发：<strong>{result.departureTime}</strong><br />{result.reminderStatus}</span></p>
+      <p className="flex gap-3"><Clock3 className="mt-1 size-5 shrink-0 text-green-800" /><span>建议出发：<strong>{result.departureTime ?? '未提供出发建议'}</strong><br />{result.reminderStatus}</span></p>
       <p className="flex gap-3"><UsersRound className="mt-1 size-5 shrink-0 text-green-800" /><span>{result.familyStatus}</span></p>
       <div className="flex gap-3"><ClipboardList className="mt-1 size-5 shrink-0 text-green-800" /><div><strong>携带材料</strong><p>{result.materials.join('、')}</p></div></div>
       <p className="flex gap-3 text-sm text-muted-foreground"><MapPin className="mt-1 size-4 shrink-0" />模拟预约编号：{result.appointmentId}</p>

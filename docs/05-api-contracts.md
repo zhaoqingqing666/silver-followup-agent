@@ -35,7 +35,19 @@ POST /api/agent/confirmations
 
 GET /api/users/user-001
 
-返回姓名、模拟住址和偏好交通方式；首页不得写死用户姓名。
+返回姓名、模拟住址、偏好交通方式和展示用家属联系人（`contacts`，电话为脱敏掩码）。首页与设置页均从此接口读取，不得在页面写死用户姓名或家属信息。
+
+```json
+{
+  "id": "user-001",
+  "name": "王阿姨",
+  "homeAddress": "幸福小区（模拟）",
+  "preferredTransport": "家属开车",
+  "contacts": [{ "id": "family-001", "name": "小丽", "relationship": "女儿", "maskedPhone": "138****1234" }]
+}
+```
+
+`contacts` 为 2026-09-07 新增的可选字段；后端只返回脱敏电话，不含明文。Agent 流程中家属候选人仍走内部联系人查询，与此接口无耦合。
 
 ## 查询真实事项
 
