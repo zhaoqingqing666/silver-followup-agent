@@ -104,7 +104,12 @@ class ConversationStore {
             String transport, Slot selectedSlot, Slot recommendedSlot, String timePreference,
             java.time.LocalTime requestedTime,
             List<Slot> alternatives, TravelPlan travelPlan,
-            Contact contact, List<String> materials, String pendingAction, String appointmentId, String confirmationId, String originalAppointmentId, boolean materialReminderDone, boolean departureReminderDone, boolean notificationDone, boolean scheduleChecked
+            Contact contact, List<String> materials, String pendingAction, String appointmentId,
+            String pendingAppointmentId, ConversationState.Stage interruptedStage,
+            String interruptedPendingAction, String interruptedPendingAppointmentId,
+            String sideTask, String returnPolicy, String confirmationId, String originalAppointmentId,
+            boolean materialReminderDone, boolean departureReminderDone,
+            boolean notificationDone, boolean scheduleChecked
     ) {
         static Snapshot from(ConversationState state) {
             return new Snapshot(state.stage, state.userId, state.hospitalId, state.hospital,
@@ -112,7 +117,12 @@ class ConversationStore {
                     state.acceptAlternative, state.needCompanion, state.needTravel, state.notifyFamily,
                     state.transport, state.selectedSlot, state.recommendedSlot, state.timePreference,
                     state.requestedTime, state.alternatives, state.travelPlan,
-                    state.contact, state.materials, state.pendingAction, state.appointmentId, state.confirmationId, state.originalAppointmentId, state.materialReminderDone, state.departureReminderDone, state.notificationDone, state.scheduleChecked);
+                    state.contact, state.materials, state.pendingAction, state.appointmentId,
+                    state.pendingAppointmentId, state.interruptedStage,
+                    state.interruptedPendingAction, state.interruptedPendingAppointmentId,
+                    state.sideTask, state.returnPolicy, state.confirmationId, state.originalAppointmentId,
+                    state.materialReminderDone, state.departureReminderDone,
+                    state.notificationDone, state.scheduleChecked);
         }
 
         ConversationState toState(String id) {
@@ -138,6 +148,12 @@ class ConversationStore {
             state.materials = materials == null ? List.of() : materials;
             state.pendingAction = pendingAction;
             state.appointmentId = appointmentId;
+            state.pendingAppointmentId = pendingAppointmentId;
+            state.interruptedStage = interruptedStage;
+            state.interruptedPendingAction = interruptedPendingAction;
+            state.interruptedPendingAppointmentId = interruptedPendingAppointmentId;
+            state.sideTask = sideTask;
+            state.returnPolicy = returnPolicy;
             state.confirmationId = confirmationId;
             state.originalAppointmentId = originalAppointmentId;
             state.materialReminderDone = materialReminderDone;

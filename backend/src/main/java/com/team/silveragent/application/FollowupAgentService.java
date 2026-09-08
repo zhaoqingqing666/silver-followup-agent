@@ -9,6 +9,7 @@ import com.team.silveragent.domain.model.AgentTurnResponse.PlanCard;
 import com.team.silveragent.domain.model.AgentTurnResponse.QuickReply;
 import com.team.silveragent.domain.model.AgentTurnResponse.ResultCard;
 import com.team.silveragent.domain.model.ConversationHistoryResponse;
+import com.team.silveragent.domain.model.ToolModels.AppointmentSummary;
 import com.team.silveragent.domain.model.ToolModels.Conflict;
 import com.team.silveragent.domain.model.ToolModels.DepartmentProfile;
 import com.team.silveragent.domain.model.ToolModels.HospitalProfile;
@@ -18,6 +19,8 @@ import com.team.silveragent.domain.tool.DepartmentCatalogTool;
 import com.team.silveragent.domain.tool.FamilyNotificationTool;
 import com.team.silveragent.domain.tool.HospitalCatalogTool;
 import com.team.silveragent.domain.tool.MaterialChecklistTool;
+import com.team.silveragent.domain.tool.MaterialPreparationTool;
+import com.team.silveragent.domain.tool.MyAppointmentTool;
 import com.team.silveragent.domain.tool.ScheduleTool;
 import com.team.silveragent.domain.tool.TravelTool;
 import com.team.silveragent.infrastructure.mock.ToolTraceStore;
@@ -46,11 +49,14 @@ public class FollowupAgentService {
     private final TravelTool travelTool;
     private final FamilyNotificationTool familyTool;
     private final MaterialChecklistTool materialTool;
+    private final MaterialPreparationTool materialPreparationTool;
+    private final MyAppointmentTool myAppointmentTool;
     private final ToolTraceStore traces;
     private final DeepSeekFactExtractor extractor;
     private final ConversationStore conversations;
     private final AppointmentRecordStore appointmentRecords;
     private final CareCatalogRepository catalog;
+    private final AgentOrchestrator orchestrator;
     private final String defaultUserId;
     private final Map<String, ConversationState> sessions = new ConcurrentHashMap<>();
 
@@ -62,11 +68,14 @@ public class FollowupAgentService {
             TravelTool travelTool,
             FamilyNotificationTool familyTool,
             MaterialChecklistTool materialTool,
+            MaterialPreparationTool materialPreparationTool,
+            MyAppointmentTool myAppointmentTool,
             ToolTraceStore traces,
             DeepSeekFactExtractor extractor,
             ConversationStore conversations,
             AppointmentRecordStore appointmentRecords,
             CareCatalogRepository catalog,
+            AgentOrchestrator orchestrator,
             @Value("${demo.user-id:user-001}") String defaultUserId) {
         this.appointmentTool = appointmentTool;
         this.hospitalCatalogTool = hospitalCatalogTool;
@@ -75,11 +84,14 @@ public class FollowupAgentService {
         this.travelTool = travelTool;
         this.familyTool = familyTool;
         this.materialTool = materialTool;
+        this.materialPreparationTool = materialPreparationTool;
+        this.myAppointmentTool = myAppointmentTool;
         this.traces = traces;
         this.extractor = extractor;
         this.conversations = conversations;
         this.appointmentRecords = appointmentRecords;
         this.catalog = catalog;
+        this.orchestrator = orchestrator;
         this.defaultUserId = defaultUserId;
     }
 
@@ -129,53 +141,59 @@ public class FollowupAgentService {
                 LocalDate.now(), conversations.recentMessages(state.id));
         ExtractedFacts facts = extractor.extract(value, context);
         conversations.addMessage(state.id, "user", value);
+        AgentOrchestrator.Route route = orchestrator.decide(value, facts, state);
+        return switch (route) {
+            case EMERGENCY -> emergency(state);
+            case MEDICAL_BOUNDARY -> respond(state,
+                    "我只能协助办理复诊，不能诊断疾病、解释检查结果或调整用药。请咨询医生或专业医疗机构。",
+                    resumeReplies(state, q("咨询人工", "CONTACT_HUMAN", "")));
+            case CONFIRM_PENDING -> confirm(conversationId, true, state.confirmationId);
+            case DENY_PENDING -> confirm(conversationId, false, state.confirmationId);
+            case CANCEL_CURRENT_TASK -> cancelTask(state);
+            case CANCEL_EXISTING_APPOINTMENT -> beginCancelExistingAppointment(state, facts);
+            case QUERY_MY_APPOINTMENTS -> queryMyAppointments(state, facts);
+            case RESTART_TASK -> restartInCurrentConversation(state);
+            case RESUME_TASK -> resumeInterruptedTask(state);
+            case QUERY_HOSPITALS -> showHospitals(state, facts.hospital());
+            case QUERY_DEPARTMENTS -> showDepartments(state, facts.hospital());
+            case RECOMMEND_HOSPITAL -> recommendHospitals(state, facts.department());
+            case QUERY_AVAILABLE_SLOTS -> {
+                if (facts.date() != null) applyFacts(state, facts);
+                else clearSlotSelection(state, true);
+                yield showAvailableSlots(state);
+            }
+            case ASK_MATERIALS -> showMaterials(state, facts);
+            case CHANGE_HOSPITAL -> changeHospital(state, facts);
+            case CHANGE_DEPARTMENT -> changeDepartment(state, facts);
+            case CHANGE_DATE -> changeDate(state, facts);
+            case CHANGE_TIME -> changeTime(state, facts);
+            case CURRENT_FLOW -> continueCurrentFlow(state, facts);
+        };
+    }
 
-        if ("EMERGENCY".equals(facts.intent()) || containsAny(value, "胸痛", "呼吸困难", "昏迷", "大出血", "喘不上气")) {
-            return emergency(state);
+    private AgentTurnResponse continueCurrentFlow(ConversationState state, ExtractedFacts facts) {
+        if (state.stage == ConversationState.Stage.AWAITING_CONFIRMATION) {
+            if ("CANCEL_EXISTING".equals(state.pendingAction) && state.pendingAppointmentId != null) {
+                return prepareExistingCancellation(state, state.pendingAppointmentId);
+            }
+            if (state.selectedSlot != null) return buildConfirmation(state);
+            return respond(state, "当前有一项重要操作等待确认。请明确选择确认或返回修改。", List.of());
         }
-        if ("MEDICAL_ADVICE".equals(facts.intent()) || containsAny(value, "怎么用药", "药量", "诊断", "检查结果", "是不是得了", "吃什么药", "推荐药", "加量", "减量", "治疗方案", "停药")) {
-            return respond(state, "我只能协助办理复诊，不能诊断疾病、解释检查结果或调整用药。请咨询医生或专业医疗机构。",
-                    List.of(q("继续办理复诊", "CONTINUE", ""), q("咨询人工", "CONTACT_HUMAN", "")));
-        }
-        if ("CANCEL_TASK".equals(facts.intent())) return cancelTask(state);
-        if ("CANCEL_APPOINTMENT".equals(facts.intent()) && state.appointmentId != null) {
-            state.pendingAction = "CANCEL";
-            state.stage = ConversationState.Stage.AWAITING_CONFIRMATION;
-            return respondWithCancelCard(state);
-        }
-        if (state.appointmentId != null) {
-            return respondWithPlan(state, "已有预约已保留。请先选择修改预约、取消预约或补办未完成事项。", bookedActions(state));
-        }
-        invalidate(state);
-        if ("QUERY_HOSPITALS".equals(facts.intent()) || "QUERY_HOSPITAL_INFO".equals(facts.intent())) {
-            return showHospitals(state, facts.hospital());
-        }
-        if ("QUERY_DEPARTMENTS".equals(facts.intent())) {
-            return showDepartments(state, facts.hospital());
-        }
-        if ("REQUEST_RECOMMENDATION".equals(facts.intent())) {
-            return recommendHospitals(state, facts.department());
+        discardInterruption(state);
+        if (facts.date() != null && (facts.date().isBefore(LocalDate.now())
+                || facts.date().isAfter(LocalDate.now().plusMonths(1)))) {
+            return respond(state, "目前可以查询今天到一个月后的模拟号源，请在这个日期范围内重新选择。",
+                    List.of(q("查看可预约日期", "SHOW_AVAILABLE_DATES", ""),
+                            q("我自己说日期", "ASK_HUMAN_INPUT", "")));
         }
 
         ConversationState.Stage previousStage = state.stage;
         applyFacts(state, facts);
-        if (previousStage == ConversationState.Stage.COMPLETED
-                && "CREATE_FOLLOWUP".equals(facts.intent())) {
-            return start(state.userId);
-        }
         if (previousStage == ConversationState.Stage.CONFIRM_SLOT && state.recommendedSlot != null) {
-            if (Boolean.TRUE.equals(facts.acceptRecommendedTime())) {
-                return selectSlot(state, state.recommendedSlot.id());
-            }
-            if (Boolean.FALSE.equals(facts.acceptRecommendedTime())) {
-                return showPeriodSlots(state, state.timePreference);
-            }
+            if (Boolean.TRUE.equals(facts.acceptRecommendedTime())) return selectSlot(state, state.recommendedSlot.id());
+            if (Boolean.FALSE.equals(facts.acceptRecommendedTime())) return showPeriodSlots(state, state.timePreference);
         }
-        if (facts.selectedTime() != null
-                && (previousStage == ConversationState.Stage.SELECT_PERIOD
-                || previousStage == ConversationState.Stage.CONFIRM_SLOT
-                || previousStage == ConversationState.Stage.SELECT_SLOT
-                || previousStage == ConversationState.Stage.NO_SLOT)) {
+        if (facts.selectedTime() != null && isSelectingTime(previousStage)) {
             return recommendSpecificTime(state, facts.selectedTime());
         }
         if ((previousStage == ConversationState.Stage.SELECT_PERIOD
@@ -184,24 +202,8 @@ public class FollowupAgentService {
             return recommendPeriod(state, facts.timePreference());
         }
         if (previousStage == ConversationState.Stage.NO_SLOT && facts.date() != null) {
-            state.selectedSlot = null;
-            state.recommendedSlot = null;
-            state.alternatives = List.of();
+            clearSlotSelection(state, false);
             return querySlots(state);
-        }
-        if ("CHANGE_HOSPITAL".equals(facts.intent())) {
-            resetAfterHospital(state);
-            if (facts.hospital() != null) chooseHospital(state, facts.hospital());
-            applyFacts(state, facts);
-        }
-        if ("CHANGE_DATE".equals(facts.intent())) {
-            resetAfterDate(state);
-            if (facts.date() != null) state.date = facts.date();
-        }
-        if ("ASK_MATERIALS".equals(facts.intent()) && !state.materials.isEmpty()) {
-            return respondWithPlan(state, acknowledgement(facts,
-                    "这是根据您当前医院和科室生成的材料清单。您可以继续修改计划。"),
-                    List.of(q("继续办理", "CONTINUE", ""), q("修改日期", "CHANGE_DATE", "")));
         }
         return advance(state, facts);
     }
@@ -240,7 +242,9 @@ public class FollowupAgentService {
             return respondWithPlan(state, "原预约仍然有效。请修改草稿，确认新方案后才会变更原预约。",
                     List.of(q("修改日期", "CHANGE_DATE", ""), q("修改医院", "CHANGE_HOSPITAL", "")));
         }
-        if (state.appointmentId != null && !"CANCEL_APPOINTMENT".equals(action))
+        if (state.appointmentId != null && !List.of("CANCEL_APPOINTMENT", "QUERY_APPOINTMENTS",
+                "OPEN_TASKS", "NEW_BOOKING", "CONTACT_HUMAN", "CANCEL_TASK",
+                "RETRY_EXECUTION", "EDIT_BOOKING").contains(action))
             return respondWithPlan(state, "已有预约已保留，请选择下一步。", bookedActions(state));
         if ("KEEP_CONFLICT".equals(action) && state.stage != ConversationState.Stage.CONFLICT)
             return respond(state, "请先检查当前日程。", List.of(q("检查计划", "START_PLAN", "")));
@@ -260,27 +264,38 @@ public class FollowupAgentService {
             case "EDIT_PREFERENCES" -> { state.needCompanion = null; state.needTravel = null; state.notifyFamily = null; state.contact = null; invalidate(state); }
             case "START_PLAN" -> { return ready(state) ? checkSchedule(state) : advance(state, ExtractedFacts.empty()); }
             case "RETRY_QUERY" -> { return querySlots(state); }
-            case "NEW_BOOKING" -> { return start(state.userId); }
+            case "SHOW_AVAILABLE_DATES" -> { return showAvailableSlots(state); }
+            case "NEW_BOOKING" -> { return restartInCurrentConversation(state); }
             case "SELECT_SLOT" -> { return selectSlot(state, safeValue); }
             case "KEEP_CONFLICT" -> { state.scheduleChecked = true; return buildConfirmation(state); }
             case "CHANGE_DATE" -> {
+                discardInterruption(state);
                 resetAfterDate(state);
                 return askDate(state, "好的，尚未提交预约。请告诉我新的复诊日期。");
             }
             case "CHANGE_HOSPITAL" -> {
+                discardInterruption(state);
                 resetAfterHospital(state);
                 return askHospital(state, "好的，尚未提交预约。请重新选择医院。");
             }
-            case "CANCEL_APPOINTMENT" -> {
-                if (state.appointmentId == null) {
-                    return respond(state, "当前没有可以取消的已确认预约。", List.of(q("继续办理", "CONTINUE", "")));
-                }
-                state.pendingAction = "CANCEL";
-                state.stage = ConversationState.Stage.AWAITING_CONFIRMATION;
-                return respondWithCancelCard(state);
+            case "CHANGE_DEPARTMENT" -> {
+                discardInterruption(state);
+                resetAfterDepartment(state);
+                return askDepartment(state, "好的，尚未提交预约。请重新选择复诊科室。");
             }
+            case "CHANGE_TIME" -> { return changeTime(state, ExtractedFacts.empty()); }
+            case "CANCEL_APPOINTMENT" -> {
+                return beginCancelExistingAppointment(state, ExtractedFacts.empty());
+            }
+            case "QUERY_APPOINTMENTS" -> { return queryMyAppointments(state, ExtractedFacts.empty()); }
+            case "SELECT_APPOINTMENT_TO_CANCEL" -> { return prepareExistingCancellation(state, safeValue); }
             case "CANCEL_TASK" -> { return cancelTask(state); }
-            case "CONTINUE" -> { return advance(state, ExtractedFacts.empty()); }
+            case "RESUME_INTERRUPTED" -> { return resumeInterruptedTask(state); }
+            case "CONTINUE" -> {
+                return state.interruptedStage == null
+                        ? advance(state, ExtractedFacts.empty())
+                        : resumeInterruptedTask(state);
+            }
             case "CONTACT_HUMAN" -> {
                 return respond(state, "已为您保留当前办理进度。这里是模拟人工帮助入口，工作人员可以接着处理。",
                         List.of(q("继续办理", "CONTINUE", "")));
@@ -307,6 +322,18 @@ public class FollowupAgentService {
         state.confirmationId = null;
         conversations.addMessage(state.id, "user", approved ? "[确认] 执行操作" : "[确认] 暂不执行");
         if (!approved) {
+            if ("CANCEL".equals(state.pendingAction) || "CANCEL_EXISTING".equals(state.pendingAction)) {
+                state.pendingAction = "CREATE";
+                state.pendingAppointmentId = null;
+                if (state.interruptedStage != null) {
+                    state.stage = state.interruptedStage;
+                    return respond(state, "好的，原预约已经保留。您要继续刚才的复诊办理吗？",
+                            resumeReplies(state));
+                }
+                state.stage = ConversationState.Stage.COMPLETED;
+                return respond(state, "好的，原预约已经保留，没有执行取消操作。",
+                        List.of(q("查询我的预约", "QUERY_APPOINTMENTS", ""), q("重新办理", "NEW_BOOKING", "")));
+            }
             state.pendingAction = "CREATE";
             state.stage = state.appointmentId == null ? ConversationState.Stage.READY_TO_PLAN
                     : (state.materialReminderDone && (!Boolean.TRUE.equals(state.needTravel) || state.departureReminderDone)
@@ -316,12 +343,20 @@ public class FollowupAgentService {
                     state.appointmentId == null ? List.of(q("修改日期", "CHANGE_DATE", ""), q("修改偏好", "EDIT_PREFERENCES", ""), q("检查计划", "START_PLAN", "")) : bookedActions(state));
         }
         try {
-            if ("CANCEL".equals(state.pendingAction)) {
-                appointmentTool.cancel(state.id, state.appointmentId, state.userId);
-                state.appointmentId = null;
+            if ("CANCEL".equals(state.pendingAction) || "CANCEL_EXISTING".equals(state.pendingAction)) {
+                String targetId = state.pendingAppointmentId != null ? state.pendingAppointmentId : state.appointmentId;
+                appointmentTool.cancel(state.id, targetId, state.userId);
                 state.pendingAction = "CREATE";
+                state.pendingAppointmentId = null;
+                if (targetId != null && targetId.equals(state.appointmentId)) state.appointmentId = null;
+                if (state.interruptedStage != null) {
+                    state.stage = state.interruptedStage;
+                    return respond(state, "这条已确认预约已经取消，原模拟号源已释放。要继续刚才未完成的办理吗？",
+                            resumeReplies(state));
+                }
                 state.stage = ConversationState.Stage.CANCELLED;
-                return respond(state, "预约及关联提醒已取消，号源已释放。已发送的家属消息仍保留，请告知家属安排已取消。", List.of(q("新建办理", "NEW_BOOKING", "")));
+                return respond(state, "预约已取消，原模拟号源已经释放。",
+                        List.of(q("查询我的预约", "QUERY_APPOINTMENTS", ""), q("重新办理", "NEW_BOOKING", "")));
             }
             if (!ready(state) || !state.scheduleChecked || state.travelPlan == null) {
                 state.stage = ConversationState.Stage.READY_TO_PLAN;
@@ -353,6 +388,7 @@ public class FollowupAgentService {
                 state.notificationDone = true;
                 conversations.save(state, null);
             }
+            materialPreparationTool.initialize(state.id, state.appointmentId, state.department, state.materials);
             state.stage = ConversationState.Stage.COMPLETED;
             return executionResult(state, "办理完成，请查看复诊事项卡。");
         } catch (RuntimeException error) {
@@ -445,6 +481,210 @@ public class FollowupAgentService {
 
     public Map<String, Object> modelStatus() {
         return Map.of("mode", extractor.mode(), "model", extractor.model(), "secretStored", false);
+    }
+
+    private AgentTurnResponse queryMyAppointments(ConversationState state, ExtractedFacts facts) {
+        rememberInterruptedTask(state, "QUERY_MY_APPOINTMENTS");
+        List<AppointmentSummary> rows = myAppointmentTool.search(
+                state.id, state.userId, facts.date(), facts.hospital(), facts.department());
+        state.sideTask = null;
+        if (rows.isEmpty()) {
+            return respond(state, "没有找到符合条件的已确认复诊预约。",
+                    resumeReplies(state, q("办理新的复诊", "NEW_BOOKING", "")));
+        }
+
+        String summary = rows.stream().limit(4).map(this::appointmentSummary)
+                .collect(java.util.stream.Collectors.joining("；"));
+        List<QuickReply> choices = new ArrayList<>();
+        if (state.interruptedStage != null) choices.add(q("继续刚才办理", "RESUME_INTERRUPTED", ""));
+        for (AppointmentSummary item : rows.stream().limit(3).toList()) {
+            choices.add(q("取消" + item.date().format(DATE_LABEL) + "预约",
+                    "SELECT_APPOINTMENT_TO_CANCEL", item.appointmentId()));
+        }
+        ResultCard result = rows.size() == 1 ? resultCard(rows.get(0)) : null;
+        return finish(state, new AgentTurnResponse(state.id, state.stage.name(),
+                "我从数据库查到" + rows.size() + "条已确认预约：" + summary + "。",
+                choices, null, null, result, traces.findByConversation(state.id)));
+    }
+
+    private AgentTurnResponse beginCancelExistingAppointment(ConversationState state, ExtractedFacts facts) {
+        rememberInterruptedTask(state, "CANCEL_EXISTING_APPOINTMENT");
+        List<AppointmentSummary> rows = myAppointmentTool.search(
+                state.id, state.userId, facts.date(), facts.hospital(), facts.department());
+        if (rows.isEmpty()) {
+            state.sideTask = null;
+            return respond(state, "没有找到符合条件的已确认预约，所以没有执行取消。",
+                    resumeReplies(state, q("查询我的预约", "QUERY_APPOINTMENTS", "")));
+        }
+        if (rows.size() == 1) return prepareExistingCancellation(state, rows.get(0));
+
+        List<QuickReply> choices = rows.stream().limit(4)
+                .map(item -> q(item.date().format(DATE_LABEL) + " " + item.time().format(TIME_LABEL)
+                                + " " + item.hospital(),
+                        "SELECT_APPOINTMENT_TO_CANCEL", item.appointmentId()))
+                .toList();
+        return respond(state, "我查到多条已确认预约。为防止取消错，请选择要取消的那一条。", choices);
+    }
+
+    private AgentTurnResponse prepareExistingCancellation(ConversationState state, String appointmentId) {
+        AppointmentSummary target = myAppointmentTool.search(state.id, state.userId, null, null, null)
+                .stream().filter(item -> item.appointmentId().equals(appointmentId)).findFirst().orElse(null);
+        if (target == null) {
+            return respond(state, "这条预约已经不存在或已被取消，我没有执行任何操作。",
+                    resumeReplies(state, q("查询我的预约", "QUERY_APPOINTMENTS", "")));
+        }
+        return prepareExistingCancellation(state, target);
+    }
+
+    private AgentTurnResponse prepareExistingCancellation(ConversationState state, AppointmentSummary target) {
+        state.pendingAction = "CANCEL_EXISTING";
+        state.pendingAppointmentId = target.appointmentId();
+        state.sideTask = "CANCEL_EXISTING_APPOINTMENT";
+        state.confirmationId = UUID.randomUUID().toString();
+        state.stage = ConversationState.Stage.AWAITING_CONFIRMATION;
+        ConfirmationCard card = new ConfirmationCard("确认取消已经预约的复诊吗？",
+                List.of("取消预约：" + appointmentSummary(target), "释放对应模拟号源"),
+                "取消后原预约失效；如果仍需复诊，需要重新预约。",
+                "确认取消预约", "保留预约", state.confirmationId);
+        return finish(state, new AgentTurnResponse(state.id, state.stage.name(),
+                "取消预约属于重要操作，需要您明确确认。", List.of(), null, card,
+                resultCard(target), traces.findByConversation(state.id)));
+    }
+
+    private AgentTurnResponse restartInCurrentConversation(ConversationState state) {
+        clearDraft(state);
+        return askHospital(state, "好的，我们重新开始办理复诊。请告诉我就诊医院。");
+    }
+
+    private AgentTurnResponse resumeInterruptedTask(ConversationState state) {
+        if (state.interruptedStage == null) return advance(state, ExtractedFacts.empty());
+        ConversationState.Stage target = state.interruptedStage;
+        String previousAction = state.interruptedPendingAction;
+        String previousTarget = state.interruptedPendingAppointmentId;
+        clearInterruption(state);
+        state.stage = target;
+        state.pendingAction = previousAction == null ? "CREATE" : previousAction;
+        state.pendingAppointmentId = previousTarget;
+        if (target == ConversationState.Stage.AWAITING_CONFIRMATION
+                && "CREATE".equals(state.pendingAction) && state.selectedSlot != null) {
+            return buildConfirmation(state);
+        }
+        return advance(state, ExtractedFacts.empty());
+    }
+
+    private AgentTurnResponse changeHospital(ConversationState state, ExtractedFacts facts) {
+        discardInterruption(state);
+        resetAfterHospital(state);
+        applyFacts(state, facts);
+        return state.hospital == null
+                ? askHospital(state, "好的，请重新选择医院。原来的预约不会被直接修改。")
+                : advance(state, facts);
+    }
+
+    private AgentTurnResponse changeDepartment(ConversationState state, ExtractedFacts facts) {
+        discardInterruption(state);
+        if (state.hospitalId == null) return askHospital(state, "修改科室前，请先选择医院。");
+        resetAfterDepartment(state);
+        applyFacts(state, facts);
+        return state.department == null
+                ? askDepartment(state, "好的，请重新选择复诊科室。")
+                : advance(state, facts);
+    }
+
+    private AgentTurnResponse changeDate(ConversationState state, ExtractedFacts facts) {
+        discardInterruption(state);
+        resetAfterDate(state);
+        if (facts.date() == null) return askDate(state, "好的，请告诉我新的复诊日期。");
+        if (facts.date().isBefore(LocalDate.now()) || facts.date().isAfter(LocalDate.now().plusMonths(1))) {
+            return respond(state, "目前可以查询今天到一个月后的模拟号源，请重新选择日期。",
+                    List.of(q("查看可预约日期", "SHOW_AVAILABLE_DATES", "")));
+        }
+        state.date = facts.date();
+        return state.hospitalId != null && state.department != null ? querySlots(state) : advance(state, facts);
+    }
+
+    private AgentTurnResponse changeTime(ConversationState state, ExtractedFacts facts) {
+        discardInterruption(state);
+        state.selectedSlot = null;
+        state.recommendedSlot = null;
+        state.requestedTime = null;
+        state.travelPlan = null;
+        if (state.date == null) return askDate(state, "修改时间前，请先选择复诊日期。");
+        if (state.alternatives.isEmpty()) return querySlots(state);
+        if (facts.selectedTime() != null) return recommendSpecificTime(state, facts.selectedTime());
+        if (facts.timePreference() != null) return recommendPeriod(state, facts.timePreference());
+        state.stage = ConversationState.Stage.SELECT_PERIOD;
+        return respond(state, "好的，请重新选择上午、下午或具体时间。", periodReplies(state.alternatives));
+    }
+
+    private AgentTurnResponse showMaterials(ConversationState state, ExtractedFacts facts) {
+        if (state.hospital == null || state.department == null) {
+            return respond(state, "材料清单需要根据医院和科室生成。请先完成医院和科室选择。",
+                    resumeReplies(state));
+        }
+        if (state.materials.isEmpty()) {
+            state.materials = materialTool.checklist(state.id, state.hospital, state.department);
+        }
+        return respondWithPlan(state, acknowledgement(facts,
+                        "这是根据模拟数据库中的医院和科室规则生成的材料清单。"),
+                resumeReplies(state));
+    }
+
+    private void rememberInterruptedTask(ConversationState state, String sideTask) {
+        if (state.interruptedStage == null && state.stage != ConversationState.Stage.COMPLETED
+                && state.stage != ConversationState.Stage.CANCELLED) {
+            state.interruptedStage = state.stage;
+            state.interruptedPendingAction = state.pendingAction;
+            state.interruptedPendingAppointmentId = state.pendingAppointmentId;
+            state.returnPolicy = "ASK_TO_RESUME";
+        }
+        state.sideTask = sideTask;
+    }
+
+    private List<QuickReply> resumeReplies(ConversationState state, QuickReply... extras) {
+        List<QuickReply> replies = new ArrayList<>();
+        if (state.interruptedStage != null) replies.add(q("继续刚才办理", "RESUME_INTERRUPTED", ""));
+        else if (state.stage != ConversationState.Stage.COMPLETED
+                && state.stage != ConversationState.Stage.CANCELLED) replies.add(q("继续办理", "CONTINUE", ""));
+        for (QuickReply extra : extras) replies.add(extra);
+        return replies;
+    }
+
+    private void clearInterruption(ConversationState state) {
+        state.interruptedStage = null;
+        state.interruptedPendingAction = null;
+        state.interruptedPendingAppointmentId = null;
+        state.sideTask = null;
+        state.returnPolicy = null;
+    }
+
+    private void discardInterruption(ConversationState state) { clearInterruption(state); }
+
+    private boolean isSelectingTime(ConversationState.Stage stage) {
+        return stage == ConversationState.Stage.SELECT_PERIOD
+                || stage == ConversationState.Stage.CONFIRM_SLOT
+                || stage == ConversationState.Stage.SELECT_SLOT
+                || stage == ConversationState.Stage.NO_SLOT;
+    }
+
+    private void clearSlotSelection(ConversationState state, boolean clearDate) {
+        if (clearDate) state.date = null;
+        state.selectedSlot = null;
+        state.recommendedSlot = null;
+        state.requestedTime = null;
+        state.alternatives = List.of();
+    }
+
+    private String appointmentSummary(AppointmentSummary item) {
+        return item.date().format(DATE_LABEL) + " " + item.time().format(TIME_LABEL) + "，"
+                + item.hospital() + "·" + item.department();
+    }
+
+    private ResultCard resultCard(AppointmentSummary item) {
+        return new ResultCard(item.appointmentId(), item.hospital(), item.department(),
+                item.date().format(DATE_LABEL), item.time().format(TIME_LABEL), item.materials(),
+                item.departureAt() == null ? "未设置" : item.departureAt().format(TIME_LABEL),
+                valueOrPending(item.reminderStatus()), valueOrPending(item.familyStatus()));
     }
 
     private AgentTurnResponse advance(ConversationState state, ExtractedFacts facts) {
@@ -543,6 +783,43 @@ public class FollowupAgentService {
                 List.of(q("重新选择日期", "CHANGE_DATE", ""),
                         q("查看其他医院", "CHANGE_HOSPITAL", ""),
                         q("稍后再查", "RETRY_QUERY", "")));
+    }
+
+    private AgentTurnResponse showAvailableSlots(ConversationState state) {
+        if (state.hospitalId == null) {
+            return askHospital(state, "要查询号源，请先告诉我想去哪家医院。");
+        }
+        if (state.department == null) {
+            return askDepartment(state, "要查询号源，还需要先选择复诊科室。");
+        }
+        if (state.date != null && !state.date.isBefore(LocalDate.now())
+                && !state.date.isAfter(LocalDate.now().plusMonths(1))) {
+            return querySlots(state);
+        }
+
+        LocalDate from = LocalDate.now();
+        LocalDate to = from.plusMonths(1);
+        List<Slot> slots = appointmentTool.queryUpcomingSlots(
+                state.id, state.hospitalId, state.department, from, to);
+        if (slots.isEmpty()) {
+            return respond(state, state.hospital + state.department +
+                    "在今天到一个月后暂时没有可预约号源。您可以改选医院或联系人工帮助。",
+                    List.of(q("修改医院", "CHANGE_HOSPITAL", ""),
+                            q("联系人工", "CONTACT_HUMAN", "")));
+        }
+
+        List<LocalDate> dates = slots.stream().map(Slot::date).distinct().limit(6).toList();
+        List<QuickReply> choices = dates.stream()
+                .map(date -> q(date.format(DATE_LABEL), "SET_DATE", date.toString())).toList();
+        String labels = dates.stream().map(date -> date.format(DATE_LABEL))
+                .collect(java.util.stream.Collectors.joining("、"));
+        state.date = null;
+        state.selectedSlot = null;
+        state.recommendedSlot = null;
+        state.alternatives = List.of();
+        state.stage = ConversationState.Stage.ASK_DATE;
+        return respond(state, "我查询了数据库。今天到一个月后，较早有号的日期是：" + labels
+                + "。请选择一天，选好后我再为您介绍上午和下午的具体时间。", choices);
     }
 
     private AgentTurnResponse recommendPeriod(ConversationState state, String preference) {
@@ -711,13 +988,17 @@ public class FollowupAgentService {
     private AgentTurnResponse cancelTask(ConversationState state) {
         state.confirmationId = null;
         if (state.appointmentId != null) {
-            state.pendingAction = "CANCEL";
-            state.stage = ConversationState.Stage.AWAITING_CONFIRMATION;
-            return respondWithCancelCard(state);
+            state.stage = ConversationState.Stage.CANCELLED;
+            return respond(state, "好的，已停止继续办理。已经确认的预约仍然保留，可在事项页面查看。",
+                    List.of(q("查看事项", "OPEN_TASKS", ""), q("查询我的预约", "QUERY_APPOINTMENTS", ""),
+                            q("新建办理", "NEW_BOOKING", "")));
         }
+        boolean editingExisting = state.originalAppointmentId != null;
+        clearDraft(state);
         state.stage = ConversationState.Stage.CANCELLED;
-        return respond(state, state.originalAppointmentId == null ? "本次办理已停止，未提交预约。" : "变更草稿已取消，原预约和提醒保留。",
-                List.of(q("新建办理", "NEW_BOOKING", ""), q("查看事项", "OPEN_TASKS", "")));
+        return respond(state, editingExisting ? "变更草稿已取消，原预约和提醒保留。" : "本次办理已停止，未提交预约。",
+                List.of(q("新建办理", "NEW_BOOKING", ""), q("查看事项", "OPEN_TASKS", ""),
+                        q("查询我的预约", "QUERY_APPOINTMENTS", "")));
     }
 
     private AgentTurnResponse respondWithCancelCard(ConversationState state) {
@@ -962,6 +1243,56 @@ public class FollowupAgentService {
         state.travelPlan = null;
         state.materials = List.of();
         state.stage = ConversationState.Stage.ASK_HOSPITAL;
+    }
+
+    private void resetAfterDepartment(ConversationState state) {
+        state.departmentId = null;
+        state.department = null;
+        state.date = null;
+        state.selectedSlot = null;
+        state.recommendedSlot = null;
+        state.timePreference = null;
+        state.requestedTime = null;
+        state.alternatives = List.of();
+        state.travelPlan = null;
+        state.materials = List.of();
+        state.acceptAlternative = null;
+        state.needCompanion = null;
+        state.needTravel = null;
+        state.notifyFamily = null;
+        state.transport = null;
+        state.stage = ConversationState.Stage.ASK_DEPARTMENT;
+    }
+
+    private void clearDraft(ConversationState state) {
+        state.hospitalId = null;
+        state.hospital = null;
+        state.departmentId = null;
+        state.department = null;
+        state.date = null;
+        state.acceptAlternative = null;
+        state.needCompanion = null;
+        state.needTravel = null;
+        state.notifyFamily = null;
+        state.transport = null;
+        state.selectedSlot = null;
+        state.recommendedSlot = null;
+        state.timePreference = null;
+        state.requestedTime = null;
+        state.alternatives = List.of();
+        state.travelPlan = null;
+        state.contact = null;
+        state.materials = List.of();
+        state.pendingAction = "CREATE";
+        state.appointmentId = null;
+        state.pendingAppointmentId = null;
+        state.confirmationId = null;
+        state.originalAppointmentId = null;
+        state.materialReminderDone = false;
+        state.departureReminderDone = false;
+        state.notificationDone = false;
+        state.scheduleChecked = false;
+        clearInterruption(state);
     }
 
     private ConversationState requireSession(String id) {

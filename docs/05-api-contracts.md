@@ -54,6 +54,20 @@ GET /api/users/user-001
 GET /api/users/user-001/appointments
 未预约返回空数组，确认预约后返回数据库记录。
 
+## 预约材料准备状态（2026-09-06）
+
+- GET /api/users/{userId}/appointments/{appointmentId}/materials：读取该预约每项材料及准备状态。
+- PATCH /api/users/{userId}/appointments/{appointmentId}/materials/{materialId}：更新单项材料。
+- 请求示例：{"status":"PREPARED","confirmSource":"USER","photoUrl":null}。
+- status 可取 NOT_PREPARED、PREPARED、PHOTO_CONFIRMED；PHOTO_CONFIRMED 为后续拍照检查预留。
+- 事项页和助手完成卡片必须共用这些接口，不再把勾选状态仅保存在前端。
+
+## 用户语音偏好（2026-09-06）
+
+- GET /api/users/{userId}/preferences：读取自动播报、语速和音量。
+- PUT /api/users/{userId}/preferences：保存语音偏好；未提供的字段保持原值。
+- 请求示例：{"autoSpeakEnabled":true}。
+
 ## 快捷按钮结构
 
 quickReplies：[{"label":"市第一医院","action":"SET_HOSPITAL","value":"h001"}]
@@ -74,3 +88,20 @@ quickReplies：[{"label":"市第一医院","action":"SET_HOSPITAL","value":"h001
 - GET /api/agent/conversations/{conversationId}：返回历史消息、当前阶段和最后一次卡片响应。
 - GET /api/users/{userId}/appointments：按创建时间倒序返回全部预约，包含已确认和已取消状态。
 - SET_PERIOD 的值为 MORNING 或 AFTERNOON；具体号源仍通过 SELECT_SLOT 提交。
+
+## 可预约号源范围与意图（2026-09-06）
+
+- 用户自由询问“有哪些时间可预约”“哪天有号”时，模型返回 QUERY_AVAILABLE_SLOTS。
+- 后端随后调用 appointment.queryUpcomingSlots，参数包含 hospitalId、department、from、to。
+- from 为当天，to 为一个月后；返回结果来自 appointment_slots，不由模型编造。
+- SHOW_AVAILABLE_DATES 可作为按钮动作重新查询可预约日期。
+- 模拟数据按工作日生成 09:00、10:30、14:00、15:30 四个时段；周末无号用于异常流程演示。
+
+## 中控、个人预约与恢复动作（2026-09-06）
+
+- QUERY_APPOINTMENTS：查询当前用户在 appointments 中的已确认预约。
+- SELECT_APPOINTMENT_TO_CANCEL：value 必须为工具查询返回的 appointmentId；只生成取消确认卡，不直接取消。
+- RESUME_INTERRUPTED：恢复进入查询/取消支线之前的流程节点。
+- CHANGE_DEPARTMENT、CHANGE_TIME：清理受影响的下游选择，再进入对应节点。
+- 自由语言 CONFIRM_ACTION、DENY_ACTION 只有在 AWAITING_CONFIRMATION 状态下有效。
+- “取消当前办理”与“取消已确认预约”是不同路由；后者必须调用个人预约查询工具并经过确认端点。

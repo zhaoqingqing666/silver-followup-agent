@@ -53,11 +53,16 @@
 | 项目骨架 | DONE | Codex 初始生成 | `backend/`、`frontend/` | 前端构建通过 | 待首次提交 | Java + React 模块化单体 |
 | 会话接口 | DONE | Codex | `backend/api/` | 创建会话、消息、确认接口已连接前端 | 待首次提交 |  |
 | 信息收集工作流 | DONE | Codex | `backend/agent/`、`backend/application/` | 一次一问、规则回退、服务边界已实现 | 待首次提交 | DeepSeek 可选 |
+| Agent 中控路由 | DONE | Codex | `backend/application/AgentOrchestrator.java` | 自然语言支线、确认、安全边界和主流程统一路由 | 待提交 | 支持打断后返回原节点 |
+| 我的预约查询/取消工具 | DONE | Codex | `backend/domain/tool/MyAppointmentTool.java` | 隔离 H2 完成查询、指定日期取消确认与保留预约验证 | 待提交 | 结果来自 appointments，不读对话草稿 |
+| 会话页面生命周期 | DONE | Codex | `frontend/app/page.tsx`、`frontend/features/assistant/` | 页面内切换保留，刷新或重新打开创建新会话 | 待提交 | 后端历史仍保留用于审计 |
 | 预约工具 | DONE | Codex | `backend/domain/tool/` | 查询、替代日期、提交、取消均访问 H2 | 待首次提交 |  |
 | 日程工具 | DONE | Codex | `backend/domain/tool/` | 冲突查询和提醒写入 H2 | 待首次提交 |  |
 | 出行工具 | DONE | Codex | `backend/domain/tool/` | 根据交通方式倒推出发时间 | 待首次提交 |  |
 | 家属通知工具 | DONE | Codex | `backend/domain/tool/` | 联系人查询和模拟通知记录已实现 | 待首次提交 |  |
 | 材料清单 | DONE | Codex | backend、frontend/tasks | 清单与必带标记均来自 H2 | 待提交 | 不再按前端下标判断必带 |
+| 材料准备状态持久化 | DONE | Codex | backend、frontend/materials | 事项页与助手页共用数据库状态，刷新不丢失 | 待提交 | 已预留拍照确认状态 |
+| 语音自动播报 | DONE | Codex | backend/preferences、frontend/speech | 设置写入H2，只朗读新助手回复，可手动停止 | 待提交 | 历史恢复不自动重播 |
 | 确认门禁 | DONE | Codex | `backend/application/` | 提交、取消、提醒和通知只在确认端点执行 | 待首次提交 |  |
 | Agent工作台 | DONE | Codex | `frontend/features/assistant/` | TypeScript 检查通过 | 待首次提交 | 对话、计划、确认、结果和工具日志已拆组件 |
 | 最终事项卡片 | DONE | Codex 初始生成 | `frontend/features/tasks/` | 页面构建通过 | 待首次提交 | 含材料、出发与通知状态 |
@@ -110,3 +115,32 @@
 - 办理计划每个会话只展示一次；顶部标题和当前步骤固定，人工帮助按钮加大。
 - 快捷按钮增加展示标签，恢复聊天记录时不再展示 h001、d002 等内部 ID。
 - 已通过 Java 源码编译、前端生产构建和临时 H2 接口验证。
+
+## 2026-09-06 材料状态与语音播报
+
+- 新增 appointment_materials，预约成功后为每份材料生成独立状态记录。
+- 历史预约首次读取材料时自动从原清单补齐，不影响已有预约数据。
+- 事项页和助手完成卡片使用同一材料接口，支持未准备、已准备和拍照确认三种状态。
+- 新增 user_preferences 保存自动朗读、语速和音量；关闭后立即停止播报。
+- 语音服务统一管理播放，新回复会停止上一段，恢复历史记录不会自动朗读。
+
+## 2026-09-06 模型意图路由与一个月号源
+
+- 自由语言仍逐轮调用 DeepSeek；新增 QUERY_AVAILABLE_SLOTS 意图，由 Java 校验状态后调用预约工具。
+- 支持“9.17”“9/17”等短日期，不再沿用上一轮旧日期。
+- “有哪些时间可预约”会查询当前医院和科室的真实模拟号源，不再误入医院资料分支。
+- 每个启用科室自动维护从今天到一个月后的工作日号源，上午、下午各两个时段。
+- 周末保留无号日期，用于展示赛题要求的预约失败、原因说明和附近日期替代方案。
+- 已验证：后端构建成功；9月17日返回上午/下午；9月20日无号并提供附近日期。
+
+## 2026-09-06 中控、预约支线与短上下文
+
+- 新增 AgentOrchestrator：DeepSeek/规则节点负责理解意图，中控负责安全优先级、任务路由和流程状态。
+- 新增 appointment.queryMine 工具，从 H2 查询当前用户已确认预约，支持按日期、医院和科室筛选。
+- “取消当前办理”和“取消数据库中的已确认预约”拆成两种意图；取消已确认预约仍必须经过确认卡。
+- 查询或取消已有预约会保存原流程节点，支线结束后可选择“继续刚才办理”，恢复到被打断位置。
+- 支持查询我的预约、重新开始、继续原任务、修改医院/科室/日期/时间以及自由文本确认/拒绝。
+- 模型上下文只携带最近 8 条消息；长期办理事实继续使用结构化 ConversationState，不把整段聊天反复发给模型。
+- 前端不再用 localStorage 恢复旧聊天：同一次页面运行中切换首页/事项/助手会保留，刷新或重新打开后显示新会话。
+- 助手页不再展示不断累加的工具调用面板；接口只附带最近12条，工具日志仍完整保存在 TOOL_CALL_LOGS，供调试和 Demo 取证。
+- 已通过前端生产构建、Java 编译与隔离 H2 API 实测；自动测试受本机 JDK24/Mockito agent 兼容问题影响。

@@ -24,7 +24,7 @@ services:
     volumes:
       - h2-data:/app/data
     healthcheck:
-      test: ["CMD", "sh", "-c", "curl -fsS http://localhost:8080/api/demo/health || exit 1"]
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080; printf 'GET /api/demo/health HTTP/1.0\\r\\n\\r\\n' >&3; grep -q '200' <&3"]
       interval: 30s
       timeout: 5s
       start_period: 40s
@@ -45,7 +45,8 @@ services:
       backend:
         condition: service_healthy
     ports:
-      - "3000:3000"
+      # 默认仍访问 localhost:3000；若本机 3000 已被占用，可临时设置 FRONTEND_PORT=3001
+      - "${FRONTEND_PORT:-3000}:3000"
 
 volumes:
   h2-data:
