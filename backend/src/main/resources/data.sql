@@ -2,7 +2,10 @@
 -- 需要重新录制 Demo 时，应使用单独的重置功能，而不是随后端启动自动删除。
 
 MERGE INTO users KEY(id) VALUES
-('user-001','王阿姨','幸福小区（模拟）','家属开车');
+('user-001','王阿姨','幸福小区（模拟）','家属开车'),
+('user-f001','小丽',NULL,NULL),
+('user-v001','李阿姨',NULL,NULL),
+('user-002','张伯伯','幸福小区（模拟）','公交');
 
 MERGE INTO hospitals (id,name,address,hospital_level,description,specialty_tags,elderly_services,enabled) KEY(id) VALUES
 ('h001','市第一医院（模拟）','健康路1号（模拟）','三级甲等','以心血管、神经系统疾病和老年慢病复诊服务为特色。','心血管,神经内科,老年慢病管理','老年服务窗口,轮椅通道,志愿者引导',TRUE),
@@ -57,6 +60,11 @@ MERGE INTO user_schedules KEY(id) VALUES
 
 MERGE INTO family_contacts KEY(id) VALUES
 ('family-001','user-001','小丽','女儿','13800001234');
+
+MERGE INTO care_relations KEY(id) VALUES
+('rel-f001','user-f001','user-001','FAMILY','女儿'),
+('rel-v001','user-v001','user-001','VOLUNTEER','社区志愿者'),
+('rel-v002','user-v001','user-002','VOLUNTEER','社区志愿者');
 
 MERGE INTO material_templates KEY(id) VALUES
 ('m001','通用','身份证',TRUE,1),

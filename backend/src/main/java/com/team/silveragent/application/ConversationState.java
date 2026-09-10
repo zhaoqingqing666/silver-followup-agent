@@ -13,7 +13,8 @@ final class ConversationState {
         ASK_HOSPITAL, ASK_DEPARTMENT, ASK_DATE, ASK_ALTERNATIVE,
         ASK_COMPANION, ASK_TRAVEL, ASK_TRANSPORT, ASK_NOTIFY,
         READY_TO_PLAN, SELECT_PERIOD, CONFIRM_SLOT, SELECT_SLOT, NO_SLOT, CONFLICT,
-        AWAITING_CONFIRMATION, COMPLETED, CANCELLED, EMERGENCY_PAUSED, PARTIAL, TOOL_ERROR
+        AWAITING_CONFIRMATION, COMPLETED, CANCELLED, EMERGENCY_PAUSED, PARTIAL, TOOL_ERROR,
+        MEMO_TIME
     }
 
     final String id;
@@ -41,6 +42,31 @@ final class ConversationState {
     String appointmentId;
     String confirmationId;
     String originalAppointmentId;
+    /** 当前会话正在变更的“由家属/志愿者代约”的安排者 id；变更完成后用于回写通知，null=自己约的。 */
+    String arrangedArrangerId;
+    /** 隐式备忘在确认前的草稿（仅会话内存；确认后写 memos 表）。 */
+    String pendingMemoText;
+    java.time.LocalDateTime pendingMemoAt;
+    /** 草稿的重复规则（DAILY/WEEKLY/MONTHLY，null=只提醒一次）；追问钟点/日期时也要带着走。 */
+    String pendingMemoRepeat;
+    /** 老人刚回答清楚的“哪一天”（原话是“这周三”这类已过去的说法时追问得来）；接下来只差钟点时带着它。 */
+    java.time.LocalDate pendingMemoDay;
+    /** 助手侧正在改/删的那条已有备忘 id（“改第1条”点下来之后）；落地或取消后清空。仅会话内存。 */
+    String pendingMemoId;
+    /** 弹备忘确认卡前所在的办理阶段，确认后恢复，不打断复诊办理。 */
+    Stage memoReturnStage;
+    /** 暂存中的备忘是隐式（等钟点确认后再走确认卡）；false=显式（追问到钟点即可直写）。仅会话内存。 */
+    boolean memoNeedsApproval;
+    /** 会话停留在“家属/志愿者代约”管理开场（查看/改期/取消/求助）这一面，尚未转入本人新预约漏斗。
+     * 仅会话内存：用于备忘记完后交回代约入口而不是反问医院；转入本人预约(askHospital)即清空。 */
+    boolean managedMode;
+    /** 反问“这个数不太对”时暂存的待记数值（仅会话内存）；老人确认照记、改口重说或跑题后清空。 */
+    String pendingRecordItem;
+    java.math.BigDecimal pendingRecordValueNum;
+    String pendingRecordValueText;
+    String pendingRecordUnit;
+    /** 反问前 pendingAction 的值，答完要还回去，不能把正在办的复诊流程打断。 */
+    String recordReturnAction;
     boolean materialReminderDone;
     boolean departureReminderDone;
     boolean notificationDone;

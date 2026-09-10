@@ -1,7 +1,7 @@
 'use client';
 
 import { FormEvent, useEffect, useRef, useState } from 'react';
-import { CalendarSearch, ClipboardCheck, LoaderCircle, Mic, RefreshCw, Send, Sparkles } from 'lucide-react';
+import { CalendarSearch, ClipboardCheck, LoaderCircle, Mic, NotebookPen, RefreshCw, Send, Sparkles } from 'lucide-react';
 import { PageHeader } from '@/components/common/page-header';
 import { confirmAgentActions, getConversationHistory, sendAgentAction, sendAgentMessage, startConversation } from '@/lib/agent-api';
 import type { AgentPlanCard, AgentTurnResponse, ChatMessage, TabId } from '@/types/domain';
@@ -10,6 +10,9 @@ import { ChatBubble } from './chat-bubble';
 import { ToolTracePanel } from './tool-trace-panel';
 
 const CONVERSATION_KEY = 'silver-agent-current-conversation';
+
+/** 点一下就填进输入框的示例话：分别对应“记数值 / 记提醒 / 管理已有提醒”三件事。 */
+const EXAMPLE_SAYINGS = ['我的血压是100', '明早八点提醒我吃药', '我都有哪些备忘'];
 
 
 interface SpeechRecognitionLike {
@@ -25,7 +28,7 @@ const stageLabels: Record<string, string> = {
   ASK_HOSPITAL: '确认医院', ASK_DEPARTMENT: '确认科室', ASK_DATE: '确认日期',
   ASK_ALTERNATIVE: '补充偏好', ASK_COMPANION: '陪同安排', ASK_TRAVEL: '出行安排',
   ASK_NOTIFY: '家属通知', ASK_TRANSPORT: '交通方式', READY_TO_PLAN: '检查计划', SELECT_PERIOD: '选择上午或下午', CONFIRM_SLOT: '确认推荐时间', SELECT_SLOT: '选择具体时间', NO_SLOT: '更换时间', CONFLICT: '处理冲突',
-  EMERGENCY_PAUSED: '已暂停，请及时求助', PARTIAL: '部分完成', TOOL_ERROR: '需要重试或修改', AWAITING_CONFIRMATION: '等待确认', COMPLETED: '办理完成', CANCELLED: '已取消',
+  EMERGENCY_PAUSED: '已暂停，请及时求助', PARTIAL: '部分完成', TOOL_ERROR: '需要重试或修改', AWAITING_CONFIRMATION: '等待确认', MEMO_TIME: '补充提醒时间', COMPLETED: '办理完成', CANCELLED: '已取消',
 };
 
 export function AssistantView({ onNavigate }: { onNavigate: (tab: TabId) => void }) {
@@ -160,6 +163,14 @@ export function AssistantView({ onNavigate }: { onNavigate: (tab: TabId) => void
       <div className="grid grid-cols-2 gap-2">
         <button onClick={() => void (turn?.stage === 'COMPLETED' ? begin() : sendAction('CONTINUE', '', '我想预约复诊'))} className="flex min-h-12 items-center justify-center gap-2 rounded-2xl bg-primary text-base font-bold text-white"><CalendarSearch className="size-5" />{turn?.stage === 'COMPLETED' ? '再次预约' : '预约复诊'}</button>
         <button onClick={() => onNavigate('tasks')} className="flex min-h-12 items-center justify-center gap-2 rounded-2xl border bg-white text-base font-bold"><ClipboardCheck className="size-5 text-primary" />事项查询</button>
+      </div>
+      <div className="mt-2 rounded-2xl border border-dashed border-[#dba976] bg-white px-3 py-2 shadow-sm">
+        <p className="flex items-center gap-2 text-sm font-semibold text-[#6c3d24]"><NotebookPen className="size-4 text-primary" aria-hidden="true" />记数值、记提醒、看看有哪些提醒，都可以说一句</p>
+        <div className="mt-1.5 flex flex-wrap gap-2">
+          {EXAMPLE_SAYINGS.map(saying => (
+            <button key={saying} type="button" onClick={() => setInput(saying)} className="min-h-11 rounded-xl bg-[#fff4e2] px-3 text-base font-semibold text-[#6c3d24]">{saying}</button>
+          ))}
+        </div>
       </div>
     </div>
 
