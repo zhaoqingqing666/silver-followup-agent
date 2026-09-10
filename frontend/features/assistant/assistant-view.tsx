@@ -178,6 +178,7 @@ export function AssistantView({ active, onNavigate, voicePreference }: {
       {visiblePlan && <PlanCard plan={visiblePlan} />}
       {turn?.confirmation && <ConfirmationCardView card={turn.confirmation} busy={busy} onConfirm={() => void confirm(true)} onCancel={() => void confirm(false)} />}
       {turn?.result && <ResultCardView result={turn.result} partial={turn.stage === 'PARTIAL'} />}
+      {/* 医院询问返回空 quickReplies，继续使用下方语音或文字输入。 */}
       {!!turn?.quickReplies.length && !turn.confirmation && <section aria-label="快捷回答" className="flex flex-wrap gap-2">
         {turn.quickReplies.slice(choicePage * 3, choicePage * 3 + 3).map(choice => <button key={choice.label + choice.action + choice.value} disabled={busy} onClick={() => void sendAction(choice.action, choice.value, choice.label)} className="min-h-12 rounded-2xl border border-[#dfb98f] bg-white px-4 text-base font-semibold text-[#6c3d24] shadow-sm disabled:opacity-50">{choice.label}</button>)}
       </section>}

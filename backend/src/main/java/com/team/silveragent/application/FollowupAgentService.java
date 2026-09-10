@@ -1012,10 +1012,7 @@ public class FollowupAgentService {
 
     private AgentTurnResponse askHospital(ConversationState state, String message) {
         state.stage = ConversationState.Stage.ASK_HOSPITAL;
-        List<QuickReply> choices = new ArrayList<>(catalog.hospitals().stream()
-                .limit(3).map(item -> q(item.name(), "SET_HOSPITAL", item.id())).toList());
-        choices.add(q("我还没想好", "ASK_HUMAN_INPUT", ""));
-        return respond(state, message, choices);
+        return respond(state, message, List.of());
     }
 
     private AgentTurnResponse askDepartment(ConversationState state, String message) {

@@ -100,6 +100,7 @@ export interface AgentTurnResponse {
   conversationId: string;
   stage: string;
   reply: string;
+  /** 询问就诊医院时为空，用户通过语音或文字回答。 */
   quickReplies: AgentQuickReply[];
   plan: AgentPlanCard | null;
   confirmation: AgentConfirmationCard | null;

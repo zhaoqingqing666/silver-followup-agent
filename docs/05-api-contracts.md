@@ -70,9 +70,10 @@ GET /api/users/user-001/appointments
 
 ## 快捷按钮结构
 
-quickReplies：[{"label":"市第一医院","action":"SET_HOSPITAL","value":"h001"}]
+quickReplies：[{"label":"心内科","action":"SET_DEPARTMENT","value":"d001"}]
 
-医院和科室按钮的 value 使用数据库 ID；日期按钮和号源按钮都由数据库结果动态生成。
+询问就诊医院时 quickReplies 返回空数组，用户通过语音或文字直接回答，不提供医院或“我还没想好”按钮。用户主动查询或请求推荐医院时仍可返回候选医院。
+医院资料/推荐和科室按钮的 value 使用数据库 ID；日期按钮和号源按钮都由数据库结果动态生成。
 前端可以调整布局和样式，但不能私自更改字段。
 
 ## 医院与科室资料查询工具（2026-09-06）
