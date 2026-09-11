@@ -7,15 +7,6 @@ export type TabId = 'home' | 'tasks' | 'assistant' | 'profile' | 'travel';
  */
 export type RecordPage = 'reminders' | 'standing' | 'records';
 
-export type PlanStepStatus = 'done' | 'active' | 'pending';
-
-export interface PlanStep {
-  id: string;
-  title: string;
-  detail: string;
-  status: PlanStepStatus;
-}
-
 export interface AppointmentSummary {
   appointmentId: string;
   date: string;
@@ -129,6 +120,18 @@ export interface AgentUiDirective {
   focus: string | null;
 }
 
+/**
+ * 需要与普通聊天气泡区分显示的提示块，目前只有医疗越界一种。
+ *
+ * 只影响展示：不切 stage、不让待确认的操作失效。所以前端渲染时也不能借它
+ * 改动办理状态或隐藏确认卡——老人问一句「这个药还能吃吗」不等于想中断办理。
+ */
+export interface AgentNotice {
+  type: string;
+  title: string;
+  message: string;
+}
+
 export interface AgentTurnResponse {
   conversationId: string;
   stage: string;
@@ -142,7 +145,12 @@ export interface AgentTurnResponse {
   /** 本轮需要朗读的权威文本；为空时退回 reply。 */
   speechText?: string | null;
   uiDirective?: AgentUiDirective | null;
+  /** 需要与普通气泡区分显示的提示块；没有提示时为空。 */
+  notice?: AgentNotice | null;
 }
+
+/** 目前只有医疗越界一种；后端以后加新类型时，前端按未知类型安全忽略。 */
+export const MEDICAL_BOUNDARY_NOTICE = 'MEDICAL_BOUNDARY';
 
 export type TravelFocus = 'outside' | 'inside';
 

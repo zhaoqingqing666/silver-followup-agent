@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { Accessibility, Brain, ChevronRight, Headphones, ShieldCheck, Trash2, UserRound } from 'lucide-react';
+import { Accessibility, Brain, Headphones, Trash2, UserRound } from 'lucide-react';
 import { PageHeader } from '@/components/common/page-header';
 import { Switch } from '@/components/ui/switch';
 import { forgetMemory, listMemories, type AgentMemory } from '@/lib/agent-api';
@@ -79,8 +79,10 @@ export function ProfileView({ onNavigate, largeText, onLargeTextChange, autoSpea
     <section className="flex items-center gap-4 rounded-3xl bg-gradient-to-r from-[#f3c78f] to-[#f8dfbd] p-5"><div className="grid size-16 place-items-center rounded-full bg-white/75"><UserRound className="size-8 text-primary" /></div><div><h2 className="text-2xl font-bold">{displayName}</h2><p className="text-base text-muted-foreground">家属联系人：{familyLine}</p></div></section>
     <section className="overflow-hidden rounded-3xl border bg-card shadow-sm">
       <div className="flex min-h-18 items-center gap-4 border-b px-5"><Accessibility className="size-7 text-primary"/><div className="flex-1"><strong className="text-lg">特大字体</strong><p className="text-sm text-muted-foreground">让页面文字更醒目</p></div><Switch checked={largeText} onCheckedChange={onLargeTextChange} aria-label="特大字体" /></div>
-      <div className="flex min-h-18 items-center gap-4 border-b px-5"><Headphones className="size-7 text-primary"/><div className="flex-1"><strong className="text-lg">语音朗读</strong><p className="text-sm text-muted-foreground">{voicePreferenceBusy ? '正在保存设置…' : '智能体新回复后自动朗读'}</p>{voicePreferenceError && <p className="text-sm text-red-700">{voicePreferenceError}</p>}</div><Switch checked={autoSpeakEnabled} disabled={voicePreferenceBusy} onCheckedChange={onAutoSpeakChange} aria-label="语音朗读" /></div>
-      <button className="flex min-h-18 w-full items-center gap-4 px-5 text-left"><ShieldCheck className="size-7 text-primary"/><div className="flex-1"><strong className="text-lg">隐私与安全</strong><p className="text-sm text-muted-foreground">查看数据使用说明</p></div><ChevronRight /></button>
+      {/* 「隐私与安全」那行原本是个没有 onClick 的按钮，点了什么都不发生——
+          老人按一下没反应只会怀疑是自己没按对。数据使用说明就写在页面最下面，
+          要保留入口就得真接上，接不上就先不摆。 */}
+      <div className="flex min-h-18 items-center gap-4 px-5"><Headphones className="size-7 text-primary"/><div className="flex-1"><strong className="text-lg">语音朗读</strong><p className="text-sm text-muted-foreground">{voicePreferenceBusy ? '正在保存设置…' : '智能体新回复后自动朗读'}</p>{voicePreferenceError && <p className="text-sm text-red-700">{voicePreferenceError}</p>}</div><Switch checked={autoSpeakEnabled} disabled={voicePreferenceBusy} onCheckedChange={onAutoSpeakChange} aria-label="语音朗读" /></div>
     </section>
 
     {/* 助手记住的事摆在明面上：记了什么、为什么记、怎么删，三件事都要老人自己看得见。

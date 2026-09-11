@@ -1,6 +1,29 @@
-import { CalendarCheck2, Check, ChevronRight, ClipboardList, Clock3, MapPin, Route, UsersRound } from 'lucide-react';
-import type { AgentConfirmationCard, AgentPlanCard, AgentResultCard } from '@/types/domain';
+import { CalendarCheck2, Check, ChevronRight, ClipboardList, Clock3, MapPin, Route, ShieldAlert, UsersRound } from 'lucide-react';
+import { MEDICAL_BOUNDARY_NOTICE } from '@/types/domain';
+import type { AgentConfirmationCard, AgentNotice, AgentPlanCard, AgentResultCard } from '@/types/domain';
 import { MaterialChecklist } from '@/features/materials/material-checklist';
+
+/**
+ * 医疗越界的专属提示块。
+ *
+ * 越界回复本身照常留在对话记录里（后端把它存进 conversation_messages），
+ * 这张卡只是另外把「为什么这条不一样」说出来，所以卡里不再重复一遍回复正文。
+ * 未知 type 一律不渲染——后端加新提示类型时，旧版前端不会因此显示一块空白。
+ *
+ * 不在卡里放任何按钮：越界不改变办理流程，确认卡里那个待确认的操作依旧有效，
+ * 老人要是想接着办，页面上原有的按钮就够了。
+ */
+export function BoundaryAlert({ notice }: { notice: AgentNotice }) {
+  if (notice.type !== MEDICAL_BOUNDARY_NOTICE) return null;
+  return <section role="alert" aria-label={notice.title}
+    className="rounded-3xl border-2 border-[#e0a24a] bg-[#fff3e0] p-4 shadow-sm">
+    <div className="flex items-center gap-3">
+      <span className="grid size-11 shrink-0 place-items-center rounded-full bg-[#c8862f] text-white"><ShieldAlert className="size-6" /></span>
+      <p className="text-lg font-bold text-[#8a5410]">{notice.title}</p>
+    </div>
+    <p className="mt-2 text-base leading-7 text-[#6c3d24]">{notice.message}</p>
+  </section>;
+}
 
 export function PlanCard({ plan }: { plan: AgentPlanCard }) {
   return <section className="rounded-3xl border border-[#e8c7a4] bg-[#fff8ed] p-5 shadow-sm">

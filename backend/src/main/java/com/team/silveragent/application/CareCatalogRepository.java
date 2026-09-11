@@ -53,17 +53,6 @@ public class CareCatalogRepository {
                 split(rs.getString(7))), departmentName);
     }
 
-    public List<Department> searchDepartments(String keyword) {
-        if (keyword == null || keyword.isBlank()) return List.of();
-        String like = "%" + keyword.trim() + "%";
-        return jdbc.query("""
-                SELECT id,hospital_id,name,description,specialty_tags,followup_scope,location
-                FROM departments
-                WHERE enabled=TRUE AND (name LIKE ? OR specialty_tags LIKE ? OR followup_scope LIKE ?)
-                ORDER BY hospital_id,id
-                """, (rs, row) -> department(rs), like, like, like);
-    }
-
     public Optional<Department> department(String hospitalId, String idOrName) {
         if (hospitalId == null || idOrName == null || idOrName.isBlank()) return Optional.empty();
         return departments(hospitalId).stream()
@@ -84,7 +73,8 @@ public class CareCatalogRepository {
         return jdbc.query("""
                 SELECT DISTINCT appointment_date FROM appointment_slots
                 WHERE hospital_id=? AND department=? AND appointment_date>=? AND available=TRUE
-                  AND (appointment_date > CURRENT_DATE OR appointment_time > CURRENT_TIME)
+                  AND (appointment_date > CURRENT_DATE
+                       OR (appointment_date = CURRENT_DATE AND appointment_time > CURRENT_TIME))
                 ORDER BY appointment_date LIMIT ?
                 """, (rs, row) -> rs.getDate(1).toLocalDate(),
                 hospitalId, department, java.sql.Date.valueOf(from), limit);

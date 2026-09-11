@@ -14,7 +14,7 @@ P0 范围**已全部实施完成**，P1 的主要项也已落地：
 | `UiDirective` 封闭枚举（含预留的 `OPEN_MATERIALS`） | 已实现，8 个值与计划一致 | 同上 |
 | 前端安全忽略未知指令、按指令跳页 | 已实现 | `frontend/app/page.tsx`、`assistant-view.tsx` |
 | 预约完成完整播报 | 已实现，硬编码完成回复已移除 | `FollowupAgentService.java`（`authoritativeSpeech`） |
-| P1：语音抽到 `frontend/features/voice/` | 已实现 | `speech-recognition.ts`、`use-voice-input.ts`、`voice-commands.ts`、`voice-mic-button.tsx` |
+| P1：语音抽到 `frontend/features/voice/` | 已实现 | `speech-recognition.ts`、`use-press-to-talk.ts`（当时的 `use-voice-input.ts` 已于 2026-09-11 被它取代）、`voice-commands.ts`、`voice-mic-button.tsx`、`level-meter.tsx` |
 | P1：全局麦克风入口（悬浮、非路由） | 已实现 | `frontend/app/page.tsx` |
 | P1：本地口令不经大模型 | 已实现 | `frontend/features/voice/voice-commands.ts` |
 

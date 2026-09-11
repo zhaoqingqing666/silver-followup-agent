@@ -4,6 +4,7 @@ import com.team.silveragent.application.AppointmentRecordStore;
 import com.team.silveragent.application.CareBookingService;
 import com.team.silveragent.application.FollowupAgentService;
 import com.team.silveragent.domain.model.AgentTurnResponse;
+import com.team.silveragent.support.DemoSeed;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -31,6 +32,11 @@ class CaregiverSessionTests {
     @Autowired CareBookingService booking;
     @Autowired JdbcTemplate jdbc;
 
+    /** 演示用的日期与号源都跟着今天走，别再写死（见 DemoSeed）。 */
+    private static final String DAY = DemoSeed.checkupDay().toString();
+    private static final String PLAIN = DemoSeed.plainSlot();
+    private static final String SECOND = DemoSeed.secondSlot();
+
     @BeforeEach
     void resetData() {
         for (String table : List.of("memos", "care_notifications", "family_notifications", "reminders", "appointments")) {
@@ -39,15 +45,15 @@ class CaregiverSessionTests {
         jdbc.update("UPDATE appointment_slots SET available=TRUE");
     }
 
-    /** 女儿小丽替王阿姨 user-001 代约一份 09-18 心内科复诊。 */
+    /** 女儿小丽替王阿姨 user-001 代约一份下周三的心内科复诊。 */
     private void bookForWang() {
-        bookForWang("slot-0918-0900");
+        bookForWang(PLAIN);
     }
 
     private void bookForWang(String slotId) {
         AppointmentRecordStore.AppointmentView view = booking.book("user-f001", "user-001",
                 new CareBookingService.BookingRequest(
-                        "h001", "d001", "2026-09-18", slotId, false, "打车"));
+                        "h001", "d001", DAY, slotId, false, "打车"));
         assertThat(view.appointmentId()).isNotBlank();
     }
 
@@ -121,8 +127,8 @@ class CaregiverSessionTests {
 
         service.act(id, "SET_HOSPITAL", "h001", "选医院");
         service.act(id, "SET_DEPARTMENT", "d001", "选科室");
-        service.act(id, "SET_DATE", "2026-09-18", "选日期");
-        service.act(id, "SELECT_SLOT", "slot-0918-0900", "选号源");
+        service.act(id, "SET_DATE", DAY, "选日期");
+        service.act(id, "SELECT_SLOT", PLAIN, "选号源");
         service.act(id, "SET_ALTERNATIVE", "true", "接受附近日期");
         service.act(id, "SET_COMPANION", "true", "需要陪同");
         service.act(id, "SET_TRAVEL", "true", "需要出行提醒");
@@ -156,15 +162,15 @@ class CaregiverSessionTests {
      */
     @Test
     void caregiverIsGivenAWayForwardWhenTheElderAlreadyHasAnAppointment() {
-        // 先用下午那格占住“已有进行中的预约”，把 09:00 留给这次代约
-        // （10:20 会撞上 data.sql 里的社区体检，走的是冲突那条路，不是这里要验的路）。
-        bookForWang("slot-0918-1430");
+        // 先用 15:30 那格占住“已有进行中的预约”，把 14:00 留给这次代约
+        // （10:30 会撞上「社区体检」，走的是冲突那条路，不是这里要验的路）。
+        bookForWang(SECOND);
         AgentTurnResponse start = service.start("user-001", "user-f001");
         String id = start.conversationId();
         service.act(id, "SET_HOSPITAL", "h001", "选医院");
         service.act(id, "SET_DEPARTMENT", "d001", "选科室");
-        service.act(id, "SET_DATE", "2026-09-18", "选日期");
-        service.act(id, "SELECT_SLOT", "slot-0918-0900", "选号源");
+        service.act(id, "SET_DATE", DAY, "选日期");
+        service.act(id, "SELECT_SLOT", PLAIN, "选号源");
         service.act(id, "SET_COMPANION", "true", "需要陪同");
         service.act(id, "SET_TRAVEL", "false", "不需要");
         service.act(id, "SET_TRANSPORT", "打车", "打车");
@@ -208,8 +214,8 @@ class CaregiverSessionTests {
         String elder = service.start("user-001").conversationId();
         service.act(elder, "SET_HOSPITAL", "h001", "选医院");
         service.act(elder, "SET_DEPARTMENT", "d001", "选科室");
-        service.act(elder, "SET_DATE", "2026-09-18", "选日期");
-        service.act(elder, "SELECT_SLOT", "slot-0918-0900", "选号源");
+        service.act(elder, "SET_DATE", DAY, "选日期");
+        service.act(elder, "SELECT_SLOT", PLAIN, "选号源");
         service.act(elder, "SET_ALTERNATIVE", "true", "接受附近日期");
         service.act(elder, "SET_COMPANION", "false", "不需要陪同");
         service.act(elder, "SET_TRAVEL", "true", "需要出行提醒");

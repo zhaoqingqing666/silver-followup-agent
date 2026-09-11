@@ -2,14 +2,21 @@ package com.team.silveragent.api;
 
 import com.team.silveragent.agent.model.ModelGateway;
 import com.team.silveragent.agent.model.ModelRequest;
+import com.team.silveragent.application.DemoScenarioService;
+import com.team.silveragent.domain.model.DemoScenarioResponse;
 import com.team.silveragent.service.AsrService;
 import com.team.silveragent.service.TtsService;
 import com.team.silveragent.service.VlService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.LinkedHashMap;
@@ -31,17 +38,40 @@ public class DemoController {
     private final VlService vlService;
     private final AsrService asrService;
     private final TtsService ttsService;
+    private final DemoScenarioService scenarios;
 
     public DemoController(ModelGateway modelGateway, VlService vlService,
-                          AsrService asrService, TtsService ttsService) {
+                          AsrService asrService, TtsService ttsService,
+                          DemoScenarioService scenarios) {
         this.modelGateway = modelGateway;
         this.vlService = vlService;
         this.asrService = asrService;
         this.ttsService = ttsService;
+        this.scenarios = scenarios;
     }
 
     @GetMapping("/health")
     public Map<String, String> health() { return Map.of("status", "ok", "dataMode", "h2-mock-database"); }
+
+    /**
+     * 重置并返回一个可复现的演示会话。属于<b>破坏性</b>接口：清空预约、提醒、通知、工具记录
+     * 与全部会话（含图片附件、健康记录、备忘与长期记忆），只用于录屏与评审查验。
+     *
+     * <p>可选编号：{@code normal} / {@code no-slot} / {@code conflict} / {@code boundary}，
+     * 在 {@code DemoScenario} 里维护；返回的 {@code steps} 是照着念就能复现的步骤，
+     * 里面的日期每次都按「今天」现算。
+     */
+    @PostMapping("/scenarios/{scenarioId}")
+    public DemoScenarioResponse resetScenario(@PathVariable("scenarioId") String scenarioId) {
+        return scenarios.reset(scenarioId);
+    }
+
+    /** 未知编号回 400 并说明可选值：手敲 curl 时最常犯的就是拼错编号。 */
+    @ExceptionHandler(IllegalArgumentException.class)
+    @ResponseStatus(HttpStatus.BAD_REQUEST)
+    public Map<String, String> badRequest(IllegalArgumentException error) {
+        return Map.of("message", error.getMessage());
+    }
 
     /**
      * 排查用只读端点：一眼看清各模型通道到底有没有被启用、用的哪个模型。

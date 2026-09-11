@@ -32,7 +32,8 @@ public class MockAppointmentTool implements AppointmentTool {
                 FROM appointment_slots
                 WHERE hospital_id=? AND department=?
                   AND appointment_date=? AND available=TRUE
-                  AND (appointment_date > CURRENT_DATE OR appointment_time > CURRENT_TIME)
+                  AND (appointment_date > CURRENT_DATE
+                        OR (appointment_date = CURRENT_DATE AND appointment_time > CURRENT_TIME))
                 ORDER BY appointment_time
                 """, slotMapper(), hospitalId, department, Date.valueOf(date));
         traces.record(conversationId, "appointment.querySlots", input, result, true);
@@ -49,7 +50,8 @@ public class MockAppointmentTool implements AppointmentTool {
                 FROM appointment_slots
                 WHERE hospital_id=? AND department=?
                   AND appointment_date BETWEEN ? AND ? AND available=TRUE
-                  AND (appointment_date > CURRENT_DATE OR appointment_time > CURRENT_TIME)
+                  AND (appointment_date > CURRENT_DATE
+                        OR (appointment_date = CURRENT_DATE AND appointment_time > CURRENT_TIME))
                 ORDER BY appointment_date,appointment_time
                 """, slotMapper(), hospitalId, department, Date.valueOf(from), Date.valueOf(to));
         traces.record(conversationId, "appointment.queryUpcomingSlots", input, result, true);
@@ -58,17 +60,20 @@ public class MockAppointmentTool implements AppointmentTool {
 
     @Override
     public List<Slot> queryAlternatives(String conversationId, String hospitalId, String department, LocalDate date) {
+        // 只往后看：往前找会捞出已经过去的时段，把当天其它时段也算进“附近日期”还会
+        // 跟上一句“这一天暂无号源”自相矛盾。当天之内换时段由 SELECT_PERIOD 那条路负责。
         Map<String, Object> input = Map.of("hospitalId", hospitalId, "department", department,
-                "from", date.minusDays(3), "to", date.plusDays(3));
+                "from", date.plusDays(1), "to", date.plusDays(3));
         List<Slot> result = jdbc.query("""
                 SELECT id,hospital_id,hospital_name,department,appointment_date,appointment_time
                 FROM appointment_slots
                 WHERE hospital_id=? AND department=?
                   AND appointment_date BETWEEN ? AND ? AND available=TRUE
-                  AND (appointment_date > CURRENT_DATE OR appointment_time > CURRENT_TIME)
+                  AND (appointment_date > CURRENT_DATE
+                        OR (appointment_date = CURRENT_DATE AND appointment_time > CURRENT_TIME))
                 ORDER BY appointment_date,appointment_time
                 """, slotMapper(), hospitalId, department,
-                Date.valueOf(date.minusDays(3)), Date.valueOf(date.plusDays(3)));
+                Date.valueOf(date.plusDays(1)), Date.valueOf(date.plusDays(3)));
         traces.record(conversationId, "appointment.queryAlternatives", input, result, true);
         return result;
     }

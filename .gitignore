@@ -28,6 +28,9 @@ frontend/.npm-cache/
 .devcontainer/.env
 !.devcontainer/.env.example
 
+# 内部开发笔记：实测踩坑与易错点，只供团队内部参考，不进仓库
+docs/13-agent-pitfalls.md
+
 # Local secrets and OS files
 .DS_Store
 Thumbs.db

@@ -2,6 +2,7 @@ package com.team.silveragent;
 
 import com.team.silveragent.domain.model.ToolModels.AppointmentMaterial;
 import com.team.silveragent.domain.tool.MaterialPreparationTool;
+import com.team.silveragent.support.DemoSeed;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -27,6 +28,8 @@ class MaterialPhotoConfirmationTests {
     private static final String USER = "user-001";
     /** 一张够长的假 data URL：模拟压缩后的照片体量，用来证明它不会进 photo_url。 */
     private static final String PHOTO = "data:image/jpeg;base64," + "A".repeat(400_000);
+    /** 号源日期只是这组用例的道具，取演示种子那天，免得用具写死的日子。 */
+    private static final String DAY = DemoSeed.day(DemoSeed.checkupDay());
 
     @Autowired MaterialPreparationTool materials;
     @Autowired JdbcTemplate jdbc;
@@ -41,8 +44,8 @@ class MaterialPhotoConfirmationTests {
         jdbc.update("""
                 INSERT INTO appointment_slots(id,hospital_id,hospital_name,department,
                     appointment_date,appointment_time,available)
-                VALUES ('slot-photo','h001','市第一医院','心内科','2026-09-18','09:00',TRUE)
-                """);
+                VALUES ('slot-photo','h001','市第一医院','心内科',?,'09:00',TRUE)
+                """, DAY);
         jdbc.update("""
                 INSERT INTO appointments(id,slot_id,user_id,status,created_at,conversation_id,materials)
                 VALUES (?,?,'user-001','CONFIRMED',CURRENT_TIMESTAMP,'conv-photo','身份证、医保卡')

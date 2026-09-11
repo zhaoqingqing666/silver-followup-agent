@@ -17,7 +17,8 @@ import type { ToolTrace } from '@/types/domain';
  * 藏在一个需要手动点开的折叠面板里，演示时根本来不及展开。
  */
 export function ToolTracePanel({ traces, liveEvents = [], liveActive = false }: {
-  traces: ToolTrace[];
+  /** 后端每轮都返回，但历史消息或旧快照里可能没有这个字段——按空处理，别直接读 length */
+  traces?: ToolTrace[];
   /** 本轮实时进度事件；不在办理中时传空数组即可 */
   liveEvents?: TurnProgressEvent[];
   liveActive?: boolean;
@@ -25,23 +26,24 @@ export function ToolTracePanel({ traces, liveEvents = [], liveActive = false }: 
   // 受控展开：办理中强制展开，办完之后尊重用户自己的开合。
   const [open, setOpen] = useState(false);
   const showing = open || liveActive;
-  if (!traces.length && !liveActive) return null;
+  const rows = traces ?? [];
+  if (!rows.length && !liveActive) return null;
   return <details open={showing}
     onToggle={event => setOpen(event.currentTarget.open)}
     className="rounded-2xl border bg-white/80 px-4 py-3">
     <summary className="flex cursor-pointer list-none items-center gap-2 font-semibold text-[#6d432c]">
       <Wrench className="size-5" /> 查看办理过程
       <span className="ml-auto rounded-full bg-[#f4dfc8] px-2 py-0.5 text-sm">
-        {liveActive ? '办理中' : `${traces.length} 步`}
+        {liveActive ? '办理中' : `${rows.length} 步`}
       </span>
       <ChevronDown className={`size-4 transition ${showing ? 'rotate-180' : ''}`} />
     </summary>
     <div className="mt-1 space-y-2">
       <LiveProgress events={liveEvents} active={liveActive} />
-      {traces.length > 0 && <>
+      {rows.length > 0 && <>
         <p className="text-sm text-muted-foreground">刚才我为您依次做了这几步：</p>
         <ol className="mt-2 space-y-3">
-        {traces.map((trace, index) => {
+        {rows.map((trace, index) => {
           const { label, note } = describeTrace(trace);
           return <li key={index} className="rounded-xl bg-[#fff8ef] p-3 text-sm leading-6">
             <div className="flex items-center justify-between">

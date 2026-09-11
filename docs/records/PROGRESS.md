@@ -283,3 +283,73 @@
 - 代他人办理时不再问“需要通知哪位家属”：操作者本人就是被通知的那一方，代约本身也会通知其他照护者。
 - 长辈已有一份进行中的预约时会先拦下并给出“先取消已有预约”的正路，不再让人填到最后一屏才被拒。
 - 后端完整测试 227 项通过，含代办的查询隔离、越权拒绝、代约归属、提醒落点与老人端回归。
+
+## 2026-09-11 演示数据不再写死日期（号源与日程滚动生成）
+
+- 演示号源与日程改为滚动生成：`RollingAppointmentSlotInitializer` 按「今天起一个月内的每个工作日」给每个启用科室排 09:00 / 10:30 / 14:00 / 15:30 四格，id 形如 `r-d001-20260916-0900`；**周末刻意留空**，「指定日期没有号源」这个场景长期可复现。
+- `RollingUserScheduleInitializer` 把 `user-001` 的两条日程排在「下周三（社区体检 10:00–11:00）」和「下周六（和家人吃饭）」。口径与口语解析一致（`RuleFactExtractor` 取「本周一 + 1 周 + 2 天」），所以演示话术「我下周三想去市第一医院心内科复诊」正好落在体检那天，当天 10:30 的号源必然被判为冲突，09:00 / 14:00 / 15:30 则是不冲突的对照组。
+- 删掉 `data.sql` 里写死的 09-17～09-21 号源与两条日程；删除第三个重复的号源补种器 `SlotAvailabilityInitializer`；两个补种器都收成幂等的 `seed()`，为后面的「场景重置」接口留好入口。
+- 修掉一处把过期号源当可约的判断：`appointment_date > CURRENT_DATE OR appointment_time > CURRENT_TIME` 会把「过去某天里更晚的时刻」算成可约，改为「未来的某天，或今天但时刻更晚」（`MockAppointmentTool` 三处、`CareCatalogRepository.availableDates`）。
+- 回归用例不再写死日期：新增 `support/DemoSeed` 收口演示日期与号源名，新增 `DemoSeedDataTests` 把「口语的下周三 = 体检那天」「10:30 冲突、14:00/15:30 不冲突」「周末没有号源」「每个启用科室都有号」钉成断言；9 个已有测试类改为从 `DemoSeed` 取值，另删掉两个只声明未使用的日期辅助方法。
+- 后端完整测试 **300 项**通过（0 失败 0 错误）。
+
+## 2026-09-11 材料清单跨页面同步与办理过程面板空值守卫
+
+- `silver-agent-materials-updated` 事件原先只有派发没有监听：助手页的确认卡常驻不卸载，事项页每次切回来都重新挂载，同一份预约的材料清单会同时存在两份实例——在事项页勾完，助手页那份还显示「未准备」。现在 `useAppointmentMaterials` 订阅该事件，在 `appointmentId` 相符、且事件不是自己派发时**静默**重新拉取（后台同步不切「正在读取」，避免闪一下）。
+- `ToolTracePanel` 的 `traces` 改为可选并按空数组兜底：后端每轮都会返回，但历史消息与旧快照里可能没有这个字段，直接读 `length` 会白屏。
+- 保留 `silver-agent-appointments-updated`（`tasks-view.tsx` 仍在监听）；材料这次是补齐监听，不是删广播。
+
+## 2026-09-11 医疗越界判定：词表收敛成一份，补上模型漏判的兜底
+
+- 原先「越界」在不同地方各判一遍：`SafetyGuard` 一张 11 词的表、`RuleFactExtractor` 一张一样的表、`FollowupAgentService` 里还有第三张；表都只列了「怎么用药/药量/诊断/检查结果/是不是得了」这类现成动词，**没命中就落回普通信息**——「我血压有点高，要不要紧？」会被当成「用户提供了信息」，助手接着问去哪家医院。
+- 新增 `agent/MedicalBoundaryRules`，口径改成「默认怀疑」：症状/药物/报告名词 + 疑问语气即判越界（「这个药还能继续吃吗」「阿司匹林一天吃几片」「帮我看看这个化验单」「我是不是该住院」），混合句式也判得出来（「9月18日，我最近头晕是不是血压高了」——日期照常解析，但越界那半句不会再被当空气）。三张表删成一张，`SafetyGuard` 与 `RuleFactExtractor` 都调它。
+- 模型侧同样兜底：`SafetyGuard.evaluateModel(message, facts)` 在模型没判出医疗语义时，用规则再判一次。业务意图仍只认模型的结论（改医院、改日期、取消、确认卡一个字没动），只有医疗这一根轴上加规则。
+- 两条**刻意放行**：① 老人报自己量到的数、查自己记过的数（「我的血压是100」「我最近的血压是多少」）走 `HealthRecordParser`，不能被当成问诊吞掉；② 「那天我要做手术，帮我把复诊改到下周」是办事，所以「住院/手术/化疗/输液/打针」这类处置词要配疑问语气才算越界。
+- `AgentSystemPrompt` 的【医疗安全】补了用例与一条明确的边界：带日期的混合句不能只接办事情那半句；报数/查数用 `RECORD_HEALTH_VALUE` 而不是 `MEDICAL_ADVICE`。这样模型路径与规则路径口径一致。
+- 删掉 `FollowupAgentService` 里那段已经够不到的重复判定（`chatInternalBody` 开头的 `precheck` 先拦），`RuleFactExtractor` 里重复的 `physicalDiscomfort` 一并删除。
+- 新增 `MedicalBoundaryRulesTests`（7 项：要拦住的 5 句 + 混合句、不能误拦的办理/备忘/健康记录话术），`SilverAgentApplicationTests` 的越界用例扩到 11 句，`VoiceFirstP1Tests` 新增「模型漏判时规则兜底、且不多调一次模型」。后端完整测试 **308 项**通过。
+
+## 2026-09-11 越界专属提示块，与冲突确认卡的四处细节
+
+- 越界回复原先就是一条普通聊天气泡，顶部步骤标签也不变，老人看不出「这条和别的不一样」。`AgentTurnResponse` 新增可空字段 `notice`（第 12 个分量，旧的 11/9/8 参构造原样保留），越界时带 `{type: MEDICAL_BOUNDARY, title, message}`；前端 `BoundaryAlert` 渲染成一块橙色提示卡，未知 type 一律不渲染。**`notice` 只影响展示**：不切 `stage`、不新建待办、不落任何库，`notice.message` 也不是 `reply` 的复制——回复照常进对话记录并朗读，卡上只补一句「这条为什么不一样」。
+- 顺着这条占位发现一个真问题：越界回答返回时 `confirmation` 是 null，前端 `confirm()` 又直接读 `turn.confirmation.confirmationId`——老人问到一半药，正要按的「确认办理」会跟着消失，而服务端那张卡其实一直有效。现在 `medicalBoundary` 用 `pendingConfirmation(state)` 把**原来那张卡连同同一个 `confirmationId` 原样带回**；卡片内容抽成 `confirmationCard(state, at)` 单一来源，避免两边各拼一份。取消类确认卡（`CANCEL_EXISTING`/`CANCEL_MANAGED`）不在这条路上，行为与加提示块之前一致。
+- 冲突确认卡补一条「已知冲突：与『社区体检』（… 至 …）时间重叠，您已选择保留」：用户点「仍保留这个时间」之后，提交前最后一次提醒和事后审计都该看得到这件事，而不是只在上一轮的回复里说过一次。冲突随手存进 `state.conflicts`（`Snapshot` 一并持久化），确认卡按它渲染。
+- 冲突分支的按钮改成**当天候选只给一个**（`slotReplies(...).limit(1)`）：加上「重新选择日期」「仍保留这个时间」正好三个，首页放得下——前端一屏就渲染 3 个（`assistant-view.tsx` 的 `slice(choicePage * 3, choicePage * 3 + 3)`），第四个按钮藏在「查看更多选项」后面，冲突这种要当场做决定的场景不该让人再点一次。
+- 新增常量 `APPOINTMENT_DURATION = 60`：日程冲突按「间隔一小时」判重叠，和演示号源的排布（09:00 / 10:30 / 14:00 / 15:30）对得上；原先写死的分钟数散在判断里。科室层面的实际时长还没有数据，先按演示口径统一。
+- 「附近日期」候选改成**只往后看**：`queryAlternatives` 的窗口从 `date-1 ~ date+3` 收成 `date+1 ~ date+3`。往前找会捞出已经过去的时段，把当天其它时段也算进来还会跟上一句「这一天暂无号源」自相矛盾；当天之内换时段由「上午没有下午有」那条路负责。新增 `MockAppointmentAlternativesTests` 2 项钉住这个口径。
+- 后端完整测试 **312 项**通过（新增 2，扩展 2）；前端 `tsc` 与生产构建成功，改动过的文件与新增文件都单独比对过规范检查结果。
+
+## 2026-09-11 演示场景一键重置
+
+- 新增 `POST /api/demo/scenarios/{normal|no-slot|conflict|boundary}`：清掉上一场演示留下的可变数据、放开被占用的号源、按「今天」重排号源与日程，然后开一段全新的会话，并返回**照着念就能复现该场景的步骤**。四个场景原先要靠演示文档口头说明「选哪一天」，而演示日期是滚动的（下周三体检、下周六无号），文档里的固定日期过一周就对不上——步骤由后端现算，跟着今天走。
+- 重置表清单里除了预约相关那几张，还包含**本分支自己加的表**：`conversation_attachments`、`vision_results`（多模态）、`memos`、`health_records`（健康记录与备忘）、`user_memories`（长期记忆）、`care_notifications`（照护通知）。不回一起清的话，场景二会踩着场景一留下的习惯记忆少问一句，看起来像流程漏了一步。医院、科室、材料模板、出行路线、家属联系人等目录数据一条不动。
+- 内存里那份会话状态一起清：`FollowupAgentService.forgetAllSessions()`。`requireSession` 命中内存就不再回查数据库，不清的话旧会话 id 还能继续说话，而它对应的库记录已经没了——等于在一个不存在的草稿上办事。
+- 重置后旧会话 id 一律回「会话不存在或已过期，请重新开始」，返回的新会话可以立刻开始；未知编号回 **400** 并列出可选值（手敲 curl 最容易拼错编号）。这是**破坏性**接口，不提供前端按钮，演示开场前调一次即可。
+- 新增 `DemoScenarioTests` 5 项：清空清单逐表断言（含本分支独有的几张表、且目录数据不变）、被占号源重置后可再约、旧会话 id 失效、步骤里的日期确实按本次运行现算、HTTP 层返回结构与 400 分支。其中 HTTP 断言用 MockMvc（本仓库第一次用，之前全是服务层用例）——这个接口是给评委手敲的，返回结构和状态码值得按契约钉住。
+- 文档同步：`05-api-contracts.md` 新增「演示场景重置」、`06-mock-data-design.md` 第十一节把「当前没有场景选择 / 重置 API」改成实际状态、`09-demo-acceptance-checklist.md` 补越界提示块与冲突卡的三条验收项、`设计思路报告.md` 11.5 在只读接口表后单列这个破坏性接口。后端完整测试 **317 项**通过。
+
+## 2026-09-11 死代码清查：删掉的每一处都先确认过没有活路径
+
+- 起因是评委那句「核心流程没有写在一个超长类里」的反面——`FollowupAgentService` 已经长到四千多行，里面混着早期版本留下来、后来改了路子却没删的私有方法。清之前逐个 grep 全仓（含测试）确认零引用，删完再看有没有编译不过的调用点。
+- 后端删掉：`memoRepeatDayReplies(String)`（追问「每周几/每月几号」的快捷回复，实际走的是 `memoNoTimeReply("MEMO_REPEAT_DAY")`）、`respondWithCancelCard(ConversationState)`（取消的确认卡由 `cancelTask` 与确认门禁那条路负责）、`actInternal` 的 `switch (action)` 里够不到的 `case "NEW_BOOKING"`（方法开头已经 `return restartInCurrentConversation(state)`）、`ConversationState(String)` 单参构造（全部调用点都是两参或五参）、旧版占位类 `MockCareTools`、`FollowupPlan` record（对外下发的计划卡是 `PlanCard`，这个只被自己引用）。
+- `RuleFactExtractor.detectIntent` 里第二条 `CANCEL_APPOINTMENT` 也删了：「取消预约 / 取消这次预约 / 取消已经预约 / 取消已预约」四条都同时含「预约」和「取消」，已被上面那条更宽的规则完整覆盖。**这是纯删除，不改判定结果**——留着两条一模一样的返回，读的人会以为中间藏着区别。
+- 科室搜索三件套一并删（接口 `DepartmentCatalogTool.searchDepartments` + 实现 + `CareCatalogRepository.searchDepartments`）：`ToolRegistry` 里根本没有对应工具，科室匹配走的是 `catalog.departmentNames()` 的口语片段比对，这个 LIKE 查询没有任何调用点。前端工具追踪面板里那条 `catalog.searchDepartments` 的中文映射与 `05-api-contracts.md` 的对应条目一起删掉，否则面板上永远有一条谁也触发不了的说明。
+- 前端删掉：`types/domain.ts` 的 `PlanStep` / `PlanStepStatus`（页面渲染的是后端下发的 `PlanCard`）、`profile-view.tsx` 里那个没有 `onClick` 的「隐私与安全」按钮。后者不算纯死代码——它看着能点，点了什么都不发生，老人会以为是自己没按对；数据使用说明本来就写在页面最下面，要保留入口就得真接上，接不上先不摆。
+- 删除后跑全量：后端 **317 项**全绿、`tsc --noEmit` 与生产构建通过、改动过的前端文件 `oxlint` 零告警。测试一条没红，正是「这些路径确实没有活人走」的旁证。
+
+## 2026-09-11 语音音量动画只留一条，按钮只变色
+
+- 按住说话时屏幕上跑着**两条**音量动画：圆形按钮里一条（`LevelMeter` 的默认参数，5 根 8–36px），大浮层里一条（9 根 14–72px）。评审一眼看出重复——同一个声音两处刻度还不一样，按钮那条 4.5 倍、浮层那条 5.1 倍，同一时刻对不上。
+- 尺寸也确实放不下：`size-16` 减去 `border-4` 只剩 56px 内圆，默认那套 5 根 `w-2`(8px) + 4 个 `gap-1.5`(6px) 要 64px，两边各 4px 压在白色描边上；`scale-90` 只把它缩到 57.6px，仍然越界，且 transform 不改布局盒。真正让它「看着还行」的是按住期间按钮自己的 `active:scale-95` 也在生效（0.855），换个不触发 `:active` 的路径就会看到红条压白圈。行内变体更直接：`heightClass="h-6"`(24px) 配默认 36px 上限，条子长到容器外 12px——而这一支今天没有任何地方在渲染。
+- 改法：**全屏只保留浮层里那一条**。`voice-mic-button.tsx` 去掉按钮内的迷你条与整个 `inline` 变体（连同 `variant` 入参、行内 `label`、外层 `floating ?` 分支），按钮按住只变红、取消预备变琥珀色，图标保持 `size-8` 不变，不再有「按住瞬间墨迹从 32px 跳到 58px」；`level-meter.tsx` 把根数、粗细、间距、高度区间收成组件内常量（只留 `barClass` 随取消状态换颜色），顺手把 `className="scale-90"` 这个补丁删掉——尺寸只有一处定义，就再没有「某处传漏一个参数」的错法。
+- 为什么留浮层那条：手指正压在按钮上，按钮里的条子大半被自己的指头挡住；浮层那条约 120×72px，在视线所及处，还和实时字幕、上滑取消提示挨着。`h-20`(80px) 容器配 72px 上限、120px 宽落在窄屏 232px 内宽里，三项都对得上。
+- 文档同步：`设计思路报告.md` 第 12 节把「五根音量条」改成「浮层里一排、全屏只有这一条」，`user-manual.md` 4.2 节补上浮层与音量条的实际形态（原先写的是「按钮变色并显示正在听…」，那句提示其实来自浮层），`09-demo-acceptance-checklist.md` 的语音项写成可对照验收的一句话。决定记在 DEC-017。
+- 验证：`tsc --noEmit` 与 `oxlint`（`features/voice`、`app/page.tsx`）零告警，生产构建通过。前端行为要起来看效果——后端与前端当前都是我按你的要求停着的。
+
+## 2026-09-11 同一处语音浮层的当日修正：一行只放得下一个汉字
+
+- 上一版把录音浮层写成 `fixed bottom-[132px] left-1/2 w-[calc(100%-40px)] max-w-[420px]`，实机一按就现原形：浮层变成一条又高又窄的琥珀色竖条，「松开手指，取消发送」一个汉字一行往下排，从屏幕中段一直垂到底部，把号源列表整片盖住。`tsc`、`oxlint`、生产构建全是绿的——这类错误它们一个都看不见。
+- 根因不在浮层自己，在它的祖先：`app/page.tsx` 用 `fixed bottom-[46px] left-1/2 -translate-x-1/2` 给麦克风居中，**那是一个 transform**。CSS 里祖先带 transform 时，后代的 `position: fixed` 不再以视口为包含块，而是以那个祖先的盒子为包含块——也就是包着 64px 圆按钮的那个 64×64 的盒子。于是 `calc(100% - 40px)` 算成 **24px**（`px-6` 左右各 24px 内边距还比它宽），汉字只能一个字一行；`bottom-[132px]` 也从「屏幕底部往上 132px」变成「这个小盒子上方 132px」，浮层因此贴到了屏幕上半部。同一个 transform 还解释了它为什么偏偏居中在按钮正上方。
+- 改法：`page.tsx` 的居中改用 `-ml-8`（按钮 `size-16` 的一半，不产生 transform），浮层的宽度从百分比改成按视口算的 `w-[calc(100vw-40px)]`——包含块哪天真被谁再改变一次，宽度也不会跟着塌掉。两处都写了注释说明为什么不能用 `-translate-x-1/2`。
+- 验证：`tsc --noEmit`、`oxlint`、`npm run build` 通过；已核对全仓其余 `fixed` 元素，暂无第二个「fixed 后代落在带 transform 的祖先里」的组合。真正算数的还是实机按一次。
+- 教训与上一版恰好对称：上一轮删掉的是「同一件事做了两遍」，这一轮踩的是「把定位交给了一个会变的包含块」。两者都不是类型检查能挡的，只能靠起来看一眼。

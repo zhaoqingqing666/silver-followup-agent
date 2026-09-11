@@ -4,6 +4,7 @@ import com.team.silveragent.application.AppointmentRecordStore;
 import com.team.silveragent.application.CareBookingService;
 import com.team.silveragent.application.FollowupAgentService;
 import com.team.silveragent.domain.model.AgentTurnResponse;
+import com.team.silveragent.support.DemoSeed;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -23,6 +24,13 @@ import static org.assertj.core.api.Assertions.assertThat;
         "agent.llm.enabled=false"})
 class ElderManagedPlanTests {
 
+    /** 代约那天 = 演示的「下周三」；改期目标 = 次日，两天都有滚动号源。 */
+    private static final String DAY = DemoSeed.day(DemoSeed.checkupDay());
+    private static final String CHINESE_DAY = DemoSeed.chineseDay(DemoSeed.checkupDay());
+    private static final String SLOT = DemoSeed.morningSlot();
+    private static final String LATER_DAY = DemoSeed.day(DemoSeed.laterDay());
+    private static final String LATER_SLOT = DemoSeed.laterDaySlot();
+
     @Autowired FollowupAgentService service;
     @Autowired CareBookingService booking;
     @Autowired AppointmentRecordStore records;
@@ -40,11 +48,11 @@ class ElderManagedPlanTests {
         return jdbc.queryForObject("SELECT COUNT(*) FROM " + table, Integer.class);
     }
 
-    /** 女儿小丽替 user-001 王阿姨代约一份 h001 心内科 09-18 复诊。 */
+    /** 女儿小丽替 user-001 王阿姨代约一份 h001 心内科下周三的复诊。 */
     private String bookArranged() {
         AppointmentRecordStore.AppointmentView view = booking.book("user-f001", "user-001",
                 new CareBookingService.BookingRequest(
-                        "h001", "d001", "2026-09-18", "slot-0918-0900", false, "打车"));
+                        "h001", "d001", DAY, SLOT, false, "打车"));
         assertThat(view.arrangedLabel()).isEqualTo("女儿 小丽");
         assertThat(view.arrangedBy()).isEqualTo("user-f001");
         return view.appointmentId();
@@ -57,7 +65,7 @@ class ElderManagedPlanTests {
         assertThat(start.reply()).contains("女儿 小丽", "约好的复诊", "心内科");
 
         AgentTurnResponse overview = service.act(start.conversationId(), "VIEW_MANAGED", "", "查看这次安排");
-        assertThat(overview.reply()).contains("医院科室", "2026年9月18日", "就诊材料");
+        assertThat(overview.reply()).contains("医院科室", CHINESE_DAY, "就诊材料");
 
         // 先拒绝一次：预约仍在，仍只有代约时的 book 回执
         AgentTurnResponse declineTurn = service.act(start.conversationId(), "CANCEL_MANAGED", "", "取消这次预约");
@@ -106,9 +114,9 @@ class ElderManagedPlanTests {
         assertThat(reschedule.reply()).contains("原来的安排", "改到哪一天");
         assertThat(reschedule.stage()).isEqualTo("ASK_DATE");
 
-        // 顺着漏斗改到 09-19（该日只有下午 14:30 号），确认后原预约同一条记录换 slot
-        service.act(reschedule.conversationId(), "SET_DATE", "2026-09-19", "选择日期");
-        service.act(reschedule.conversationId(), "SELECT_SLOT", "slot-0919-1430", "选择时间");
+        // 顺着漏斗改到第二天下午，确认后原预约同一条记录换 slot
+        service.act(reschedule.conversationId(), "SET_DATE", LATER_DAY, "选择日期");
+        service.act(reschedule.conversationId(), "SELECT_SLOT", LATER_SLOT, "选择时间");
         service.act(reschedule.conversationId(), "SET_ALTERNATIVE", "true", "可以换日期");
         service.act(reschedule.conversationId(), "SET_COMPANION", "false", "不需要陪同");
         service.act(reschedule.conversationId(), "SET_TRAVEL", "false", "不需要出行提醒");
@@ -121,9 +129,9 @@ class ElderManagedPlanTests {
         AgentTurnResponse done = service.confirm(plan.conversationId(), true, plan.confirmation().confirmationId());
         assertThat(done.stage()).isEqualTo("COMPLETED");
 
-        assertThat(jdbc.queryForObject("SELECT appointment_date FROM appointment_slots WHERE id='slot-0919-1430'", String.class))
-                .isEqualTo("2026-09-19");
-        assertThat(jdbc.queryForObject("SELECT slot_id FROM appointments", String.class)).isEqualTo("slot-0919-1430");
+        assertThat(jdbc.queryForObject("SELECT appointment_date FROM appointment_slots WHERE id=?", String.class, LATER_SLOT))
+                .isEqualTo(LATER_DAY);
+        assertThat(jdbc.queryForObject("SELECT slot_id FROM appointments", String.class)).isEqualTo(LATER_SLOT);
         assertThat(jdbc.queryForObject("SELECT arranged_by FROM appointments", String.class)).isEqualTo("user-f001");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM reminders WHERE status='CREATED'", Integer.class)).isEqualTo(1);
 
@@ -160,7 +168,7 @@ class ElderManagedPlanTests {
 
         // 备忘后仍可正常进入“查看这次安排”看代约详情
         AgentTurnResponse overview = service.act(start.conversationId(), "VIEW_MANAGED", "", "查看这次安排");
-        assertThat(overview.reply()).contains("医院科室", "2026年9月18日");
+        assertThat(overview.reply()).contains("医院科室", CHINESE_DAY);
     }
 
     /** 代约开场下隐式备忘走确认卡，确认后同样交回代约入口。 */

@@ -27,9 +27,9 @@ POST /api/agent/messages
 ## 明确按钮操作
 
 POST /api/agent/actions
-请求：{"conversationId":"会话ID","action":"SELECT_SLOT","value":"slot-0920-1500","label":"9月20日 15:00"}
+请求：{"conversationId":"会话ID","action":"SELECT_SLOT","value":"r-d001-20260916-0900","label":"9月16日 09:00"}
 按钮使用此接口，不调用模型理解节点；完成 Java 状态处理或工具执行后，可以调用模型回答节点生成用户可读回复。
-label 是可选的用户可读文字；value 可以继续使用 hospitalId、departmentId 或 slotId。
+label 是可选的用户可读文字；value 可以继续使用 hospitalId、departmentId 或 slotId。号源 id 由后端按 `r-科室-日期-时刻` 生成（如 `r-d001-20260916-0900`），日期跟着今天滚，前端一律回传后端给的原值。
 
 ## 确认关键操作
 
@@ -119,7 +119,6 @@ quickReplies：[{"label":"市第一医院","action":"SET_HOSPITAL","value":"h001
 
 - catalog.queryHospitals：读取启用的医院、等级、地址、特色和适老服务。
 - catalog.queryDepartments：按 hospitalId 查询该医院的科室及复诊服务范围。
-- catalog.searchDepartments：按科室或特色关键词查询科室。
 - catalog.recommendHospitals：按明确的复诊科室筛选候选医院。
 - 以上均为后端内部模拟工具，执行参数和数据库结果记录在 tool_call_logs。
 
@@ -240,3 +239,27 @@ quickReplies：[{"label":"市第一医院","action":"SET_HOSPITAL","value":"h001
 - **怎么用**：读的时候拼成一句话（`MemoryStore.digest`）接在 `knownFacts` 末尾进提示词，措辞是「这位老人以前办过的复诊情况（仅供参考，不要当成这次已经定好的安排，拿它少问一句就好）」。记住不等于可以替他办事，写操作仍然要过确认门禁。
 - 没有记忆时 `digest` 返回空串，提示词与没有这个功能时**逐字相同**——老会话和既有测试都不会因为多出一个空段而漂移。
 - 前端露出在「我的」页的「助手记住的事」：整段摆出来、逐条可忘（点一下变成「确定忘掉 / 再想想」两问，忘掉不可逆，老人手抖一下不该就没了）。页面底部写明「助手只是拿它们少问您一句。真要办什么，还是您点过『确认』才算数」。
+
+## 演示场景重置（2026-09-11）
+
+`POST /api/demo/scenarios/{scenarioId}`，编号 `normal` / `no-slot` / `conflict` / `boundary`。
+
+- **破坏性接口**：清掉上一场演示留下的可变数据（预约、提醒、家属通知、工具记录、会话与附件、识图结论、健康记录、备忘、长期记忆、照护通知），放开被占用的号源（`available=TRUE`），按「今天」重排号源与日程，然后开一段全新的会话。医院、科室、材料模板、出行路线、家属联系人这些目录数据**一条不动**。
+- 返回 `{scenarioId, title, steps, availableScenarios, turn}`：`steps` 是照着念就能复现该场景的步骤，`turn` 是新建会话的开场轮，可以直接拿 `conversationId` 开始说话。步骤里的日期每次现算，不写死。
+- `availableScenarios` 是全部四个编号，前端/脚本不用自己维护清单。
+- 未知编号 → **400** `{"message": "未知演示场景：…，可选值：[normal, no-slot, conflict, boundary]"}`。
+- 内存里那份会话状态一起清空（`FollowupAgentService.forgetAllSessions()`）：`requireSession` 命中内存就不再回查数据库，不清的话旧会话 id 还能继续说话，而它对应的库记录已经没了。重置后旧 id 一律回「会话不存在或已过期，请重新开始」。
+- 它**不在正常业务流程里**，只用于录屏与评审查验，演示开场前调一次即可；不提供前端按钮。
+
+## 越界提示块 notice（2026-09-11）
+
+`AgentTurnResponse` 多一个可空字段 `notice`，没有提示时为 `null`：
+
+```json
+{"type": "MEDICAL_BOUNDARY", "title": "超出我的服务范围", "message": "这类问题我不能回答，所以用这张提示卡单独说明。…"}
+```
+
+- **只影响展示**：不切 `stage`、不清 `confirmationId`、不新建待办、不落任何库。前端把已知 `type` 渲染成一块独立的橙色提示卡（老人端与照护端一致），未知 `type` 一律不渲染，不跳空白页也不报错。
+- `message` **不是 `reply` 的复制**：`reply`（及 `speechText`）是权威回答，照常进 `conversation_messages`、照常朗读；`notice.message` 只回答「这条为什么长得不一样、要办的事没被打断」。
+- 停在确认卡上时，这一轮**原样带回同一张 `ConfirmationCard`**（`confirmationId` 不变，逐条内容与上一版一致）——老人问完一句药，正要按的「确认办理」不能跟着消失。取消类确认卡（`CANCEL_EXISTING` / `CANCEL_MANAGED`）不在这条路上。
+- 兼容：字段是 record 的第 12 个分量，旧的 11 / 9 / 8 参构造全部保留，缺席即 `null`；旧会话 `last_response_json` 缺这个字段，反序列化照常。

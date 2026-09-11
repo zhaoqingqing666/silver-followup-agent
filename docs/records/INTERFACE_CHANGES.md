@@ -2,6 +2,13 @@
 
 任何前后端共享字段、接口路径、枚举或日期格式变化都记录在这里。
 
+## 2026-09-11 越界提示块与演示场景重置
+
+- `AgentTurnResponse` 新增可选分量 `notice`（第 12 个，`{type, title, message}`），旧的 11 / 9 / 8 参构造原样保留，前端可忽略。当前只有 `type=MEDICAL_BOUNDARY` 一种取值，未知 `type` 前端**不渲染**（不是渲染成空白卡）。`notice` 只影响展示：不切 `stage`、不改 `confirmationId`、不新增待办、不落库；越界那一轮仍把原来的确认卡连同同一个 `confirmationId` 带回，前端按老逻辑照常确认。
+- 新增 `POST /api/demo/scenarios/{scenarioId}`（编号 `normal` / `no-slot` / `conflict` / `boundary`）：**破坏性**，清空可变业务数据、放开被占用的号源、按「今天」重排号源与日程，开一段新会话，返回 `DemoScenarioResponse{scenarioId, title, steps[], availableScenarios[], turn}`；未知编号返回 400 `{"message": …}` 并列出可选值。旧会话 id 在重置后不再可用（400「会话不存在或已过期」）。仅追加，正常业务接口未变动。
+- 工具追踪里不再出现 `catalog.searchDepartments`：该方法（含 `DepartmentCatalogTool.searchDepartments`、`CareCatalogRepository.searchDepartments`）从未被调用，`ToolRegistry` 里也没有对应工具，已一并删除。`ToolRegistry` 的工具清单不变，仍是 17 个只读工具。`tool_call_logs` 里的历史记录不受影响。
+- 前端：`VoiceMicButton` 去掉 `variant` 入参（只剩悬浮这一种形态），`LevelMeter` 的根数/粗细/间距/高度入参收成组件内常量——**纯前端改动，后端与共享字段不变**。接口无变化，旧前端不受影响。
+
 ## 2026-09-11 多模态：识图、药品知识、语音输入输出、材料拍照确认
 
 - 新增 `POST /api/agent/images`，请求体 `{conversationId, imageDataUrls[], hint}`，最多取 3 张。响应仍是标准 `AgentTurnResponse`，**未新增任何字段**：图片本体由前端自己持有并渲染，`reply` 装识别结论，`toolTraces` 里多一条 `vision.recognize`。

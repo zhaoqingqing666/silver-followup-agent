@@ -38,44 +38,14 @@ MERGE INTO clinic_locations (id,hospital_id,department_id,building_name,entrance
 ('loc-d005','h001','d005','门诊楼','南门','三层','316诊室','门诊楼一层自助机或人工窗口','三层采血区旁','从南门进入，沿无障碍通道到一层大厅，乘无障碍电梯到三层，按内分泌科标识前往316诊室。','三层内分泌科护士站',CURRENT_TIMESTAMP,TRUE),
 ('loc-d006','h002','d006','门诊楼','东门','四层','408诊室','门诊楼一层服务台旁报到机','四层候诊区内侧','从东门进入后沿无障碍通道前往电梯，乘梯到四层，按心内科标识前往408诊室。','四层心内科护士站',CURRENT_TIMESTAMP,TRUE);
 
-INSERT INTO appointment_slots(id,hospital_id,hospital_name,department,appointment_date,appointment_time,available)
-SELECT 'slot-0918-0900','h001','市第一医院（模拟）','心内科','2026-09-18','09:00:00',TRUE
-WHERE NOT EXISTS (SELECT 1 FROM appointment_slots WHERE id='slot-0918-0900');
-INSERT INTO appointment_slots(id,hospital_id,hospital_name,department,appointment_date,appointment_time,available)
-SELECT 'slot-0918-1020','h001','市第一医院（模拟）','心内科','2026-09-18','10:20:00',TRUE
-WHERE NOT EXISTS (SELECT 1 FROM appointment_slots WHERE id='slot-0918-1020');
-INSERT INTO appointment_slots(id,hospital_id,hospital_name,department,appointment_date,appointment_time,available)
-SELECT 'slot-0918-1430','h001','市第一医院（模拟）','心内科','2026-09-18','14:30:00',TRUE
-WHERE NOT EXISTS (SELECT 1 FROM appointment_slots WHERE id='slot-0918-1430');
-INSERT INTO appointment_slots(id,hospital_id,hospital_name,department,appointment_date,appointment_time,available)
-SELECT 'slot-0918-1600','h001','市第一医院（模拟）','心内科','2026-09-18','16:00:00',TRUE
-WHERE NOT EXISTS (SELECT 1 FROM appointment_slots WHERE id='slot-0918-1600');
-INSERT INTO appointment_slots(id,hospital_id,hospital_name,department,appointment_date,appointment_time,available)
-SELECT 'slot-0917-0900','h001','市第一医院（模拟）','心内科','2026-09-17','09:00:00',TRUE
-WHERE NOT EXISTS (SELECT 1 FROM appointment_slots WHERE id='slot-0917-0900');
-INSERT INTO appointment_slots(id,hospital_id,hospital_name,department,appointment_date,appointment_time,available)
-SELECT 'slot-0919-1430','h001','市第一医院（模拟）','心内科','2026-09-19','14:30:00',TRUE
-WHERE NOT EXISTS (SELECT 1 FROM appointment_slots WHERE id='slot-0919-1430');
-
-INSERT INTO appointment_slots(id,hospital_id,hospital_name,department,appointment_date,appointment_time,available)
-SELECT 'slot-0920-0900','h002','市人民医院（模拟）','内分泌科','2026-09-20','09:00:00',TRUE
-WHERE NOT EXISTS (SELECT 1 FROM appointment_slots WHERE id='slot-0920-0900');
-INSERT INTO appointment_slots(id,hospital_id,hospital_name,department,appointment_date,appointment_time,available)
-SELECT 'slot-0920-1030','h002','市人民医院（模拟）','内分泌科','2026-09-20','10:30:00',TRUE
-WHERE NOT EXISTS (SELECT 1 FROM appointment_slots WHERE id='slot-0920-1030');
-INSERT INTO appointment_slots(id,hospital_id,hospital_name,department,appointment_date,appointment_time,available)
-SELECT 'slot-0920-1400','h002','市人民医院（模拟）','内分泌科','2026-09-20','14:00:00',TRUE
-WHERE NOT EXISTS (SELECT 1 FROM appointment_slots WHERE id='slot-0920-1400');
-INSERT INTO appointment_slots(id,hospital_id,hospital_name,department,appointment_date,appointment_time,available)
-SELECT 'slot-0920-1500','h002','市人民医院（模拟）','内分泌科','2026-09-20','15:00:00',TRUE
-WHERE NOT EXISTS (SELECT 1 FROM appointment_slots WHERE id='slot-0920-1500');
-INSERT INTO appointment_slots(id,hospital_id,hospital_name,department,appointment_date,appointment_time,available)
-SELECT 'slot-0921-0930','h002','市人民医院（模拟）','内分泌科','2026-09-21','09:30:00',TRUE
-WHERE NOT EXISTS (SELECT 1 FROM appointment_slots WHERE id='slot-0921-0930');
-
-MERGE INTO user_schedules KEY(id) VALUES
-('schedule-001','user-001','社区体检','2026-09-18 10:00:00','2026-09-18 11:00:00'),
-('schedule-002','user-001','和家人吃饭','2026-09-20 12:00:00','2026-09-20 13:30:00');
+-- 演示号源与既有日程不再写死日期：号源由 RollingAppointmentSlotInitializer 按“今天往后一个月”
+-- 生成，日程由 RollingUserScheduleInitializer 排在「下周三 / 下周六」。写死的话，那一天一过，
+-- 「时间冲突」就再也造不出来（冲突检查只看预约当天），回归用例也会跟着集体变红。
+-- 下面这条只做一次性清理：删掉早期写在本文件里、且没有预约在用的固定日期号源，
+-- 免得它和滚动号源并存，把周末的“无号源”场景提前填满。
+DELETE FROM appointment_slots
+WHERE id LIKE 'slot-%'
+  AND NOT EXISTS (SELECT 1 FROM appointments a WHERE a.slot_id = appointment_slots.id);
 
 MERGE INTO family_contacts KEY(id) VALUES
 ('family-001','user-001','小丽','女儿','13800001234');

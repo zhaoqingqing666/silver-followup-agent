@@ -154,9 +154,12 @@ export default function HomePage() {
     }
     {activeTab !== 'travel' && <BottomNav activeTab={activeTab} onChange={setActiveTab} />}
     {/* 全局麦克风在所有页面保持同一位置，包括助手页和地图页。
-        它是操作入口而不是第五个路由；助手输入框不再重复放置第二个麦克风。 */}
-    <div className="fixed bottom-[46px] left-1/2 z-40 -translate-x-1/2">
-      <VoiceMicButton variant="floating" onTranscript={onGlobalVoice} />
+        它是操作入口而不是第五个路由；助手输入框不再重复放置第二个麦克风。
+        居中用 -ml-8（按钮 size-16 的一半），**不要**改成 -translate-x-1/2：
+        祖先元素上只要有 transform，录音浮层的 position:fixed 就会以这个 64px 宽、
+        64px 高的盒子为包含块，`w-[calc(100%-40px)]` 算出 24px，一行只放得下一个汉字。 */}
+    <div className="fixed bottom-[46px] left-1/2 z-40 -ml-8">
+      <VoiceMicButton onTranscript={onGlobalVoice} />
     </div>
   </MobileShell>;
 }

@@ -3,6 +3,7 @@ package com.team.silveragent;
 import com.team.silveragent.application.FollowupAgentService;
 import com.team.silveragent.application.MemoryStore;
 import com.team.silveragent.domain.model.AgentTurnResponse;
+import com.team.silveragent.support.DemoSeed;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -24,6 +25,12 @@ import static org.assertj.core.api.Assertions.assertThat;
         "agent.model.enabled=false",
 })
 class UserMemoryTests {
+
+    /** 演示种子：心内科「下周三」上午、内分泌科次日 14:00，两笔都真实存在且互不冲突。 */
+    private static final String DAY = DemoSeed.day(DemoSeed.checkupDay());
+    private static final String MORNING_SLOT = DemoSeed.morningSlot();
+    private static final String LATER_DAY = DemoSeed.day(DemoSeed.laterDay());
+    private static final String ENDOCRINOLOGY_SLOT = DemoSeed.endocrinologySlot();
 
     @Autowired FollowupAgentService service;
     @Autowired MemoryStore memories;
@@ -69,7 +76,7 @@ class UserMemoryTests {
     @Test
     void draftBookingRemembersNothing() {
         String id = service.start().conversationId();
-        prepare(id, "h001", "d001", "2026-09-18", "slot-0918-0900");
+        prepare(id, "h001", "d001", DAY, MORNING_SLOT);
         // 还没确认：预约没有落库，也就不该有任何记忆。
         assertThat(service.memories("user-001")).isEmpty();
         assertThat(memories.digest("user-001")).isEmpty();
@@ -78,7 +85,7 @@ class UserMemoryTests {
     @Test
     void confirmedBookingRemembersHospitalDepartmentAndPeriod() {
         String id = service.start().conversationId();
-        approve(prepare(id, "h001", "d001", "2026-09-18", "slot-0918-0900"));
+        approve(prepare(id, "h001", "d001", DAY, MORNING_SLOT));
 
         assertThat(contents()).containsExactlyInAnyOrder(
                 "常去的医院是市第一医院（模拟）",
@@ -91,14 +98,14 @@ class UserMemoryTests {
     @Test
     void afternoonSlotIsRememberedAsAfternoon() {
         String id = service.start().conversationId();
-        approve(prepare(id, "h002", "d003", "2026-09-20", "slot-0920-1400"));
+        approve(prepare(id, "h002", "d003", LATER_DAY, ENDOCRINOLOGY_SLOT));
         assertThat(contents()).contains("习惯下午复诊");
     }
 
     @Test
     void aLaterBookingOverwritesTheEarlierPreference() {
-        approve(prepare(service.start().conversationId(), "h001", "d001", "2026-09-18", "slot-0918-0900"));
-        approve(prepare(service.start().conversationId(), "h002", "d003", "2026-09-20", "slot-0920-1400"));
+        approve(prepare(service.start().conversationId(), "h001", "d001", DAY, MORNING_SLOT));
+        approve(prepare(service.start().conversationId(), "h002", "d003", LATER_DAY, ENDOCRINOLOGY_SLOT));
 
         // 换了医院就要覆盖：两版偏好都留着，下一轮提示词里就会同时出现两家医院。
         assertThat(contents()).hasSize(3);
@@ -110,7 +117,7 @@ class UserMemoryTests {
 
     @Test
     void forgettingOneEntryLeavesTheOthers() {
-        approve(prepare(service.start().conversationId(), "h001", "d001", "2026-09-18", "slot-0918-0900"));
+        approve(prepare(service.start().conversationId(), "h001", "d001", DAY, MORNING_SLOT));
 
         assertThat(service.forgetMemory("user-001", "habit.hospital")).isTrue();
         assertThat(contents()).containsExactlyInAnyOrder("常去的科室是心内科", "习惯上午复诊");
@@ -124,7 +131,7 @@ class UserMemoryTests {
     @Test
     void cancellingTheAppointmentKeepsWhatWasLearned() {
         String id = service.start().conversationId();
-        approve(prepare(id, "h001", "d001", "2026-09-18", "slot-0918-0900"));
+        approve(prepare(id, "h001", "d001", DAY, MORNING_SLOT));
 
         AgentTurnResponse cancelCard = service.act(id, "CANCEL_APPOINTMENT", "", "取消预约");
         assertThat(cancelCard.confirmation()).isNotNull();
@@ -136,7 +143,7 @@ class UserMemoryTests {
     /** 忘记这条路径只走人自己按的按钮：模型与前端都够不着它。 */
     @Test
     void memoriesAreScopedToOneUser() {
-        approve(prepare(service.start().conversationId(), "h001", "d001", "2026-09-18", "slot-0918-0900"));
+        approve(prepare(service.start().conversationId(), "h001", "d001", DAY, MORNING_SLOT));
         assertThat(service.memories("user-002")).isEmpty();
         assertThat(memories.digest("user-002")).isEmpty();
     }

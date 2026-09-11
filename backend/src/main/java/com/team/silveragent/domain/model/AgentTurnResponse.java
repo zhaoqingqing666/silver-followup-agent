@@ -13,8 +13,22 @@ public record AgentTurnResponse(
         List<ToolTrace> toolTraces,
         TaskProgress task,
         String speechText,
-        UiDirective uiDirective
+        UiDirective uiDirective,
+        Notice notice
 ) {
+    /**
+     * 兼容构造：不带提示块时补 null。加这一条是为了让「提示块」这个新字段
+     * 不牵动既有的十几处构造点——它们构造出来的响应本来就没有提示块。
+     */
+    public AgentTurnResponse(String conversationId, String stage, String reply,
+                             List<QuickReply> quickReplies, PlanCard plan,
+                             ConfirmationCard confirmation, ResultCard result,
+                             List<ToolTrace> toolTraces, TaskProgress task,
+                             String speechText, UiDirective uiDirective) {
+        this(conversationId, stage, reply, quickReplies, plan, confirmation, result,
+                toolTraces, task, speechText, uiDirective, null);
+    }
+
     /**
      * 兼容构造：旧调用不传语音与页面指令时，默认朗读权威 reply，且不打开任何页面。
      */
@@ -66,4 +80,14 @@ public record AgentTurnResponse(
 
     public record TaskProgress(boolean active, String status, String currentStage,
                                String summary, String missingField) { }
+
+    /**
+     * 需要与普通聊天气泡区分显示的提示块，目前只有医疗越界一种。
+     *
+     * <p>只影响展示：不切 {@code stage}、不让待确认的 {@code confirmationId} 失效。
+     * 老人问一句“这个药还能吃吗”不等于想中断办理，所以办理进度原样保留（见 DECISIONS）。
+     */
+    public record Notice(String type, String title, String message) {
+        public static final String MEDICAL_BOUNDARY = "MEDICAL_BOUNDARY";
+    }
 }

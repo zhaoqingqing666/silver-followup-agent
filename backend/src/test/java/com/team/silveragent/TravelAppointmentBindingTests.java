@@ -4,6 +4,7 @@ import com.team.silveragent.application.FollowupAgentService;
 import com.team.silveragent.domain.model.AgentTurnResponse;
 import com.team.silveragent.domain.model.AgentTurnResponse.QuickReply;
 import com.team.silveragent.domain.model.AgentTurnResponse.UiDirectiveType;
+import com.team.silveragent.support.DemoSeed;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -22,6 +23,11 @@ import static org.assertj.core.api.Assertions.assertThat;
         "spring.datasource.url=jdbc:h2:mem:silver-agent-travel;DB_CLOSE_DELAY=-1",
         "agent.model.enabled=false"})
 class TravelAppointmentBindingTests {
+
+    /** 办理流程用演示种子的「下周三」上午号源；历史预约那条固定用 9 月 8 日（绑定只比月/日，不看年份）。 */
+    private static final String DAY = DemoSeed.day(DemoSeed.checkupDay());
+    private static final String SLOT = DemoSeed.morningSlot();
+
     @Autowired FollowupAgentService service;
     @Autowired JdbcTemplate jdbc;
 
@@ -29,7 +35,8 @@ class TravelAppointmentBindingTests {
         for (String table : List.of("appointments", "reminders", "family_notifications")) {
             jdbc.update("DELETE FROM " + table);
         }
-        jdbc.update("DELETE FROM appointment_slots WHERE id LIKE 'slot-09%' AND appointment_date <> '2026-09-18'");
+        // 只清本类自己塞进去的历史号源：演示号源已经是滚动的，不再需要在这里挑日子放行。
+        jdbc.update("DELETE FROM appointment_slots WHERE id LIKE 'slot-0908-%'");
         jdbc.update("UPDATE appointment_slots SET available=TRUE");
     }
 
@@ -58,8 +65,8 @@ class TravelAppointmentBindingTests {
     private AgentTurnResponse prepare(String id) {
         action(id, "SET_HOSPITAL", "h001");
         action(id, "SET_DEPARTMENT", "d001");
-        action(id, "SET_DATE", "2026-09-18");
-        action(id, "SELECT_SLOT", "slot-0918-0900");
+        action(id, "SET_DATE", DAY);
+        action(id, "SELECT_SLOT", SLOT);
         action(id, "SET_ALTERNATIVE", "true");
         action(id, "SET_COMPANION", "true");
         action(id, "SET_TRAVEL", "true");

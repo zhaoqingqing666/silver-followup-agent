@@ -9,29 +9,63 @@ import {
 } from '@/lib/material-api';
 import type { MaterialItem } from '@/types/domain';
 
+/**
+ * 材料状态变化事件。
+ *
+ * 同一份预约的材料清单会同时挂在两处：助手页的确认卡里（常驻，切标签不卸载）和事项页里
+ * （每次切回来都重新挂载）。一边勾了、另一边还显示「未准备」，评审看到的就是自相矛盾的两屏。
+ * 所以改动的一方广播一次，其余实例重新拉取。
+ */
+export const MATERIALS_UPDATED_EVENT = 'silver-agent-materials-updated';
+
+interface MaterialsUpdatedDetail {
+  appointmentId?: string;
+  /** 派发方自己的实例编号：跳过自己发出的那条，省掉一次多余的重载。 */
+  source?: string;
+}
+
+let instanceSequence = 0;
+
 export function useAppointmentMaterials(appointmentId: string) {
   const [materials, setMaterials] = useState<MaterialItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [updatingId, setUpdatingId] = useState('');
   const [error, setError] = useState('');
+  const [instanceId] = useState(() => `materials-${++instanceSequence}`);
 
-  const reload = useCallback(async () => {
+  /** silent：这是别处改动后的一次后台同步，不要把列表换成「正在读取」，那会闪一下。 */
+  const reload = useCallback(async (options?: { silent?: boolean }) => {
     if (!appointmentId) {
       setMaterials([]);
       return;
     }
-    setLoading(true);
+    if (!options?.silent) setLoading(true);
     setError('');
     try {
       setMaterials(await getAppointmentMaterials(appointmentId));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '无法读取材料状态');
     } finally {
-      setLoading(false);
+      if (!options?.silent) setLoading(false);
     }
   }, [appointmentId]);
 
   useEffect(() => { void reload(); }, [reload]);
+
+  useEffect(() => {
+    const onMaterialsUpdated = (event: Event) => {
+      const detail = (event as CustomEvent<MaterialsUpdatedDetail>).detail;
+      if (!appointmentId || detail?.appointmentId !== appointmentId) return;
+      if (detail?.source === instanceId) return;
+      void reload({ silent: true });
+    };
+    window.addEventListener(MATERIALS_UPDATED_EVENT, onMaterialsUpdated);
+    return () => window.removeEventListener(MATERIALS_UPDATED_EVENT, onMaterialsUpdated);
+  }, [appointmentId, instanceId, reload]);
+
+  /** 本次改动已经写进库，通知别处的同一份清单重新拉取。 */
+  const broadcast = () => window.dispatchEvent(new CustomEvent<MaterialsUpdatedDetail>(
+    MATERIALS_UPDATED_EVENT, { detail: { appointmentId, source: instanceId } }));
 
   const toggle = async (item: MaterialItem) => {
     const status = item.status === 'NOT_PREPARED' ? 'PREPARED' : 'NOT_PREPARED';
@@ -40,9 +74,7 @@ export function useAppointmentMaterials(appointmentId: string) {
     try {
       const updated = await updateAppointmentMaterial(appointmentId, item.id, status);
       setMaterials(rows => rows.map(row => row.id === updated.id ? updated : row));
-      window.dispatchEvent(new CustomEvent('silver-agent-materials-updated', {
-        detail: { appointmentId },
-      }));
+      broadcast();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '材料状态没有保存成功');
     } finally {
@@ -57,9 +89,7 @@ export function useAppointmentMaterials(appointmentId: string) {
     try {
       const updated = await confirmMaterialWithPhoto(appointmentId, item.id, dataUrl);
       setMaterials(rows => rows.map(row => row.id === updated.id ? updated : row));
-      window.dispatchEvent(new CustomEvent('silver-agent-materials-updated', {
-        detail: { appointmentId },
-      }));
+      broadcast();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '照片确认没有保存成功');
     } finally {

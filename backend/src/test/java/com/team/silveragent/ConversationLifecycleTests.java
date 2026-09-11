@@ -3,6 +3,7 @@ package com.team.silveragent;
 import com.team.silveragent.application.FollowupAgentService;
 import com.team.silveragent.domain.model.AgentTurnResponse;
 import com.team.silveragent.domain.model.ConversationSummary;
+import com.team.silveragent.support.DemoSeed;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -28,6 +29,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 })
 class ConversationLifecycleTests {
 
+    /** 演示种子「下周三」上午 09:00 那格，和演示话术落在同一天。 */
+    private static final String DAY = DemoSeed.day(DemoSeed.checkupDay());
+    private static final String SLOT = DemoSeed.morningSlot();
+
     @Autowired FollowupAgentService service;
     @Autowired JdbcTemplate jdbc;
 
@@ -49,8 +54,8 @@ class ConversationLifecycleTests {
     AgentTurnResponse prepare(String id) {
         action(id, "SET_HOSPITAL", "h001");
         action(id, "SET_DEPARTMENT", "d001");
-        action(id, "SET_DATE", "2026-09-18");
-        action(id, "SELECT_SLOT", "slot-0918-0900");
+        action(id, "SET_DATE", DAY);
+        action(id, "SELECT_SLOT", SLOT);
         action(id, "SET_ALTERNATIVE", "true");
         action(id, "SET_COMPANION", "false");
         action(id, "SET_TRAVEL", "false");

@@ -12,7 +12,7 @@ import { compressImageFile } from '@/lib/image-compress';
 import { speakText, stopPlayback } from '@/lib/tts-player';
 import type { VoiceRecording } from '@/features/voice/use-press-to-talk';
 import type { AgentPlanCard, AgentTurnResponse, ChatMessage, ConversationHistoryResponse, TabId, TravelFocus, VoicePreference } from '@/types/domain';
-import { ConfirmationCardView, PlanCard, ResultCardView } from './assistant-cards';
+import { BoundaryAlert, ConfirmationCardView, PlanCard, ResultCardView } from './assistant-cards';
 import { CameraCapture } from './camera-capture';
 import { ChatBubble } from './chat-bubble';
 import { HistorySheet } from './history-sheet';
@@ -524,6 +524,10 @@ export function AssistantView({ active, onNavigate, onOpenTravel, voicePreferenc
         {messages.map(message => <ChatBubble key={message.id} message={message} />)}
         {busy && <div aria-live="polite" className="flex items-center gap-2 text-base text-muted-foreground"><LoaderCircle className="size-5 animate-spin" />{stages[Math.min(stageIndex, stages.length - 1)]}</div>}
       </section>
+
+      {/* 越界提示紧跟最近一轮消息：老人问完「这个药还能吃吗」，眼睛停在屏幕下方，
+          提示块摆在这里才看得见。办理中的计划卡、确认卡都还照常留在下面。 */}
+      {turn?.notice && <BoundaryAlert notice={turn.notice} />}
 
       {visiblePlan && <PlanCard plan={visiblePlan} />}
       {/* 结束了的会话不摆确认卡：后端已经不放行，一张按不动的「确认办理」比没有卡片更糟。 */}

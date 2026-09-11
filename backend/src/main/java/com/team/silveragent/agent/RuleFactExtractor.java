@@ -58,8 +58,9 @@ public class RuleFactExtractor implements FactExtractor {
     private String detectIntent(String value) {
         if (containsAny(value, "胸痛", "心口疼", "心口痛", "胸口疼", "胸口痛", "心前区疼", "心前区痛",
                 "胸闷", "胸部压迫", "呼吸困难", "昏迷", "大出血", "喘不上气")) return "EMERGENCY";
-        if (containsAny(value, "怎么用药", "药量", "诊断", "检查结果", "是不是得了", "吃什么药", "推荐药", "加量", "减量", "治疗方案", "停药")) return "MEDICAL_ADVICE";
-        if (physicalDiscomfort(value)) return "HEALTH_CONCERN";
+        // 越界口径与 SafetyGuard 共用一份规则：词表写两遍迟早只剩一份是对的。
+        if (MedicalBoundaryRules.looksLikeMedicalAdvice(value)) return "MEDICAL_ADVICE";
+        if (MedicalBoundaryRules.bodyDiscomfort(value)) return "HEALTH_CONCERN";
         if (containsAny(value, "心里不舒服", "心口不舒服")) return "CLARIFY_DISCOMFORT";
         if (containsAny(value, "害怕", "担心", "紧张", "好累", "很累", "疲惫", "孤单", "一个人去", "没人陪")) return "EMOTIONAL_SUPPORT";
         if (containsAny(value, "可以和你聊天", "能和你聊天", "陪我聊", "聊聊天", "聊点别的", "说说话", "聊一会", "你是谁", "你好", "谢谢", "感谢")) return "SMALL_TALK";
@@ -67,8 +68,9 @@ public class RuleFactExtractor implements FactExtractor {
         boolean explicitCancel = containsAny(value, "取消", "退掉", "撤销", "作废");
         boolean discardExisting = value.contains("不要")
                 && containsAny(value, "之前", "原来", "已有", "已经", "那个");
+        // 「取消预约 / 取消已预约」这类说法都同时含「预约」与「取消」，已被上面这条覆盖，
+        // 再写一遍只会让人以为另有分支。
         if (containsAny(value, "预约", "之前的号", "原来的号") && (explicitCancel || discardExisting)) return "CANCEL_APPOINTMENT";
-        if (containsAny(value, "取消预约", "取消这次预约", "取消已经预约", "取消已预约")) return "CANCEL_APPOINTMENT";
         if (containsAny(value, "还是这个时间", "仍然这个时间", "保留这个时间", "就按这个时间", "时间不改")) return "CONFIRM_ACTION";
         if (containsAny(value, "确认", "执行操作", "确定执行")) return "CONFIRM_ACTION";
         if (containsAny(value, "不执行", "暂不执行", "返回修改", "先别执行")) return "DENY_ACTION";
@@ -184,13 +186,6 @@ public class RuleFactExtractor implements FactExtractor {
 
     private String concern(String value) {
         return containsAny(value, "害怕", "担心", "紧张", "累", "疲惫", "孤单", "一个人", "没人陪", "不舒服") ? value : null;
-    }
-
-    private boolean physicalDiscomfort(String value) {
-        if (value.contains("心里不舒服")) return false;
-        boolean bodyPart = containsAny(value, "腿", "脚", "膝", "腰", "背", "肩", "胳膊", "手", "头", "肚子", "腹部", "胃", "身体");
-        boolean symptom = containsAny(value, "不舒服", "疼", "痛", "麻", "无力", "难受");
-        return bodyPart && symptom;
     }
 
     private boolean isProcessQuestion(String value) {

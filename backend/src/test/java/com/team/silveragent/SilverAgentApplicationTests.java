@@ -6,6 +6,7 @@ import com.team.silveragent.agent.RuleFactExtractor;
 import com.team.silveragent.agent.AgentContext;
 import com.team.silveragent.domain.model.AgentTurnResponse;
 import com.team.silveragent.infrastructure.mock.MockScheduleTool;
+import com.team.silveragent.support.DemoSeed;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -20,6 +21,14 @@ import static org.mockito.Mockito.*;
 
 @SpringBootTest(properties = {"spring.datasource.url=jdbc:h2:mem:silver-agent-test;DB_CLOSE_DELAY=-1", "agent.model.enabled=false"})
 class SilverAgentApplicationTests {
+    /** 演示种子：体检那天（下周三，冲突与普通办理都在这一天）、当天没有号的周末、以及改期用的次日。 */
+    private static final String DAY = DemoSeed.day(DemoSeed.checkupDay());
+    private static final String CHINESE_DAY = DemoSeed.chineseDay(DemoSeed.checkupDay());
+    private static final String SLOT = DemoSeed.morningSlot();
+    private static final String CLASH_SLOT = DemoSeed.conflictingSlot();
+    private static final String EMPTY_DAY = DemoSeed.day(DemoSeed.emptyDay());
+    private static final String LATER_DAY = DemoSeed.day(DemoSeed.laterDay());
+
     @Autowired FollowupAgentService service;
     @Autowired JdbcTemplate jdbc;
     @Autowired RuleFactExtractor extractor;
@@ -28,8 +37,8 @@ class SilverAgentApplicationTests {
 
     @BeforeEach void resetData() {
         for (String table : List.of("appointments", "reminders", "family_notifications")) jdbc.update("DELETE FROM " + table);
+        // 周六本来就没有号源（滚动初始化刻意留出的空档），不用再手动关掉某一天。
         jdbc.update("UPDATE appointment_slots SET available=TRUE");
-        jdbc.update("UPDATE appointment_slots SET available=FALSE WHERE appointment_date='2026-09-19'");
         reset(schedule);
     }
 
@@ -39,8 +48,8 @@ class SilverAgentApplicationTests {
         String id = service.start().conversationId();
         action(id, "SET_HOSPITAL", "h001");
         action(id, "SET_DEPARTMENT", "d001");
-        action(id, "SET_DATE", "2026-09-18");
-        action(id, "SELECT_SLOT", "slot-0918-0900");
+        action(id, "SET_DATE", DAY);
+        action(id, "SELECT_SLOT", SLOT);
         action(id, "SET_ALTERNATIVE", "true");
         action(id, "SET_COMPANION", "true");
         action(id, "SET_TRAVEL", Boolean.toString(travel));
@@ -60,7 +69,8 @@ class SilverAgentApplicationTests {
         assertThat(count("appointments")).isZero();
         assertThat(count("reminders")).isZero();
         assertThat(count("family_notifications")).isZero();
-        assertThat(turn.confirmation().operations().toString()).contains("市第一医院", "心内科", "2026", "需要陪同");
+        assertThat(turn.confirmation().operations().toString())
+                .contains("市第一医院", "心内科", CHINESE_DAY, "需要陪同");
         assertThat(approve(turn).stage()).isEqualTo("COMPLETED");
         approve(turn);
         assertThat(count("appointments")).isEqualTo(1);
@@ -71,13 +81,13 @@ class SilverAgentApplicationTests {
     @Test void duplicateAppointmentIsExplainedBeforeAnotherConfirmationCanBeCreated() {
         approve(prepare(false, false));
         // 模拟号源系统仍返回同一个时段，用来验证重复预约检查不是只依赖 available 标志。
-        jdbc.update("UPDATE appointment_slots SET available=TRUE WHERE id='slot-0918-0900'");
+        jdbc.update("UPDATE appointment_slots SET available=TRUE WHERE id=?", SLOT);
 
         String id = service.start().conversationId();
         action(id, "SET_HOSPITAL", "h001");
         action(id, "SET_DEPARTMENT", "d001");
-        action(id, "SET_DATE", "2026-09-18");
-        action(id, "SELECT_SLOT", "slot-0918-0900");
+        action(id, "SET_DATE", DAY);
+        action(id, "SELECT_SLOT", SLOT);
         action(id, "SET_ALTERNATIVE", "true");
         action(id, "SET_COMPANION", "false");
         action(id, "SET_TRAVEL", "false");
@@ -97,6 +107,28 @@ class SilverAgentApplicationTests {
         action(turn.conversationId(), "START_PLAN", "");
         assertThat(count("appointments")).isZero();
         assertThat(service.resume(turn.conversationId()).stage()).isEqualTo("EMERGENCY_PAUSED");
+    }
+
+    /**
+     * 越界回答不能打断正在办的事：确认卡和它的 confirmationId 都得原样还在，
+     * 老人问完一句药，接着按「确认办理」仍然办得成。
+     *
+     * <p>与 {@link #emergencyInvalidatesPendingConfirmationAndContinue} 正好是一对：
+     * 紧急情况必须作废待确认操作，问病问药不该。
+     */
+    @Test void medicalBoundaryKeepsThePendingConfirmationAlive() {
+        AgentTurnResponse turn = prepare(true, true);
+        AgentTurnResponse boundary = service.chat(turn.conversationId(), "这个药量是不是该减半？");
+
+        assertThat(boundary.stage()).isEqualTo("AWAITING_CONFIRMATION");
+        assertThat(boundary.notice().type()).isEqualTo(AgentTurnResponse.Notice.MEDICAL_BOUNDARY);
+        assertThat(boundary.confirmation()).isNotNull();
+        assertThat(boundary.confirmation().confirmationId()).isEqualTo(turn.confirmation().confirmationId());
+        assertThat(boundary.confirmation().operations()).containsExactlyElementsOf(turn.confirmation().operations());
+        // 越界只是一句问答，不写库；紧接着确认，这次办理照常落地。
+        assertThat(count("appointments")).isZero();
+        assertThat(approve(boundary).stage()).isEqualTo("COMPLETED");
+        assertThat(count("appointments")).isEqualTo(1);
     }
 
     @Test void cancellationStopsOldActions() {
@@ -244,6 +276,12 @@ class SilverAgentApplicationTests {
         assertThat(result.stage()).isEqualTo("ASK_HOSPITAL");
         assertThat(result.reply()).contains("不能诊断", "医生")
                 .doesNotContain("年龄", "既往病史", "请告诉我就诊医院");
+        // 越界回复和普通回复一样是聊天气泡，前端靠这个提示块才把它显示成一块单独的提示卡。
+        assertThat(result.notice()).isNotNull();
+        assertThat(result.notice().type()).isEqualTo(AgentTurnResponse.Notice.MEDICAL_BOUNDARY);
+        assertThat(result.notice().title()).isNotBlank();
+        // 提示卡的正文不是回复的复制：回复照常进对话记录，卡上只补一句「为什么不一样」。
+        assertThat(result.notice().message()).doesNotContain("不能诊断");
         assertThat(count("appointments")).isZero();
     }
 
@@ -295,7 +333,7 @@ class SilverAgentApplicationTests {
         String id = service.start().conversationId();
         action(id, "SET_HOSPITAL", "h001"); action(id, "SET_DEPARTMENT", "d001");
         action(id, "SET_ALTERNATIVE", "false");
-        AgentTurnResponse turn = action(id, "SET_DATE", "2026-09-19");
+        AgentTurnResponse turn = action(id, "SET_DATE", EMPTY_DAY);
         assertThat(turn.stage()).isEqualTo("NO_SLOT");
         assertThat(turn.quickReplies()).noneMatch(q -> q.action().equals("SELECT_SLOT"));
         assertThat(turn.toolTraces()).noneMatch(t -> t.toolName().equals("appointment.queryAlternatives"));
@@ -336,7 +374,7 @@ class SilverAgentApplicationTests {
         String noSlotId = service.start().conversationId();
         action(noSlotId, "SET_HOSPITAL", "h001");
         action(noSlotId, "SET_DEPARTMENT", "d001");
-        AgentTurnResponse noSlot = action(noSlotId, "SET_DATE", "2026-09-19");
+        AgentTurnResponse noSlot = action(noSlotId, "SET_DATE", EMPTY_DAY);
         assertThat(noSlot.stage()).isEqualTo("NO_SLOT");
         AgentTurnResponse nearby = service.chat(noSlotId, "那帮我看看附近几天");
         assertThat(nearby.stage()).isEqualTo("NO_SLOT");
@@ -346,18 +384,45 @@ class SilverAgentApplicationTests {
         String conflictId = service.start().conversationId();
         action(conflictId, "SET_HOSPITAL", "h001");
         action(conflictId, "SET_DEPARTMENT", "d001");
-        action(conflictId, "SET_DATE", "2026-09-18");
-        action(conflictId, "SELECT_SLOT", "slot-0918-1020");
+        action(conflictId, "SET_DATE", DAY);
+        action(conflictId, "SELECT_SLOT", CLASH_SLOT);
         action(conflictId, "SET_ALTERNATIVE", "true");
         action(conflictId, "SET_COMPANION", "false");
         action(conflictId, "SET_TRAVEL", "false");
         action(conflictId, "SET_TRANSPORT", "家属开车");
         AgentTurnResponse conflict = action(conflictId, "SET_NOTIFY", "false");
         assertThat(conflict.stage()).isEqualTo("CONFLICT");
+        // 前端每页只渲染 3 个候选：保留冲突是最后一道防线，不能被挤到第二页。
+        assertThat(conflict.quickReplies()).hasSize(3);
+        assertThat(conflict.quickReplies().get(2).action()).isEqualTo("KEEP_CONFLICT");
         AgentTurnResponse kept = service.chat(conflictId, "还是这个时间吧");
         assertThat(kept.stage()).isEqualTo("AWAITING_CONFIRMATION");
         assertThat(kept.confirmation()).isNotNull();
+        // 用户选完「仍保留」之后，确认卡必须把冲突本身摆出来，不能只说“请核对本次实际执行内容”
+        assertThat(kept.confirmation().operations())
+                .anyMatch(line -> line.contains("已知冲突") && line.contains("社区体检") && line.contains("已选择保留"));
         assertThat(count("appointments")).isZero();
+    }
+
+    @Test void changingTimeClearsAnAcknowledgedConflictFromTheCard() {
+        String id = service.start().conversationId();
+        action(id, "SET_HOSPITAL", "h001");
+        action(id, "SET_DEPARTMENT", "d001");
+        action(id, "SET_DATE", DAY);
+        action(id, "SELECT_SLOT", CLASH_SLOT);
+        action(id, "SET_ALTERNATIVE", "true");
+        action(id, "SET_COMPANION", "false");
+        action(id, "SET_TRAVEL", "false");
+        action(id, "SET_TRANSPORT", "家属开车");
+        action(id, "SET_NOTIFY", "false");
+        action(id, "KEEP_CONFLICT", "");
+
+        // 改到不冲突的那一格再走一遍日程检查：冲突已经解决了，确认卡不能再挂着它
+        action(id, "SELECT_SLOT", SLOT);
+        AgentTurnResponse revised = action(id, "START_PLAN", "");
+
+        assertThat(revised.stage()).isEqualTo("AWAITING_CONFIRMATION");
+        assertThat(revised.confirmation().operations()).noneMatch(line -> line.contains("已知冲突"));
     }
 
     @Test void cancelBookingRequiresConfirmationAndDisablesReminders() {
@@ -373,15 +438,15 @@ class SilverAgentApplicationTests {
         AgentTurnResponse done = approve(prepare(false, false));
         String id = done.conversationId();
         action(id, "EDIT_BOOKING", "");
-        action(id, "SET_DATE", "2026-09-18");
-        action(id, "SELECT_SLOT", "slot-0918-1020");
+        action(id, "SET_DATE", DAY);
+        action(id, "SELECT_SLOT", CLASH_SLOT);
         AgentTurnResponse conflict = action(id, "START_PLAN", "");
         assertThat(conflict.stage()).isEqualTo("CONFLICT");
         AgentTurnResponse revised = action(id, "KEEP_CONFLICT", "");
-        assertThat(jdbc.queryForObject("SELECT slot_id FROM appointments", String.class)).isEqualTo("slot-0918-0900");
+        assertThat(jdbc.queryForObject("SELECT slot_id FROM appointments", String.class)).isEqualTo(SLOT);
         assertThat(approve(revised).stage()).isEqualTo("COMPLETED");
         assertThat(count("appointments")).isEqualTo(1);
-        assertThat(jdbc.queryForObject("SELECT slot_id FROM appointments", String.class)).isEqualTo("slot-0918-1020");
+        assertThat(jdbc.queryForObject("SELECT slot_id FROM appointments", String.class)).isEqualTo(CLASH_SLOT);
     }
 
     @Test void missingInformationCannotBeBypassed() {
@@ -395,8 +460,15 @@ class SilverAgentApplicationTests {
         assertThat(extractor.extract("下周三", new AgentContext("ASK_DATE", "", LocalDate.of(2026,9,7), List.of())).date())
                 .isEqualTo(LocalDate.of(2026,9,16));
         String id = service.start().conversationId();
-        for (String message : List.of("是不是得了什么病", "推荐药", "药量加量", "检查结果", "治疗方案")) {
-            assertThat(service.chat(id, message).reply()).contains("不能诊断");
+        // 后六句是「服务越界」场景要演的句子：都不带“用药/诊断”这类现成动词，
+        // 靠“症状/药物/报告名词 + 疑问语气”判出来。
+        for (String message : List.of("是不是得了什么病", "推荐药", "药量加量", "检查结果", "治疗方案",
+                "我血压有点高，要不要紧？", "这个药还能继续吃吗？", "阿司匹林一天吃几片？",
+                "帮我看看这个化验单", "我是不是该住院？", "9月18日，我最近头晕是不是血压高了")) {
+            AgentTurnResponse boundary = service.chat(id, message);
+            assertThat(boundary.reply()).as(message).contains("不能诊断");
+            assertThat(boundary.notice()).as(message).isNotNull();
+            assertThat(boundary.notice().type()).as(message).isEqualTo(AgentTurnResponse.Notice.MEDICAL_BOUNDARY);
         }
         assertThat(count("appointments")).isZero();
         assertThat(service.chat(id, "市第一医院").stage()).isEqualTo("ASK_DEPARTMENT");
@@ -419,13 +491,13 @@ class SilverAgentApplicationTests {
         AgentTurnResponse done = approve(prepare(true, false));
         String id = done.conversationId();
         action(id, "EDIT_BOOKING", "");
-        action(id, "SET_DATE", "2026-09-18");
-        action(id, "SELECT_SLOT", "slot-0918-1020");
+        action(id, "SET_DATE", DAY);
+        action(id, "SELECT_SLOT", CLASH_SLOT);
         action(id, "START_PLAN", "");
         AgentTurnResponse revised = action(id, "KEEP_CONFLICT", "");
-        jdbc.update("UPDATE appointment_slots SET available=FALSE WHERE id='slot-0918-1020'");
+        jdbc.update("UPDATE appointment_slots SET available=FALSE WHERE id=?", CLASH_SLOT);
         assertThat(approve(revised).stage()).isEqualTo("TOOL_ERROR");
-        assertThat(jdbc.queryForObject("SELECT slot_id FROM appointments", String.class)).isEqualTo("slot-0918-0900");
+        assertThat(jdbc.queryForObject("SELECT slot_id FROM appointments", String.class)).isEqualTo(SLOT);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM reminders WHERE status='CREATED'", Integer.class)).isEqualTo(2);
     }
 
@@ -441,8 +513,8 @@ class SilverAgentApplicationTests {
 
     @Test void naturalLanguageDateChangeInvalidatesSelectedSlot() {
         AgentTurnResponse turn = prepare(false, false);
-        AgentTurnResponse changed = service.chat(turn.conversationId(), "改成2026-09-20下午");
-        assertThat(changed.plan().date()).contains("20");
+        AgentTurnResponse changed = service.chat(turn.conversationId(), "改成" + LATER_DAY + "下午");
+        assertThat(changed.plan().date()).isEqualTo(DemoSeed.chineseDay(DemoSeed.laterDay()));
         approve(turn);
         assertThat(count("appointments")).isZero();
     }
@@ -475,16 +547,4 @@ class SilverAgentApplicationTests {
         assertThat(resumed.reply()).contains("科室");
     }
 
-    private LocalDate nextWeekday() {
-        LocalDate date = LocalDate.now().plusDays(1);
-        while (date.getDayOfWeek().getValue() >= 6) date = date.plusDays(1);
-        return date;
-    }
-
-    private LocalDate nextWeekendWithoutSeed() {
-        LocalDate date = LocalDate.now().plusDays(1);
-        while (date.getDayOfWeek().getValue() < 6) date = date.plusDays(1);
-        if (date.equals(LocalDate.of(2026, 9, 19))) date = date.plusDays(1);
-        return date;
-    }
 }

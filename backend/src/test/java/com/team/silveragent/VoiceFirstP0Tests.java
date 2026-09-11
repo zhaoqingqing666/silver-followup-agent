@@ -5,6 +5,7 @@ import com.team.silveragent.domain.model.AgentTurnResponse;
 import com.team.silveragent.domain.model.AgentTurnResponse.QuickReply;
 import com.team.silveragent.domain.model.AgentTurnResponse.ResultCard;
 import com.team.silveragent.domain.model.AgentTurnResponse.UiDirectiveType;
+import com.team.silveragent.support.DemoSeed;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -18,13 +19,20 @@ import static org.assertj.core.api.Assertions.assertThat;
 /** 语音优先 P0：完整播报、自然语言开页、取消候选确定性解析、确认红线与紧急优先。 */
 @SpringBootTest(properties = {"spring.datasource.url=jdbc:h2:mem:silver-agent-test;DB_CLOSE_DELAY=-1", "agent.model.enabled=false"})
 class VoiceFirstP0Tests {
+    /** 演示种子「下周三」的上午 09:00 与下午 15:30 两格，都不与「社区体检」撞车。 */
+    private static final String DAY = DemoSeed.day(DemoSeed.checkupDay());
+    private static final String MORNING_SLOT = DemoSeed.morningSlot();
+    private static final String AFTERNOON_SLOT = DemoSeed.secondSlot();
+    private static final String MORNING = DemoSeed.clock(DemoSeed.MORNING);
+    private static final String AFTERNOON = DemoSeed.clock(DemoSeed.AFTERNOON);
+
     @Autowired FollowupAgentService service;
     @Autowired JdbcTemplate jdbc;
 
     @BeforeEach void resetData() {
         for (String table : List.of("appointments", "reminders", "family_notifications")) jdbc.update("DELETE FROM " + table);
+        // 周六本来就没有号源（滚动初始化刻意留出的空档），不用再手动关掉某一天。
         jdbc.update("UPDATE appointment_slots SET available=TRUE");
-        jdbc.update("UPDATE appointment_slots SET available=FALSE WHERE appointment_date='2026-09-19'");
     }
 
     private AgentTurnResponse action(String id, String action, String value) {
@@ -42,7 +50,7 @@ class VoiceFirstP0Tests {
     private AgentTurnResponse prepare(String id, String slotId) {
         action(id, "SET_HOSPITAL", "h001");
         action(id, "SET_DEPARTMENT", "d001");
-        action(id, "SET_DATE", "2026-09-18");
+        action(id, "SET_DATE", DAY);
         action(id, "SELECT_SLOT", slotId);
         action(id, "SET_ALTERNATIVE", "true");
         action(id, "SET_COMPANION", "true");
@@ -65,7 +73,7 @@ class VoiceFirstP0Tests {
 
     // 1 & 2：完成路径的 reply 与 speechText 都完整覆盖 ResultCard 的权威事实，且不虚构路线类信息。
     @Test void completionNarratesEveryAuthoritativeFact() {
-        AgentTurnResponse done = book("slot-0918-0900");
+        AgentTurnResponse done = book(MORNING_SLOT);
 
         assertThat(done.stage()).isEqualTo("COMPLETED");
         ResultCard card = done.result();
@@ -85,7 +93,7 @@ class VoiceFirstP0Tests {
     }
 
     @Test void naturalLanguageMapRequestOpensTravelPageWithTheEffectiveAppointment() {
-        AgentTurnResponse done = book("slot-0918-0900");
+        AgentTurnResponse done = book(MORNING_SLOT);
         AgentTurnResponse asked = service.chat(done.conversationId(), "我想看地图");
 
         assertThat(asked.uiDirective()).isNotNull();
@@ -95,7 +103,7 @@ class VoiceFirstP0Tests {
     }
 
     @Test void naturalLanguageInsideGuideRequestUsesTheInsideDirective() {
-        AgentTurnResponse done = book("slot-0918-0900");
+        AgentTurnResponse done = book(MORNING_SLOT);
         AgentTurnResponse asked = service.chat(done.conversationId(), "到医院后怎么走");
 
         assertThat(asked.uiDirective()).isNotNull();
@@ -115,7 +123,7 @@ class VoiceFirstP0Tests {
 
     // 完成播报最后问“需要我现在打开地图吗”，老人只回一个“要”也要能打开路线页；否定和寒暄不跳页。
     @Test void shortYesAfterCompletionOpensTheTravelPage() {
-        AgentTurnResponse done = book("slot-0918-0900");
+        AgentTurnResponse done = book(MORNING_SLOT);
         String id = done.conversationId();
         String appointmentId = done.result().appointmentId();
 
@@ -131,8 +139,8 @@ class VoiceFirstP0Tests {
     }
 
     @Test void voiceCancellationPicksTheNearestCandidateWithoutExecutingIt() {
-        book("slot-0918-0900");
-        AgentTurnResponse second = book(service.start().conversationId(), "slot-0918-1430");
+        book(MORNING_SLOT);
+        AgentTurnResponse second = book(service.start().conversationId(), AFTERNOON_SLOT);
         String id = second.conversationId();
 
         AgentTurnResponse asked = service.chat(id, "我想取消预约");
@@ -143,30 +151,30 @@ class VoiceFirstP0Tests {
         assertThat(picked.stage()).isEqualTo("AWAITING_CONFIRMATION");
         assertThat(picked.confirmation()).isNotNull();
         assertThat(picked.confirmation().operations().toString())
-                .contains("2026年9月18日", "09:00", "市第一医院", "心内科")
-                .doesNotContain("14:30");
+                .contains(DemoSeed.chineseDay(DemoSeed.checkupDay()), MORNING, "市第一医院", "心内科")
+                .doesNotContain(AFTERNOON);
         assertThat(confirmedAppointments()).isEqualTo(2);
     }
 
     @Test void voiceCancellationPicksTheEarliestAndTheAfternoonCandidate() {
-        book("slot-0918-0900");
-        AgentTurnResponse second = book(service.start().conversationId(), "slot-0918-1430");
+        book(MORNING_SLOT);
+        AgentTurnResponse second = book(service.start().conversationId(), AFTERNOON_SLOT);
         String id = second.conversationId();
 
         service.chat(id, "我想取消预约");
         AgentTurnResponse earliest = service.chat(id, "最早的一次");
-        assertThat(earliest.confirmation().operations().toString()).contains("09:00").doesNotContain("14:30");
+        assertThat(earliest.confirmation().operations().toString()).contains(MORNING).doesNotContain(AFTERNOON);
         assertThat(confirmedAppointments()).isEqualTo(2);
 
         AgentTurnResponse afternoon = service.chat(id, "下午那个");
-        assertThat(afternoon.confirmation().operations().toString()).contains("14:30").doesNotContain("09:00");
+        assertThat(afternoon.confirmation().operations().toString()).contains(AFTERNOON).doesNotContain(MORNING);
         assertThat(confirmedAppointments()).isEqualTo(2);
     }
 
     // “市第一医院那条”里的“第一”不能被当成“取最早的一条”，两条都在这家医院时必须反问而不是猜。
     @Test void hospitalNameDoesNotTurnIntoAnEarliestSelection() {
-        book("slot-0918-0900");
-        AgentTurnResponse second = book(service.start().conversationId(), "slot-0918-1430");
+        book(MORNING_SLOT);
+        AgentTurnResponse second = book(service.start().conversationId(), AFTERNOON_SLOT);
         String id = second.conversationId();
         service.chat(id, "我想取消预约");
 
@@ -177,7 +185,7 @@ class VoiceFirstP0Tests {
     }
 
     @Test void vagueAgreementNeverExecutesBookingOrCancellation() {
-        AgentTurnResponse turn = prepare(service.start().conversationId(), "slot-0918-0900");
+        AgentTurnResponse turn = prepare(service.start().conversationId(), MORNING_SLOT);
         assertThat(service.chat(turn.conversationId(), "好的").stage()).isEqualTo("AWAITING_CONFIRMATION");
         assertThat(service.chat(turn.conversationId(), "继续").stage()).isEqualTo("AWAITING_CONFIRMATION");
         assertThat(confirmedAppointments()).isZero();
@@ -191,7 +199,7 @@ class VoiceFirstP0Tests {
     }
 
     @Test void emergencyExpressionPreemptsPageRequestsAndBookingFlow() {
-        AgentTurnResponse done = book("slot-0918-0900");
+        AgentTurnResponse done = book(MORNING_SLOT);
         String id = service.start().conversationId();
         AgentTurnResponse emergency = service.chat(id, "我胸口疼，帮我打开地图");
 

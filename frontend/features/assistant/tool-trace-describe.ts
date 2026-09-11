@@ -111,8 +111,6 @@ export function describeTrace(trace: ToolTrace): { label: string; note: string }
       return { label: '医院目录 · 按科室推荐医院', note: `为「${str(get(req, 'department'))}」匹配 ${list.length} 家医院` };
     case 'catalog.queryDepartments':
       return { label: '医院目录 · 查询可预约科室', note: `共 ${list.length} 个科室` };
-    case 'catalog.searchDepartments':
-      return { label: '医院目录 · 搜索科室', note: `按「${str(get(req, 'keyword'))}」检索到 ${list.length} 个结果` };
     case 'careGuide.search':
       return { label: '复诊指引 · 查办理说明', note: `按「${str(get(req, 'query'))}」找到 ${list.length} 条说明` };
     case 'hospital.locationGuide':

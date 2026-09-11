@@ -6,7 +6,7 @@ import { PageHeader } from '@/components/common/page-header';
 import { CARE_CID_BY_ROLE, getCareElders } from '@/lib/care-api';
 import { confirmAgentActions, sendAgentAction, sendAgentMessage, startConversation } from '@/lib/agent-api';
 import type { AgentPlanCard, AgentTurnResponse, CareElder, CareRole, ChatMessage } from '@/types/domain';
-import { ConfirmationCardView, PlanCard, ResultCardView } from '../assistant/assistant-cards';
+import { BoundaryAlert, ConfirmationCardView, PlanCard, ResultCardView } from '../assistant/assistant-cards';
 import { ChatBubble } from '../assistant/chat-bubble';
 
 interface CareAssistantProps {
@@ -197,6 +197,10 @@ export function CareAssistantView({ actor, onBack }: CareAssistantProps) {
           {messages.map(message => <ChatBubble key={message.id} message={message} />)}
           {busy && <div className="flex items-center gap-2 text-base text-muted-foreground"><LoaderCircle className="size-5 animate-spin" />协同助手正在处理…</div>}
         </section>
+
+        {/* 照护者替长辈打听吃什么药、报告怎么看，同样会撞上能力边界，
+            这块提示两边一致，免得照护端看起来像「答不上来」而已。 */}
+        {turn?.notice && <BoundaryAlert notice={turn.notice} />}
 
         {visiblePlan && <PlanCard plan={visiblePlan} />}
         {turn?.confirmation && (

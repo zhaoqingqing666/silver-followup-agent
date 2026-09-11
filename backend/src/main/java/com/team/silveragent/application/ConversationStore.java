@@ -6,6 +6,7 @@ import com.team.silveragent.agent.AgentRole;
 import com.team.silveragent.domain.model.AgentTurnResponse;
 import com.team.silveragent.domain.model.ConversationHistoryResponse;
 import com.team.silveragent.domain.model.ConversationSummary;
+import com.team.silveragent.domain.model.ToolModels.Conflict;
 import com.team.silveragent.domain.model.ToolModels.Contact;
 import com.team.silveragent.domain.model.ToolModels.Slot;
 import com.team.silveragent.domain.model.ToolModels.TravelPlan;
@@ -289,7 +290,7 @@ public class ConversationStore {
             Boolean acceptAlternative, Boolean needCompanion, Boolean needTravel, Boolean notifyFamily,
             String transport, Slot selectedSlot, Slot recommendedSlot, String timePreference,
             java.time.LocalTime requestedTime,
-            List<Slot> alternatives, TravelPlan travelPlan,
+            List<Slot> alternatives, List<Conflict> conflicts, TravelPlan travelPlan,
             Contact contact, List<String> materials, String pendingAction, String appointmentId,
             String pendingAppointmentId, ConversationState.Stage interruptedStage,
             String interruptedPendingAction, String interruptedPendingAppointmentId,
@@ -306,7 +307,7 @@ public class ConversationStore {
                     state.departmentId, state.department, state.date,
                     state.acceptAlternative, state.needCompanion, state.needTravel, state.notifyFamily,
                     state.transport, state.selectedSlot, state.recommendedSlot, state.timePreference,
-                    state.requestedTime, state.alternatives, state.travelPlan,
+                    state.requestedTime, state.alternatives, state.conflicts, state.travelPlan,
                     state.contact, state.materials, state.pendingAction, state.appointmentId,
                     state.pendingAppointmentId, state.interruptedStage,
                     state.interruptedPendingAction, state.interruptedPendingAppointmentId,
@@ -342,6 +343,7 @@ public class ConversationStore {
             state.timePreference = timePreference;
             state.requestedTime = requestedTime;
             state.alternatives = alternatives == null ? List.of() : alternatives;
+            state.conflicts = conflicts == null ? List.of() : conflicts;
             state.travelPlan = travelPlan;
             state.contact = contact;
             state.materials = materials == null ? List.of() : materials;

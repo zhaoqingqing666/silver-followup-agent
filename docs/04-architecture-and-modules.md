@@ -143,6 +143,8 @@ backend/src/main/java/com/team/silveragent/
 
 ## 四、核心领域对象
 
+> 本节是**早期设计时的对象草图**，用途是说明「一次办理该由哪几块数据组成」，不是当前源码的类清单。当前实际落地的对象是：会话状态 `ConversationState`（含 `Snapshot` 持久化）、计划卡 `PlanCard`（`tasks` 与 `taskStatuses` 两个并列列表，不用步骤对象）、确认卡 `ConfirmationCard`、结果卡 `ResultCard`、工具入参出参 `ToolModels`，都收在 `AgentTurnResponse` 里下发给前端——字段见 [05-api-contracts.md](05-api-contracts.md)，模块划分见 [11-agent-architecture-and-controlled-tool-calling.md](11-agent-architecture-and-controlled-tool-calling.md)。
+
 ### `FollowUpContext`
 
 一次办理任务的完整上下文，包含用户输入字段、当前状态、计划、已选时段和确认信息。

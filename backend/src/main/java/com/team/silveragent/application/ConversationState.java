@@ -1,6 +1,7 @@
 package com.team.silveragent.application;
 
 import com.team.silveragent.agent.AgentRole;
+import com.team.silveragent.domain.model.ToolModels.Conflict;
 import com.team.silveragent.domain.model.ToolModels.Contact;
 import com.team.silveragent.domain.model.ToolModels.Slot;
 import com.team.silveragent.domain.model.ToolModels.TravelPlan;
@@ -71,6 +72,8 @@ final class ConversationState {
     String timePreference;
     LocalTime requestedTime;
     List<Slot> alternatives = List.of();
+    /** 最近一次日程检查查到的冲突。用户选择「仍保留这个时间」后，确认卡要把它列出来。 */
+    List<Conflict> conflicts = List.of();
     TravelPlan travelPlan;
     Contact contact;
     List<String> materials = List.of();
@@ -120,8 +123,6 @@ final class ConversationState {
     boolean departureReminderDone;
     boolean notificationDone;
     boolean scheduleChecked;
-
-    ConversationState(String id) { this(id, "user-001"); }
 
     ConversationState(String id, String userId) {
         this.id = id;

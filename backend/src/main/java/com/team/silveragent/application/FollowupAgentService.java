@@ -95,6 +95,12 @@ public class FollowupAgentService {
     /** 回查实测数值时最多说几条（说太多老人记不住）。 */
     private static final int HEALTH_QUERY_LIMIT = 3;
     /**
+     * 一次复诊按 60 分钟圈日程，和号源档位的间隔一致（09:00 / 10:30 / 14:00 / 15:30）。
+     * 真实科室时长还没有进模拟数据（`departments` 里只有 `followup_scope` 文本），
+     * 所以这里是一个常量而不是查表：至少别让它继续做散在代码里的魔法数字。
+     */
+    private static final int APPOINTMENT_DURATION = 60;
+    /**
      * 备忘清单里最多给前几条配“改/删”按钮。前端一次只显示 3 个快捷回复，
      * 所以按钮给全了反而要点很多次“查看更多选项”；正文里每条都带序号，
      * 更靠后的说“改第7条”一样能办。
@@ -434,7 +440,7 @@ public class FollowupAgentService {
         ExtractedFacts facts = outcome.facts();
         conversations.addMessage(state.id, "user", value);
         SafetyGuard.Decision safety = outcome.modelDriven()
-                ? safetyGuard.evaluateModel(facts) : safetyGuard.evaluate(value, facts);
+                ? safetyGuard.evaluateModel(value, facts) : safetyGuard.evaluate(value, facts);
         if (safety == SafetyGuard.Decision.EMERGENCY) return emergency(state);
         if (safety == SafetyGuard.Decision.MEDICAL_BOUNDARY) return medicalBoundary(state);
         // 模型不可用的回退模式：运行旧的 Java 关键词路由（健康备忘、健康记录、目录查询与推荐）。
@@ -467,11 +473,9 @@ public class FollowupAgentService {
             if (record != null && (record.kind() == HealthRecordParser.Kind.QUERY || memoContext(state))) {
                 return healthRecordReply(state, record, value);
             }
-            if ("MEDICAL_ADVICE".equals(facts.intent()) || containsAny(value, "怎么用药", "药量", "诊断", "检查结果", "是不是得了", "吃什么药", "推荐药", "加量", "减量", "治疗方案", "停药")) {
-                return respond(state, "我只能协助办理复诊，不能诊断疾病、解释检查结果或调整用药。请咨询医生或专业医疗机构。",
-                        List.of(q("继续办理复诊", "CONTINUE", ""), q("咨询人工", "CONTACT_HUMAN", "")));
-            }
-            // 这里只保留本分支新加的语义（备忘、健康记录、周报、医疗边界）。
+            // 医疗越界不在这里再判一次：函数开头的 safetyGuard.precheck 已经按
+            // MedicalBoundaryRules 拦掉了，走到这里的一定不是越界句。
+            // 这里只保留本分支新加的语义（备忘、健康记录、周报）。
             // 「取消本次办理 / 取消预约 / 已保留预约 / 查医院 / 查科室 / 求推荐」不在这份名单里：
             // 它们都已经由下面的规则规划器翻成 AgentOrchestrator.Route，再走 state 机处理，
             // 语义比这里按关键词直接给卡片更细（例如“取消预约”要先问清楚取消哪一次，
@@ -879,7 +883,7 @@ public class FollowupAgentService {
             current = agentRuntime.continueAfterTools(originalMessage, nextContext, state, evidence);
 
             SafetyGuard.Decision safety = current.modelDriven()
-                    ? safetyGuard.evaluateModel(current.facts())
+                    ? safetyGuard.evaluateModel(originalMessage, current.facts())
                     : SafetyGuard.Decision.NONE;
             if (safety == SafetyGuard.Decision.EMERGENCY) return emergency(state);
             if (safety == SafetyGuard.Decision.MEDICAL_BOUNDARY) return medicalBoundary(state);
@@ -1112,10 +1116,53 @@ public class FollowupAgentService {
         return firstNonBlank(outcome.proposedTools().get(0).arguments().get(name), fallback);
     }
 
+    /**
+     * 医疗越界回复。
+     *
+     * <p>除了一句回复，还要给前端一个提示块：这句话在视觉上必须和普通聊天不一样，
+     * 否则评审看不出它是「服务边界的拒绝」，还以为只是助手随口回了一句。
+     *
+     * <p>刻意不动 stage，也不清 {@code confirmationId}：老人问一句用药不等于想中断办理，
+     * 手里还开着的确认卡要照常能用（取舍见 DECISIONS）。
+     */
     private AgentTurnResponse medicalBoundary(ConversationState state) {
-        return respondWithoutModel(state,
-                "我听到您身体不舒服了，但我不能诊断疾病、判断原因、解释检查结果或调整用药。请及时咨询医生或专业医疗机构；如果症状突然加重，请尽快寻求线下帮助。",
-                resumeReplies(state, q("咨询人工", "CONTACT_HUMAN", "")));
+        String message = "我听到您身体不舒服了，但我不能诊断疾病、判断原因、解释检查结果或调整用药。"
+                + "请及时咨询医生或专业医疗机构；如果症状突然加重，请尽快寻求线下帮助。";
+        // 提示块的正文不是 reply 的复制：回复照常进对话记录，这块只补一句说明，
+        // 让老人明白「这条为什么长得不一样」以及「想办的事没被打断」。
+        String framing = "这类问题我不能回答，所以用这张提示卡单独说明。"
+                + "您的复诊办理没有中断，接着往下办就行。";
+        // 越界回答不能把等着按的确认卡挤掉：老人问到一半药，正要按的「确认办理」
+        // 若跟着消失，他会以为办不成，而服务端那张卡其实一直是有效的。
+        return respondWithoutModel(state, message, resumeReplies(state, q("咨询人工", "CONTACT_HUMAN", "")), null,
+                new AgentTurnResponse.Notice(AgentTurnResponse.Notice.MEDICAL_BOUNDARY, "超出我的服务范围", framing),
+                pendingConfirmation(state));
+    }
+
+    /**
+     * 会话停在确认卡上时，把那张卡连同原来的 {@code confirmationId} 一起交回去。
+     *
+     * <p>只有复诊办理这张卡走这条路：取消类确认卡各自带着不同的状态支线
+     * （{@code CANCEL_EXISTING} / {@code CANCEL_MANAGED} 等），这里不做重建，
+     * 与加提示块之前的行为保持一致。
+     */
+    private ConfirmationCard pendingConfirmation(ConversationState state) {
+        if (state.stage != ConversationState.Stage.AWAITING_CONFIRMATION) return null;
+        // 卡片内容来自整套预约草稿，草稿不完整时宁可不显示，也不能凭空拼一张出来。
+        if (state.selectedSlot == null || state.travelPlan == null) return null;
+        if ("CANCEL_EXISTING".equals(state.pendingAction) || "CANCEL_MANAGED".equals(state.pendingAction)) return null;
+        return confirmationCard(state, LocalDateTime.of(state.selectedSlot.date(), state.selectedSlot.time()));
+    }
+
+    /**
+     * 清空内存里的会话表，只给演示场景重置用。
+     *
+     * <p>会话状态平时存在 {@code conversation_sessions} 里，内存这份是热副本；重置清了库之后，
+     * 这个副本必须一起清——{@link #requireSession} 命中内存就不会回查数据库，
+     * 不清的话旧会话 id 还能继续说话，而它对应的库记录已经没了。
+     */
+    public synchronized void forgetAllSessions() {
+        sessions.clear();
     }
 
     private boolean allowedWhenStopped(AgentOrchestrator.Route route) {
@@ -1317,7 +1364,6 @@ public class FollowupAgentService {
             case "START_PLAN" -> { return ready(state) ? checkSchedule(state) : advance(state, ExtractedFacts.empty()); }
             case "RETRY_QUERY" -> { return querySlots(state); }
             case "SHOW_AVAILABLE_DATES" -> { return showAvailableSlots(state); }
-            case "NEW_BOOKING" -> { return restartInCurrentConversation(state); }
             case "SELECT_SLOT" -> { return selectSlot(state, safeValue); }
             case "KEEP_CONFLICT" -> { state.scheduleChecked = true; return buildConfirmation(state); }
             case "CHANGE_DATE" -> {
@@ -2172,9 +2218,10 @@ public class FollowupAgentService {
         return switch (state.stage) {
             case ASK_HOSPITAL -> "我还没有确认您说的是哪家医院。请说医院全名或常用简称；我会查询目录，有歧义时再请您确认。";
             case ASK_DEPARTMENT -> "我还没有确认复诊科室。可以说完整名称或简称，例如神经内科、神内；不确定时请按病历或医生安排确认。";
-            case ASK_DATE -> "我还没有确认复诊日期。您可以说“9月18日”或“下周三”，我再为您查询号源。";
+            // 举例不带具体日子：写死某一天，那天一过，举例本身就先过期了。
+            case ASK_DATE -> "我还没有确认复诊日期。您可以说“下周三”，也可以直接说几月几号，我再为您查询号源。";
             case SELECT_PERIOD, SELECT_SLOT, CONFIRM_SLOT -> "我还没有确认您想要的时间。可以说上午、下午或具体几点，也可以说换日期。";
-            case NO_SLOT -> "原日期暂时没有号。您可以说查前后几天、换日期、换医院，或者稍后再查。";
+            case NO_SLOT -> "原日期暂时没有号。您可以说查附近几天、换日期、换医院，或者稍后再查。";
             case CONFLICT -> "当前复诊时间与已有日程冲突。您可以说换时间、换日期、换医院，或者明确说仍保留这个时间。";
             // 这几个阶段（陪同、出行提醒、交通、通知家属）以前没有自己的兜底，一句“要”没被模型
             // 接住就直接跳到默认的“我没太听明白”，等于把老人从正在办的事里踢出去。这里按当前
@@ -2682,7 +2729,7 @@ public class FollowupAgentService {
         }
         if (state.acceptAlternative == null) {
             state.stage = ConversationState.Stage.ASK_ALTERNATIVE;
-            return respond(state, acknowledgement(facts, "如果这一天没有号，您接受前后几天的其他时间吗？"), List.of(
+            return respond(state, acknowledgement(facts, "如果这一天没有号，您接受附近几天的其他时间吗？"), List.of(
                     q("可以换日期", "SET_ALTERNATIVE", "true"),
                     q("只要这一天", "SET_ALTERNATIVE", "false")));
         }
@@ -2778,7 +2825,7 @@ public class FollowupAgentService {
                 () -> appointmentTool.queryAlternatives(state.id, state.hospitalId, state.department, state.date));
         if (state.alternatives.isEmpty()) {
             return respondWithPlan(state, state.date.format(DATE_LABEL)
-                            + "没有号，前后三天也没有查到可预约时段。您可以换日期、换医院或稍后再查。",
+                            + "没有号，接下来三天也没有查到可预约时段。您可以换日期、换医院或稍后再查。",
                     List.of(q("换日期", "CHANGE_DATE", ""), q("换医院", "CHANGE_HOSPITAL", ""),
                             q("稍后再查", "RETRY_QUERY", "")));
         }
@@ -2950,18 +2997,24 @@ public class FollowupAgentService {
         if (!ready(state)) return advance(state, ExtractedFacts.empty());
         LocalDateTime start = LocalDateTime.of(state.selectedSlot.date(), state.selectedSlot.time());
         List<Conflict> conflicts = callTool(state, "schedule.checkConflict", Map.of("userId", state.userId, "start", start),
-                () -> scheduleTool.findConflicts(state.id, state.userId, start, start.plusMinutes(60)));
+                () -> scheduleTool.findConflicts(state.id, state.userId, start, start.plusMinutes(APPOINTMENT_DURATION)));
         if (!conflicts.isEmpty()) {
             state.stage = ConversationState.Stage.CONFLICT;
+            // 记住冲突本身：用户选「仍保留这个时间」后，确认卡要把它列出来，这是最后一道防线。
+            state.conflicts = conflicts;
             List<Slot> sameDay = appointmentTool.queryAvailableSlots(state.id, state.hospitalId, state.department, state.date)
                     .stream().filter(item -> !item.id().equals(state.selectedSlot.id())).toList();
             state.alternatives = sameDay;
-            List<QuickReply> choices = new ArrayList<>(slotReplies(sameDay.stream().limit(2).toList()));
+            // 当天候选只给一个：加上「重新选择日期」「仍保留这个时间」正好三个，一屏放得下。
+            // 给两个的话「仍保留这个时间」会被挤到第二页，老人根本翻不到。
+            List<QuickReply> choices = new ArrayList<>(slotReplies(sameDay.stream().limit(1).toList()));
             choices.add(q("重新选择日期", "CHANGE_DATE", ""));
             choices.add(q("仍保留这个时间", "KEEP_CONFLICT", ""));
             return respondWithPlan(state, "这个时间与您的“" + conflicts.get(0).title() + "（" + conflicts.get(0).startAt() + " 至 " + conflicts.get(0).endAt() + "）" +
                     "”冲突。您可以选择其他号源，也可以明确保留当前时间。", choices);
         }
+        // 检查通过了就把上一次的冲突清掉：改完时间再回来，确认卡上不能再挂着已经解决的冲突。
+        state.conflicts = List.of();
         state.scheduleChecked = true;
         return checkDuplicate(state);
     }
@@ -3005,6 +3058,21 @@ public class FollowupAgentService {
         if (state.confirmationId == null) state.confirmationId = UUID.randomUUID().toString();
         state.stage = ConversationState.Stage.AWAITING_CONFIRMATION;
         state.taskStatus = ConversationState.TaskStatus.AWAITING_CONFIRMATION;
+        ConfirmationCard card = confirmationCard(state, at);
+        String narration = confirmationNarration(state);
+        // 确认摘要中的时间、地点、陪同、材料和通知对象均来自 Java 权威状态，
+        // 不再交给回答模型压缩或改写；reply 与 speechText 使用同一份内容。
+        return finishWithoutModel(state, new AgentTurnResponse(state.id, state.stage.name(), narration,
+                List.of(), plan(state), card, null, traces.findByConversation(state.id), null, narration, null));
+    }
+
+    /**
+     * 复诊确认卡的逐条内容，全部由权威状态算出。
+     *
+     * <p>抽出来是为了让「越界回答」也能把同一张卡原样带回去（见 {@link #pendingConfirmation}）：
+     * 卡片内容必须只有一处来源，否则两边一旦不一致，老人看到的和真正会执行的就是两回事。
+     */
+    private ConfirmationCard confirmationCard(ConversationState state, LocalDateTime at) {
         List<String> operations = new ArrayList<>();
         // 代他人办理时第一行必须说清“替谁办”：这是按确认之前唯一的关口，
         // 说错对象就等于替错人动了别人的预约和提醒。
@@ -3014,6 +3082,12 @@ public class FollowupAgentService {
         }
         operations.add("医院科室：" + state.hospital + " · " + state.department);
         operations.add("复诊时间：" + slotLabel(state.selectedSlot));
+        // 用户选择保留冲突时把冲突本身写进确认卡：这是提交前最后一次提醒，
+        // 也是家属通知和审计回头能看到的证据。
+        for (Conflict conflict : state.conflicts) {
+            operations.add("已知冲突：与“" + conflict.title() + "”（" + conflict.startAt() + " 至 "
+                    + conflict.endAt() + "）时间重叠，您已选择保留");
+        }
         operations.add("陪同需求：" + (state.needCompanion ? "需要家属陪同" : "不需要陪同"));
         operations.add("建议出发：" + state.travelPlan.departureAt() + "（" + state.transport + "）");
         if (state.originalAppointmentId != null) {
@@ -3037,13 +3111,8 @@ public class FollowupAgentService {
         } else {
             operations.add(state.notificationDone ? "家属已通知，不重复发送" : "不通知家属");
         }
-        ConfirmationCard card = new ConfirmationCard("请确认复诊办理计划", operations,
+        return new ConfirmationCard("请确认复诊办理计划", operations,
                 "确认后按以上内容更新模拟预约、提醒及通知。原已发送消息不能撤回。", "确认办理", "返回修改", state.confirmationId);
-        String narration = confirmationNarration(state);
-        // 确认摘要中的时间、地点、陪同、材料和通知对象均来自 Java 权威状态，
-        // 不再交给回答模型压缩或改写；reply 与 speechText 使用同一份内容。
-        return finishWithoutModel(state, new AgentTurnResponse(state.id, state.stage.name(), narration,
-                List.of(), plan(state), card, null, traces.findByConversation(state.id), null, narration, null));
     }
 
     private String confirmationNarration(ConversationState state) {
@@ -3455,22 +3524,6 @@ public class FollowupAgentService {
                 : "您想每月几号提醒呢？比如说“每月15号”";
         return respond(state, "好的，这条我帮您记成重复提醒。" + ask + "；不需要提醒就说“不用提醒，只记下”。",
                 memoNoTimeReply("MEMO_REPEAT_DAY"));
-    }
-
-    /** 追问“每周几/每月几号”的快捷回复。 */
-    private List<QuickReply> memoRepeatDayReplies(String repeatRule) {
-        List<QuickReply> replies = new ArrayList<>();
-        if ("MONTHLY".equals(repeatRule)) {
-            replies.add(q("每月1号", "MEMO_REPEAT_DAY", "每月1号"));
-            replies.add(q("每月15号", "MEMO_REPEAT_DAY", "每月15号"));
-            replies.add(q("每月25号", "MEMO_REPEAT_DAY", "每月25号"));
-        } else {
-            replies.add(q("每周一", "MEMO_REPEAT_DAY", "每周一"));
-            replies.add(q("每周三", "MEMO_REPEAT_DAY", "每周三"));
-            replies.add(q("每周五", "MEMO_REPEAT_DAY", "每周五"));
-        }
-        replies.add(q("不用提醒，只记下", "MEMO_REPEAT_DAY", "不用提醒，只记下"));
-        return List.copyOf(replies);
     }
 
     /** 老人回答“每周几/每月几号”的入口：补上锚点，再走原来“还差钟点就追问”的老路。 */
@@ -4179,15 +4232,6 @@ public class FollowupAgentService {
                         q("查询我的预约", "QUERY_APPOINTMENTS", "")));
     }
 
-    private AgentTurnResponse respondWithCancelCard(ConversationState state) {
-        state.confirmationId = UUID.randomUUID().toString();
-        ConfirmationCard card = new ConfirmationCard("确认取消已预约的复诊吗？",
-                List.of("医院科室：" + state.hospital + " · " + state.department,
-                        "取消预约：" + slotLabel(state.selectedSlot), "释放号源并停用关联提醒", "不另发家属消息；已发送消息保留，请告知家属取消安排"),
-                "确认后原预约及关联提醒失效；返回则保留预约。", "确认取消预约", "保留预约", state.confirmationId);
-        return finish(state, new AgentTurnResponse(state.id, state.stage.name(), "已有预约，取消需要明确确认。", List.of(), plan(state), card, null, traces.findByConversation(state.id)));
-    }
-
     private AgentTurnResponse askHospital(ConversationState state, String message) {
         state.taskStatus = ConversationState.TaskStatus.ACTIVE;
         state.managedMode = false; // 问到“哪家医院”=已转入本人新预约，离开代约开场
@@ -4332,8 +4376,26 @@ public class FollowupAgentService {
 
     private AgentTurnResponse respondWithoutModel(ConversationState state, String reply,
                                                   List<QuickReply> quickReplies, UiDirective directive) {
+        return respondWithoutModel(state, reply, quickReplies, directive, null);
+    }
+
+    private AgentTurnResponse respondWithoutModel(ConversationState state, String reply,
+                                                  List<QuickReply> quickReplies, UiDirective directive,
+                                                  AgentTurnResponse.Notice notice) {
+        return respondWithoutModel(state, reply, quickReplies, directive, notice, null);
+    }
+
+    /**
+     * 携带提示块与「仍然有效的确认卡」的出口。
+     *
+     * <p>卡片是原样带回来的那张（同一个 {@code confirmationId}），不是新生成的——
+     * 提示块只多占一屏，不新建待办，也不让老人已经看到的确认按钮失效。
+     */
+    private AgentTurnResponse respondWithoutModel(ConversationState state, String reply,
+                                                  List<QuickReply> quickReplies, UiDirective directive,
+                                                  AgentTurnResponse.Notice notice, ConfirmationCard confirmation) {
         return finishWithoutModel(state, new AgentTurnResponse(state.id, state.stage.name(), reply, quickReplies,
-                plan(state), null, null, traces.findByConversation(state.id), null, reply, directive));
+                plan(state), confirmation, null, traces.findByConversation(state.id), null, reply, directive, notice));
     }
 
     private AgentTurnResponse finish(ConversationState state, AgentTurnResponse response) {
@@ -4344,7 +4406,8 @@ public class FollowupAgentService {
         String reply = answerGenerator.generate(context);
         AgentTurnResponse finalized = new AgentTurnResponse(response.conversationId(), response.stage(), reply,
                 response.quickReplies(), response.plan(), response.confirmation(), response.result(),
-                response.toolTraces(), taskProgress(state), authoritativeSpeech(response, reply), response.uiDirective());
+                response.toolTraces(), taskProgress(state), authoritativeSpeech(response, reply), response.uiDirective(),
+                response.notice());
         conversations.save(state, finalized);
         conversations.addMessage(state.id, "assistant", finalized.reply());
         return finalized;
@@ -4363,7 +4426,8 @@ public class FollowupAgentService {
         if (Boolean.TRUE.equals(deferFinalization.get())) return response;
         AgentTurnResponse finalized = new AgentTurnResponse(response.conversationId(), response.stage(), response.reply(),
                 response.quickReplies(), response.plan(), response.confirmation(), response.result(),
-                response.toolTraces(), taskProgress(state), authoritativeSpeech(response, response.reply()), response.uiDirective());
+                response.toolTraces(), taskProgress(state), authoritativeSpeech(response, response.reply()),
+                response.uiDirective(), response.notice());
         conversations.save(state, finalized);
         conversations.addMessage(state.id, "assistant", finalized.reply());
         return finalized;

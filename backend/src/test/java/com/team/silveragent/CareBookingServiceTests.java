@@ -3,6 +3,7 @@ package com.team.silveragent;
 import com.team.silveragent.application.CareBookingService;
 import com.team.silveragent.application.CareService;
 import com.team.silveragent.application.AppointmentRecordStore;
+import com.team.silveragent.support.DemoSeed;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -29,6 +30,11 @@ class CareBookingServiceTests {
     @Autowired AppointmentRecordStore records;
     @Autowired JdbcTemplate jdbc;
 
+    /** 演示用的日期与号源都跟着今天走，别再写死（见 DemoSeed）。 */
+    private static final String DAY = DemoSeed.checkupDay().toString();
+    private static final String PLAIN = DemoSeed.plainSlot();
+    private static final String CLASH = DemoSeed.conflictingSlot();
+
     @BeforeEach
     void resetData() {
         for (String table : List.of("care_notifications", "family_notifications", "reminders", "appointments")) {
@@ -50,12 +56,12 @@ class CareBookingServiceTests {
     void familyBooksForElderCreatesAppointmentRemindersAndSlotsTaken() {
         AppointmentRecordStore.AppointmentView view = booking.book(
                 "user-f001", "user-001",
-                request("2026-09-18", "slot-0918-0900", "打车", true));
+                request(DAY, PLAIN, "打车", true));
 
         assertThat(view.status()).isEqualTo("CONFIRMED");
         assertThat(view.hospital()).isEqualTo("市第一医院（模拟）");
         assertThat(view.department()).isEqualTo("心内科");
-        assertThat(view.date()).isEqualTo(LocalDate.of(2026, 9, 18));
+        assertThat(view.date()).isEqualTo(DemoSeed.checkupDay());
         assertThat(view.transport()).isEqualTo("打车");
         assertThat(view.familyStatus()).isEqualTo("由女儿 小丽 代约");
         assertThat(view.materials()).contains("身份证", "医保卡或电子医保凭证");
@@ -67,7 +73,7 @@ class CareBookingServiceTests {
 
         // 号源被占用
         Integer available = jdbc.queryForObject(
-                "SELECT available FROM appointment_slots WHERE id='slot-0918-0900'", Integer.class);
+                "SELECT available FROM appointment_slots WHERE id=?", Integer.class, PLAIN);
         assertThat(available).isZero();
 
         // 提醒：材料准备(前1天) + 出发(前10分钟)
@@ -95,7 +101,7 @@ class CareBookingServiceTests {
         // 志愿者 v001 替 user-001 代约 → 通知家属 f001（小丽）
         AppointmentRecordStore.AppointmentView v1 = booking.book(
                 "user-v001", "user-001",
-                request("2026-09-18", "slot-0918-0900", "家属开车", false));
+                request(DAY, PLAIN, "家属开车", false));
         assertThat(v1.familyStatus()).isEqualTo("由社区志愿者 李阿姨 代约");
         List<CareService.NotificationView> inbox = care.notifications("user-f001");
         assertThat(inbox).extracting(CareService.NotificationView::content)
@@ -104,7 +110,7 @@ class CareBookingServiceTests {
         // 志愿者 v001 替 user-002（张伯伯）代约 → 无家庭照护者可通知,不发
         AppointmentRecordStore.AppointmentView v2 = booking.book(
                 "user-v001", "user-002",
-                request("2026-09-18", "slot-0918-1020", "公交", false));
+                request(DAY, CLASH, "公交", false));
         assertThat(v2.status()).isEqualTo("CONFIRMED");
         Long targetedToF001 = jdbc.queryForObject(
                 "SELECT COUNT(*) FROM care_notifications WHERE caregiver_id='user-f001' AND elder_user_id='user-002'",
@@ -115,9 +121,9 @@ class CareBookingServiceTests {
     @Test
     void secondBookingWhileUpcomingExistsIsRejected() {
         booking.book("user-f001", "user-001",
-                request("2026-09-18", "slot-0918-0900", "家属开车", false));
+                request(DAY, PLAIN, "家属开车", false));
         assertThatThrownBy(() -> booking.book("user-f001", "user-001",
-                request("2026-09-18", "slot-0918-1020", "家属开车", false)))
+                request(DAY, CLASH, "家属开车", false)))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("进行中的复诊预约");
     }
@@ -125,7 +131,7 @@ class CareBookingServiceTests {
     @Test
     void unboundCaregiverCannotBook() {
         assertThatThrownBy(() -> booking.book("user-f001", "user-002",
-                request("2026-09-18", "slot-0918-0900", "家属开车", false)))
+                request(DAY, PLAIN, "家属开车", false)))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("未绑定");
     }
@@ -134,12 +140,12 @@ class CareBookingServiceTests {
     void caregiverCancelsUpcomingAppointmentThenCanRebook() {
         AppointmentRecordStore.AppointmentView made = booking.book(
                 "user-f001", "user-001",
-                request("2026-09-18", "slot-0918-0900", "家属开车", false));
+                request(DAY, PLAIN, "家属开车", false));
 
         AppointmentRecordStore.AppointmentView cancelled = booking.cancelUpcoming("user-f001", "user-001");
         assertThat(cancelled.appointmentId()).isEqualTo(made.appointmentId());
         assertThat(jdbc.queryForObject("SELECT status FROM appointments", String.class)).isEqualTo("CANCELLED");
-        assertThat(jdbc.queryForObject("SELECT available FROM appointment_slots WHERE id='slot-0918-0900'", Integer.class))
+        assertThat(jdbc.queryForObject("SELECT available FROM appointment_slots WHERE id=?", Integer.class, PLAIN))
                 .isEqualTo(1);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM reminders WHERE status='CREATED'", Integer.class))
                 .isZero();
@@ -150,7 +156,7 @@ class CareBookingServiceTests {
 
         // 取消后即可重新代约
         assertThat(booking.book("user-f001", "user-001",
-                request("2026-09-18", "slot-0918-1020", "家属开车", false)).status()).isEqualTo("CONFIRMED");
+                request(DAY, CLASH, "家属开车", false)).status()).isEqualTo("CONFIRMED");
     }
 
     @Test
@@ -165,14 +171,14 @@ class CareBookingServiceTests {
         AppointmentRecordStore.AppointmentView view = booking.book(
                 "user-f001", "user-001",
                 new CareBookingService.BookingRequest(
-                        "h001", "d001", "2026-09-18", "slot-0918-0900", false, "打车", true));
+                        "h001", "d001", DAY, PLAIN, false, "打车", true));
         assertThat(view.accompaniedBy()).isEqualTo("user-f001");
 
         // 未确认陪同（或志愿者代约不去）→ accompanied_by 为空
         AppointmentRecordStore.AppointmentView other = booking.book(
                 "user-v001", "user-002",
                 new CareBookingService.BookingRequest(
-                        "h001", "d001", "2026-09-18", "slot-0918-1020", false, "打车", false));
+                        "h001", "d001", DAY, CLASH, false, "打车", false));
         assertThat(other.accompaniedBy()).isNull();
     }
 
@@ -180,7 +186,7 @@ class CareBookingServiceTests {
     void caregiverTogglesAccompanyOnCurrentAppointmentWithoutTouchingOthers() {
         AppointmentRecordStore.AppointmentView made = booking.book(
                 "user-f001", "user-001",
-                request("2026-09-18", "slot-0918-0900", "打车", false));
+                request(DAY, PLAIN, "打车", false));
         assertThat(made.accompaniedBy()).isNull();
 
         // 家属改为陪同 → accompanied_by 记为本人；再改回不陪同 → 清空
@@ -198,25 +204,25 @@ class CareBookingServiceTests {
     void modifyKeepsSameRowSwapsSlotAndRefreshesReminders() {
         AppointmentRecordStore.AppointmentView made = booking.book(
                 "user-f001", "user-001",
-                request("2026-09-18", "slot-0918-0900", "家属开车", false));
+                request(DAY, PLAIN, "家属开车", false));
         assertThat(made.accompaniedBy()).isNull();
 
         AppointmentRecordStore.AppointmentView updated = booking.modify(
                 "user-f001", "user-001",
                 new CareBookingService.BookingRequest(
-                        "h001", "d001", "2026-09-18", "slot-0918-1020", true, "家属开车", true));
+                        "h001", "d001", DAY, CLASH, true, "家属开车", true));
 
         // 同一条记录原位更新：不产生新的 CANCELLED 记录
         assertThat(updated.appointmentId()).isEqualTo(made.appointmentId());
         assertThat(updated.status()).isEqualTo("CONFIRMED");
-        assertThat(updated.time()).isEqualTo(java.time.LocalTime.of(10, 20));
+        assertThat(updated.time()).isEqualTo(java.time.LocalTime.of(10, 30));
         assertThat(updated.accompaniedBy()).isEqualTo("user-f001");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM appointments", Integer.class)).isEqualTo(1);
         assertThat(jdbc.queryForObject("SELECT arranged_by FROM appointments", String.class)).isEqualTo("user-f001");
 
         // 号源释放与占用互换
-        assertThat(jdbc.queryForObject("SELECT available FROM appointment_slots WHERE id='slot-0918-0900'", Integer.class)).isEqualTo(1);
-        assertThat(jdbc.queryForObject("SELECT available FROM appointment_slots WHERE id='slot-0918-1020'", Integer.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT available FROM appointment_slots WHERE id=?", Integer.class, PLAIN)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT available FROM appointment_slots WHERE id=?", Integer.class, CLASH)).isZero();
 
         // 旧提醒作废，新建材料+出发提醒
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM reminders WHERE status='CREATED'", Integer.class)).isEqualTo(2);
@@ -229,14 +235,14 @@ class CareBookingServiceTests {
     @Test
     void modifyWithoutUpcomingAppointmentIsRejected() {
         assertThatThrownBy(() -> booking.modify("user-f001", "user-001",
-                request("2026-09-18", "slot-0918-0900", "家属开车", false)))
+                request(DAY, PLAIN, "家属开车", false)))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("没有可修改的进行中复诊预约");
     }
 
     @Test
     void alertOnlyWhenCancelledWithoutReplacement() {
-        booking.book("user-f001", "user-001", request("2026-09-18", "slot-0918-0900", "家属开车", false));
+        booking.book("user-f001", "user-001", request(DAY, PLAIN, "家属开车", false));
 
         // 取消后未补新预约 → 提示“尽快重新安排”
         booking.cancelUpcoming("user-f001", "user-001");
@@ -245,7 +251,7 @@ class CareBookingServiceTests {
         assertThat(without.alert()).contains("尽快重新安排");
 
         // 重新代约后 → 警告消失
-        booking.book("user-f001", "user-001", request("2026-09-18", "slot-0918-1020", "家属开车", false));
+        booking.book("user-f001", "user-001", request(DAY, CLASH, "家属开车", false));
         CareService.ElderSummary replaced = care.elders("user-f001").stream()
                 .filter(item -> item.elderId().equals("user-001")).findFirst().orElseThrow();
         assertThat(replaced.alert()).isNull();

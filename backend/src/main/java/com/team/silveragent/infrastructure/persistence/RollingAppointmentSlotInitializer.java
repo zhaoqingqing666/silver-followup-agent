@@ -25,8 +25,19 @@ public class RollingAppointmentSlotInitializer implements ApplicationRunner {
         this.jdbc = jdbc;
     }
 
+    /** 号源 id 的拼法只此一处：回滚重放、场景重置和回归用例都按这个规则找号源。 */
+    public static String slotId(String departmentId, LocalDate date, LocalTime time) {
+        return "r-" + departmentId + "-" + date.format(ID_DATE) + "-"
+                + String.format("%02d%02d", time.getHour(), time.getMinute());
+    }
+
     @Override
     public void run(ApplicationArguments args) {
+        seed();
+    }
+
+    /** 幂等：已经在的号源不会重复插入，场景重置可以直接再调一次。 */
+    public void seed() {
         // Weekend gaps are deliberate so the Demo can still demonstrate the
         // required "requested date has no slots" recovery path.
         List<String> generatedWeekendSlots = jdbc.query("""
@@ -60,8 +71,7 @@ public class RollingAppointmentSlotInitializer implements ApplicationRunner {
     }
 
     private void insertIfMissing(DepartmentSeed department, LocalDate date, LocalTime time) {
-        String id = "r-" + department.id() + "-" + date.format(ID_DATE)
-                + "-" + String.format("%02d%02d", time.getHour(), time.getMinute());
+        String id = slotId(department.id(), date, time);
         jdbc.update("""
                 INSERT INTO appointment_slots
                     (id, hospital_id, hospital_name, department, appointment_date, appointment_time, available)

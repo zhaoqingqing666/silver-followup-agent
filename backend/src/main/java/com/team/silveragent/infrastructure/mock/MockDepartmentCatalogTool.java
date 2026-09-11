@@ -26,14 +26,6 @@ public class MockDepartmentCatalogTool implements DepartmentCatalogTool {
         return result;
     }
 
-    @Override
-    public List<DepartmentProfile> searchDepartments(String conversationId, String keyword) {
-        List<DepartmentProfile> result = catalog.searchDepartments(keyword).stream().map(this::profile).toList();
-        traces.record(conversationId, "catalog.searchDepartments",
-                Map.of("keyword", keyword), result, true);
-        return result;
-    }
-
     private DepartmentProfile profile(CareCatalogRepository.Department item) {
         return new DepartmentProfile(item.id(), item.hospitalId(), item.name(), item.description(),
                 item.specialtyTags(), item.followupScope(), item.location());

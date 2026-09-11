@@ -5,6 +5,7 @@ import com.team.silveragent.agent.model.ModelRequest;
 import com.team.silveragent.application.FollowupAgentService;
 import com.team.silveragent.domain.model.AgentTurnResponse;
 import com.team.silveragent.domain.model.AgentTurnResponse.UiDirectiveType;
+import com.team.silveragent.support.DemoSeed;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -27,6 +28,13 @@ import static org.assertj.core.api.Assertions.assertThat;
         "spring.datasource.url=jdbc:h2:mem:silver-agent-test;DB_CLOSE_DELAY=-1",
         "agent.model.enabled=true"})
 class VoiceFirstP1Tests {
+    /** 演示种子：下周三（体检那天，有号可约）与下周六（刻意没有号源，用来演「当天没号」）。 */
+    private static final String DAY = DemoSeed.day(DemoSeed.checkupDay());
+    private static final String CHINESE_DAY = DemoSeed.chineseDay(DemoSeed.checkupDay());
+    private static final String EMPTY_DAY = DemoSeed.day(DemoSeed.emptyDay());
+    private static final String EMPTY_DAY_TEXT = DemoSeed.chineseDay(DemoSeed.emptyDay());
+    private static final String MORNING_SLOT = DemoSeed.morningSlot();
+
     @Autowired FollowupAgentService service;
     @Autowired JdbcTemplate jdbc;
     @Autowired CountingModelGateway gateway;
@@ -62,9 +70,9 @@ class VoiceFirstP1Tests {
                     return """
                             {"actionType":"ANSWER","intent":"QUERY_NEARBY_SLOTS","toolName":null,
                              "arguments":{},
-                             "replyDraft":"9月19日暂时没有号。我已经查看真实号源，附近日期还有可选时间，请从下面选择。",
+                             "replyDraft":"%s暂时没有号。我已经查看真实号源，附近日期还有可选时间，请从下面选择。",
                              "dialogueMode":"FOLLOWUP_FLOW","facts":{}}
-                            """;
+                            """.formatted(EMPTY_DAY_TEXT);
                 }
             }
             if (latest.contains("连续查流程和材料")) {
@@ -74,14 +82,14 @@ class VoiceFirstP1Tests {
                          "replyDraft":null,"dialogueMode":"FOLLOWUP_FLOW","facts":{}}
                         """;
             }
-            if (latest.contains("2026年9月19日")) {
+            if (latest.contains(EMPTY_DAY_TEXT)) {
                 return """
                         {"actionType":"CALL_READ_TOOL","intent":"QUERY_AVAILABLE_SLOTS",
                          "toolName":"appointment.querySlots",
-                         "arguments":{"hospital":"市第一医院","department":"心内科","date":"2026-09-19"},
+                         "arguments":{"hospital":"市第一医院","department":"心内科","date":"%s"},
                          "replyDraft":null,"dialogueMode":"FOLLOWUP_FLOW",
-                         "facts":{"date":"2026-09-19","acceptAlternative":true}}
-                        """;
+                         "facts":{"date":"%s","acceptAlternative":true}}
+                        """.formatted(EMPTY_DAY, EMPTY_DAY);
             }
             if (latest.contains("胸口疼")) {
                 return """
@@ -124,8 +132,8 @@ class VoiceFirstP1Tests {
     @BeforeEach void resetData() {
         gateway.calls.set(0);
         for (String table : List.of("appointments", "reminders", "family_notifications")) jdbc.update("DELETE FROM " + table);
+        // 周六本来就没有号源（滚动初始化刻意留出的空档），不用再手动关掉某一天。
         jdbc.update("UPDATE appointment_slots SET available=TRUE");
-        jdbc.update("UPDATE appointment_slots SET available=FALSE WHERE appointment_date='2026-09-19'");
     }
 
     private AgentTurnResponse action(String id, String action, String value) {
@@ -135,7 +143,7 @@ class VoiceFirstP1Tests {
     private AgentTurnResponse prepare(String id, String slotId) {
         action(id, "SET_HOSPITAL", "h001");
         action(id, "SET_DEPARTMENT", "d001");
-        action(id, "SET_DATE", "2026-09-18");
+        action(id, "SET_DATE", DAY);
         action(id, "SELECT_SLOT", slotId);
         action(id, "SET_ALTERNATIVE", "true");
         action(id, "SET_COMPANION", "true");
@@ -153,7 +161,7 @@ class VoiceFirstP1Tests {
 
     @Test void bookingThenPageRequestsAreUnderstoodByTheMainModel() {
         String id = service.start().conversationId();
-        AgentTurnResponse prepared = prepare(id, "slot-0918-0900");
+        AgentTurnResponse prepared = prepare(id, MORNING_SLOT);
         service.confirm(id, true, prepared.confirmation().confirmationId());
         gateway.calls.set(0);
 
@@ -175,7 +183,7 @@ class VoiceFirstP1Tests {
 
     @Test void pendingConfirmationIsNeverBypassedByPageCommands() {
         String id = service.start().conversationId();
-        AgentTurnResponse prepared = prepare(id, "slot-0918-0900");
+        AgentTurnResponse prepared = prepare(id, MORNING_SLOT);
         gateway.calls.set(0);
 
         AgentTurnResponse asked = service.chat(id, "打开地图");
@@ -196,11 +204,11 @@ class VoiceFirstP1Tests {
     @Test void finalCollectedFieldImmediatelyBuildsSpokenConfirmation() {
         String id = service.start().conversationId();
 
-        AgentTurnResponse confirmation = prepare(id, "slot-0918-0900");
+        AgentTurnResponse confirmation = prepare(id, MORNING_SLOT);
 
         assertThat(confirmation.reply()).isEqualTo(confirmation.speechText());
         assertThat(confirmation.reply())
-                .contains("请确认本次复诊安排", "9月18日", "上午9点", "市第一医院", "心内科")
+                .contains("请确认本次复诊安排", CHINESE_DAY, "上午9点", "市第一医院", "心内科")
                 .contains("家属陪同", "请携带", "确认办理", "返回修改");
         assertThat(confirmedAppointments()).isZero();
     }
@@ -217,17 +225,33 @@ class VoiceFirstP1Tests {
         assertThat(gateway.calls.get()).as("紧急语义应由主模型识别").isPositive();
     }
 
+    @Test void medicalBoundarySurvivesAModelThatMissesIt() {
+        String id = service.start().conversationId();
+        gateway.calls.set(0);
+
+        // 这个桩对认不出的句子一律回 SMALL_TALK：模拟主模型漏判越界。
+        // 漏判的表现是整句话被当成普通信息静默忽略，老人会以为得到了答复，所以规则要兜住。
+        AgentTurnResponse boundary = service.chat(id, "我血压有点高，要不要紧？");
+
+        assertThat(boundary.reply()).contains("不能诊断");
+        assertThat(gateway.calls.get()).as("兜底判定不额外调用模型").isEqualTo(1);
+
+        // 对照组：同样是“血压”，问自己量过的数属于健康记录，不能被越界判定吞掉。
+        AgentTurnResponse record = service.chat(id, "我最近的血压是多少");
+        assertThat(record.reply()).as("查自己记过的数不该被当成问诊").doesNotContain("不能诊断");
+    }
+
     @Test void noSlotToolResultReturnsToTheSameModelAndKeepsRealChoices() {
         String id = service.start().conversationId();
         action(id, "SET_HOSPITAL", "h001");
         action(id, "SET_DEPARTMENT", "d001");
         gateway.calls.set(0);
 
-        AgentTurnResponse result = service.chat(id, "帮我查2026年9月19日的号");
+        AgentTurnResponse result = service.chat(id, "帮我查" + EMPTY_DAY_TEXT + "的号");
 
         assertThat(gateway.calls.get()).as("一次规划加一次工具结果续跑").isEqualTo(2);
         assertThat(result.stage()).isEqualTo("NO_SLOT");
-        assertThat(result.reply()).contains("9月19日暂时没有号", "真实号源", "附近日期");
+        assertThat(result.reply()).contains(EMPTY_DAY_TEXT + "暂时没有号", "真实号源", "附近日期");
         assertThat(result.quickReplies()).anyMatch(item -> item.action().equals("SELECT_SLOT"));
         assertThat(result.toolTraces()).anyMatch(item -> item.toolName().equals("appointment.querySlots"));
         assertThat(result.toolTraces()).anyMatch(item -> item.toolName().equals("appointment.queryAlternatives"));
