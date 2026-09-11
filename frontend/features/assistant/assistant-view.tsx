@@ -4,6 +4,7 @@ import { FormEvent, useEffect, useRef, useState } from 'react';
 import { CalendarSearch, ClipboardCheck, LoaderCircle, Mic, RefreshCw, Send, Sparkles } from 'lucide-react';
 import { PageHeader } from '@/components/common/page-header';
 import { confirmAgentActions, sendAgentAction, sendAgentMessage, startConversation } from '@/lib/agent-api';
+import { QUICK_REPLY_PAGE_SIZE, SPEECH_LANGUAGE } from '@/lib/app-config';
 import { speakText, stopSpeech } from '@/lib/speech-service';
 import type { AgentPlanCard, AgentTurnResponse, ChatMessage, TabId, VoicePreference } from '@/types/domain';
 import { BoundaryAlert, ConfirmationCardView, PlanCard, ResultCardView } from './assistant-cards';
@@ -137,7 +138,7 @@ export function AssistantView({ active, onNavigate, voicePreference }: {
     if (!Constructor) { setInput('我想预约复诊'); setMessages(items => [...items, { id: crypto.randomUUID(), role: 'assistant', text: '当前浏览器不支持语音，已填入一条模拟语音文字，请检查后发送。' }]); return; }
     const instance = new Constructor();
     recognition.current = instance;
-    instance.lang = 'zh-CN';
+    instance.lang = SPEECH_LANGUAGE;
     instance.interimResults = false;
     instance.onresult = event => setInput(event.results[0][0].transcript);
     instance.onend = () => setListening(false);
@@ -183,10 +184,10 @@ export function AssistantView({ active, onNavigate, voicePreference }: {
       {turn && <ToolTracePanel traces={turn.toolTraces} />}
       {/* 医院询问返回空 quickReplies，继续使用下方语音或文字输入。 */}
       {!!turn?.quickReplies.length && !turn.confirmation && <section aria-label="快捷回答" className="flex flex-wrap gap-2">
-        {turn.quickReplies.slice(choicePage * 3, choicePage * 3 + 3).map(choice => <button key={choice.label + choice.action + choice.value} disabled={busy} onClick={() => void sendAction(choice.action, choice.value, choice.label)} className="min-h-12 rounded-2xl border border-[#dfb98f] bg-white px-4 text-base font-semibold text-[#6c3d24] shadow-sm disabled:opacity-50">{choice.label}</button>)}
+        {turn.quickReplies.slice(choicePage * QUICK_REPLY_PAGE_SIZE, choicePage * QUICK_REPLY_PAGE_SIZE + QUICK_REPLY_PAGE_SIZE).map(choice => <button key={choice.label + choice.action + choice.value} disabled={busy} onClick={() => void sendAction(choice.action, choice.value, choice.label)} className="min-h-12 rounded-2xl border border-[#dfb98f] bg-white px-4 text-base font-semibold text-[#6c3d24] shadow-sm disabled:opacity-50">{choice.label}</button>)}
       </section>}
 
-      {(turn?.quickReplies.length ?? 0) > 3 && !turn?.confirmation && <button disabled={busy} onClick={() => setChoicePage(page => (page + 1) % Math.ceil((turn?.quickReplies.length ?? 0) / 3))} className="min-h-12 rounded-2xl border bg-white px-4 text-base font-bold">查看更多选项</button>}
+      {(turn?.quickReplies.length ?? 0) > QUICK_REPLY_PAGE_SIZE && !turn?.confirmation && <button disabled={busy} onClick={() => setChoicePage(page => (page + 1) % Math.ceil((turn?.quickReplies.length ?? 0) / QUICK_REPLY_PAGE_SIZE))} className="min-h-12 rounded-2xl border bg-white px-4 text-base font-bold">查看更多选项</button>}
       {!conversationId && !busy && <button onClick={() => void begin()} className="flex min-h-13 w-full items-center justify-center gap-2 rounded-2xl border bg-white text-base font-bold"><RefreshCw className="size-5" />重新连接</button>}
       <div ref={bottomAnchor} aria-hidden="true" className="h-px" />
     </div>

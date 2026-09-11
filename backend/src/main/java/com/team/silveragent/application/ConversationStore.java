@@ -19,6 +19,9 @@ import java.util.Optional;
 
 @Repository
 class ConversationStore {
+    /** 每次交给语言理解模型的最近对话条数。 */
+    private static final int RECENT_MESSAGE_LIMIT = 8;
+
     private final JdbcTemplate jdbc;
     private final ObjectMapper json;
 
@@ -74,9 +77,10 @@ class ConversationStore {
         return jdbc.query("""
                 SELECT role,content FROM (
                   SELECT id,role,content FROM conversation_messages
-                  WHERE conversation_id=? ORDER BY id DESC LIMIT 8
+                  WHERE conversation_id=? ORDER BY id DESC LIMIT %d
                 ) recent ORDER BY id
-                """, (rs, row) -> new AgentContext.Message(rs.getString(1), rs.getString(2)), conversationId);
+                """.formatted(RECENT_MESSAGE_LIMIT),
+                (rs, row) -> new AgentContext.Message(rs.getString(1), rs.getString(2)), conversationId);
     }
 
     List<ConversationHistoryResponse.Message> messages(String conversationId) {

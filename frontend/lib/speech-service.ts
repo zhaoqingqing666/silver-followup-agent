@@ -1,5 +1,7 @@
 'use client';
 
+import { DEFAULT_SPEECH_RATE, DEFAULT_SPEECH_VOLUME, SPEECH_LANGUAGE } from '@/lib/app-config';
+
 export interface SpeechState {
   messageId: string | null;
   speaking: boolean;
@@ -36,9 +38,9 @@ export function speakText(
   if (typeof window === 'undefined' || !('speechSynthesis' in window) || !text.trim()) return false;
   stopSpeech();
   const utterance = new SpeechSynthesisUtterance(text.trim());
-  utterance.lang = 'zh-CN';
-  utterance.rate = options.rate ?? 0.9;
-  utterance.volume = options.volume ?? 1;
+  utterance.lang = SPEECH_LANGUAGE;
+  utterance.rate = options.rate ?? DEFAULT_SPEECH_RATE;
+  utterance.volume = options.volume ?? DEFAULT_SPEECH_VOLUME;
   utterance.onstart = () => emit({ messageId, speaking: true });
   utterance.onend = () => emit({ messageId: null, speaking: false });
   utterance.onerror = () => emit({ messageId: null, speaking: false });

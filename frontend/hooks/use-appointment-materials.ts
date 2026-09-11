@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { getAppointmentMaterials, updateAppointmentMaterial } from '@/lib/material-api';
+import { MATERIAL_STATUS } from '@/types/domain';
 import type { MaterialItem } from '@/types/domain';
 
 /**
@@ -56,7 +57,7 @@ export function useAppointmentMaterials(appointmentId: string) {
   }, [appointmentId, instanceId, reload]);
 
   const toggle = async (item: MaterialItem) => {
-    const status = item.status === 'NOT_PREPARED' ? 'PREPARED' : 'NOT_PREPARED';
+    const status = item.status === MATERIAL_STATUS.NOT_PREPARED ? MATERIAL_STATUS.PREPARED : MATERIAL_STATUS.NOT_PREPARED;
     setUpdatingId(item.id);
     setError('');
     try {

@@ -9,7 +9,9 @@ import com.team.silveragent.domain.model.AgentTurnResponse.Notice;
 import com.team.silveragent.domain.model.AgentTurnResponse.PlanCard;
 import com.team.silveragent.domain.model.AgentTurnResponse.QuickReply;
 import com.team.silveragent.domain.model.AgentTurnResponse.ResultCard;
+import com.team.silveragent.domain.model.BookingWindow;
 import com.team.silveragent.domain.model.ConversationHistoryResponse;
+import com.team.silveragent.domain.model.Periods;
 import com.team.silveragent.domain.model.ToolModels.AppointmentSummary;
 import com.team.silveragent.domain.model.ToolModels.Conflict;
 import com.team.silveragent.domain.model.ToolModels.DepartmentProfile;
@@ -50,6 +52,30 @@ public class FollowupAgentService {
      * 模拟号源的档位间隔同为 60 分钟（见 RollingAppointmentSlotInitializer）。
      */
     private static final Duration APPOINTMENT_DURATION = Duration.ofMinutes(60);
+
+    /**
+     * 前端快捷回答每页渲染的数量，与 frontend/lib/app-config.ts 的 QUICK_REPLY_PAGE_SIZE 一致。
+     * 追加了「修改/重新选择」类动作的回复会超出这个数，前端会翻页。
+     */
+    private static final int QUICK_REPLY_PAGE_SIZE = 3;
+    /** 「我的预约」文字摘要里最多列出的条数。 */
+    private static final int APPOINTMENT_SUMMARY_LIMIT = 4;
+    /** 一次最多给出几条可取消的预约候选。 */
+    private static final int CANCELLABLE_APPOINTMENT_LIMIT = 4;
+    /** 医院、科室等文字摘要最多列出的条数。 */
+    private static final int PROFILE_SUMMARY_LIMIT = 3;
+    /** 可预约日期最多列出几天。 */
+    private static final int AVAILABLE_DATE_LIMIT = 6;
+    /** 冲突分支保留的当日候选数；留 1 条才能让「重新选择日期」和「仍保留这个时间」同页可见。 */
+    private static final int CONFLICT_SAME_DAY_LIMIT = 1;
+
+    /** 材料准备提醒的提前量。 */
+    private static final Duration MATERIAL_REMINDER_LEAD = Duration.ofDays(1);
+    /** 出发提醒相对建议出发时刻的提前量。 */
+    private static final Duration DEPARTURE_REMINDER_LEAD = Duration.ofMinutes(10);
+    /** 提醒标题：工具调用参数与测试断言共用，避免两处写法漂移。 */
+    public static final String MATERIAL_REMINDER_TITLE = "复诊材料准备提醒";
+    public static final String DEPARTURE_REMINDER_TITLE = "复诊出发提醒";
 
     private final AppointmentTool appointmentTool;
     private final HospitalCatalogTool hospitalCatalogTool;
@@ -194,8 +220,7 @@ public class FollowupAgentService {
             return respond(state, "当前有一项重要操作等待确认。请明确选择确认或返回修改。", List.of());
         }
         discardInterruption(state);
-        if (facts.date() != null && (facts.date().isBefore(LocalDate.now())
-                || facts.date().isAfter(LocalDate.now().plusMonths(1)))) {
+        if (facts.date() != null && !BookingWindow.isBookable(facts.date(), LocalDate.now())) {
             return respond(state, "目前可以查询今天到一个月后的模拟号源，请在这个日期范围内重新选择。",
                     List.of(q("查看可预约日期", "SHOW_AVAILABLE_DATES", ""),
                             q("我自己说日期", "ASK_HUMAN_INPUT", "")));
@@ -391,14 +416,16 @@ public class FollowupAgentService {
             }
             LocalDateTime at = LocalDateTime.of(state.selectedSlot.date(), state.selectedSlot.time());
             if (!state.materialReminderDone) {
-                callTool(state, "schedule.createReminder", Map.of("title", "复诊材料准备提醒", "remindAt", at.minusDays(1)),
-                        () -> scheduleTool.createReminder(state.id, state.userId, "复诊材料准备提醒", at.minusDays(1)));
+                LocalDateTime materialRemindAt = at.minus(MATERIAL_REMINDER_LEAD);
+                callTool(state, "schedule.createReminder", Map.of("title", MATERIAL_REMINDER_TITLE, "remindAt", materialRemindAt),
+                        () -> scheduleTool.createReminder(state.id, state.userId, MATERIAL_REMINDER_TITLE, materialRemindAt));
                 state.materialReminderDone = true;
                 conversations.save(state, null);
             }
             if (Boolean.TRUE.equals(state.needTravel) && !state.departureReminderDone) {
-                callTool(state, "schedule.createReminder", Map.of("title", "复诊出发提醒", "remindAt", state.travelPlan.departureAt().minusMinutes(10)),
-                        () -> scheduleTool.createReminder(state.id, state.userId, "复诊出发提醒", state.travelPlan.departureAt().minusMinutes(10)));
+                LocalDateTime departureRemindAt = state.travelPlan.departureAt().minus(DEPARTURE_REMINDER_LEAD);
+                callTool(state, "schedule.createReminder", Map.of("title", DEPARTURE_REMINDER_TITLE, "remindAt", departureRemindAt),
+                        () -> scheduleTool.createReminder(state.id, state.userId, DEPARTURE_REMINDER_TITLE, departureRemindAt));
                 state.departureReminderDone = true;
                 conversations.save(state, null);
             }
@@ -514,11 +541,11 @@ public class FollowupAgentService {
                     resumeReplies(state, q("办理新的复诊", "NEW_BOOKING", "")));
         }
 
-        String summary = rows.stream().limit(4).map(this::appointmentSummary)
+        String summary = rows.stream().limit(APPOINTMENT_SUMMARY_LIMIT).map(this::appointmentSummary)
                 .collect(java.util.stream.Collectors.joining("；"));
         List<QuickReply> choices = new ArrayList<>();
         if (state.interruptedStage != null) choices.add(q("继续刚才办理", "RESUME_INTERRUPTED", ""));
-        for (AppointmentSummary item : rows.stream().limit(3).toList()) {
+        for (AppointmentSummary item : rows.stream().limit(QUICK_REPLY_PAGE_SIZE).toList()) {
             choices.add(q("取消" + item.date().format(DATE_LABEL) + "预约",
                     "SELECT_APPOINTMENT_TO_CANCEL", item.appointmentId()));
         }
@@ -538,7 +565,7 @@ public class FollowupAgentService {
         }
         if (rows.size() == 1) return prepareExistingCancellation(state, rows.get(0));
 
-        List<QuickReply> choices = rows.stream().limit(4)
+        List<QuickReply> choices = rows.stream().limit(CANCELLABLE_APPOINTMENT_LIMIT)
                 .map(item -> q(item.date().format(DATE_LABEL) + " " + item.time().format(TIME_LABEL)
                                 + " " + item.hospital(),
                         "SELECT_APPOINTMENT_TO_CANCEL", item.appointmentId()))
@@ -614,7 +641,7 @@ public class FollowupAgentService {
         discardInterruption(state);
         resetAfterDate(state);
         if (facts.date() == null) return askDate(state, "好的，请告诉我新的复诊日期。");
-        if (facts.date().isBefore(LocalDate.now()) || facts.date().isAfter(LocalDate.now().plusMonths(1))) {
+        if (!BookingWindow.isBookable(facts.date(), LocalDate.now())) {
             return respond(state, "目前可以查询今天到一个月后的模拟号源，请重新选择日期。",
                     List.of(q("查看可预约日期", "SHOW_AVAILABLE_DATES", "")));
         }
@@ -788,7 +815,7 @@ public class FollowupAgentService {
                 () -> appointmentTool.queryAlternatives(state.id, state.hospitalId, state.department, state.date));
         if (!state.alternatives.isEmpty()) {
             List<QuickReply> choices = new ArrayList<>(
-                    slotReplies(state.alternatives.stream().limit(3).toList()));
+                    slotReplies(state.alternatives.stream().limit(QUICK_REPLY_PAGE_SIZE).toList()));
             choices.add(q("重新选择日期", "CHANGE_DATE", ""));
             return respondWithPlan(state, state.date.format(DATE_LABEL) +
                     "暂时没有可预约时段。我查到了附近日期的真实模拟号源，请选择一个，或重新选日期。", choices);
@@ -807,13 +834,12 @@ public class FollowupAgentService {
         if (state.department == null) {
             return askDepartment(state, "要查询号源，还需要先选择复诊科室。");
         }
-        if (state.date != null && !state.date.isBefore(LocalDate.now())
-                && !state.date.isAfter(LocalDate.now().plusMonths(1))) {
+        if (state.date != null && BookingWindow.isBookable(state.date, LocalDate.now())) {
             return querySlots(state);
         }
 
         LocalDate from = LocalDate.now();
-        LocalDate to = from.plusMonths(1);
+        LocalDate to = BookingWindow.lastBookableDate(from);
         List<Slot> slots = appointmentTool.queryUpcomingSlots(
                 state.id, state.hospitalId, state.department, from, to);
         if (slots.isEmpty()) {
@@ -823,7 +849,7 @@ public class FollowupAgentService {
                             q("联系人工", "CONTACT_HUMAN", "")));
         }
 
-        List<LocalDate> dates = slots.stream().map(Slot::date).distinct().limit(6).toList();
+        List<LocalDate> dates = slots.stream().map(Slot::date).distinct().limit(AVAILABLE_DATE_LIMIT).toList();
         List<QuickReply> choices = dates.stream()
                 .map(date -> q(date.format(DATE_LABEL), "SET_DATE", date.toString())).toList();
         String labels = dates.stream().map(date -> date.format(DATE_LABEL))
@@ -838,29 +864,29 @@ public class FollowupAgentService {
     }
 
     private AgentTurnResponse recommendPeriod(ConversationState state, String preference) {
-        String normalized = "AFTERNOON".equalsIgnoreCase(preference) ? "AFTERNOON" : "MORNING";
+        String normalized = Periods.normalize(preference);
         List<Slot> candidates = filterByPeriod(state.alternatives, normalized);
         if (candidates.isEmpty()) {
-            String other = "MORNING".equals(normalized) ? "AFTERNOON" : "MORNING";
+            String other = Periods.other(normalized);
             List<Slot> otherSlots = filterByPeriod(state.alternatives, other);
-            return respondWithPlan(state, periodLabel(normalized) + "暂时没有号。" +
+            return respondWithPlan(state, Periods.label(normalized) + "暂时没有号。" +
                     (otherSlots.isEmpty() ? "请重新选择日期。" :
-                            periodLabel(other) + "最早" + otherSlots.get(0).time().format(TIME_LABEL) + "还有号。"),
+                            Periods.label(other) + "最早" + otherSlots.get(0).time().format(TIME_LABEL) + "还有号。"),
                     otherSlots.isEmpty()
                             ? List.of(q("重新选择日期", "CHANGE_DATE", ""))
-                            : List.of(q("选择" + periodLabel(other), "SET_PERIOD", other),
+                            : List.of(q("选择" + Periods.label(other), "SET_PERIOD", other),
                                     q("重新选择日期", "CHANGE_DATE", "")));
         }
         state.timePreference = normalized;
         state.recommendedSlot = candidates.get(0);
         state.stage = ConversationState.Stage.CONFIRM_SLOT;
-        return respondWithPlan(state, periodLabel(normalized) + "最早" +
+        return respondWithPlan(state, Periods.label(normalized) + "最早" +
                         state.recommendedSlot.time().format(TIME_LABEL) +
                         "还有预约号，这个时间可以吗？",
                 List.of(q("这个时间可以", "SELECT_SLOT", state.recommendedSlot.id()),
-                        q("看看其他" + periodLabel(normalized) + "时间", "SHOW_PERIOD_SLOTS", normalized),
-                        q("改选" + periodLabel("MORNING".equals(normalized) ? "AFTERNOON" : "MORNING"),
-                                "SET_PERIOD", "MORNING".equals(normalized) ? "AFTERNOON" : "MORNING")));
+                        q("看看其他" + Periods.label(normalized) + "时间", "SHOW_PERIOD_SLOTS", normalized),
+                        q("改选" + Periods.label(Periods.other(normalized)),
+                                "SET_PERIOD", Periods.other(normalized))));
     }
 
     private AgentTurnResponse recommendSpecificTime(ConversationState state, LocalTime requestedTime) {
@@ -877,7 +903,7 @@ public class FollowupAgentService {
                     List.of(q("重新选择日期", "CHANGE_DATE", "")));
         }
         state.requestedTime = requestedTime;
-        state.timePreference = requestedTime.isBefore(LocalTime.NOON) ? "MORNING" : "AFTERNOON";
+        state.timePreference = requestedTime.isBefore(LocalTime.NOON) ? Periods.MORNING : Periods.AFTERNOON;
         state.recommendedSlot = recommendation;
         state.stage = ConversationState.Stage.CONFIRM_SLOT;
         String reply = exact != null
@@ -886,53 +912,49 @@ public class FollowupAgentService {
                 recommendation.time().format(TIME_LABEL) + "还有号，这个时间可以吗？";
         return respondWithPlan(state, reply, List.of(
                 q("这个时间可以", "SELECT_SLOT", recommendation.id()),
-                q("看看其他" + periodLabel(state.timePreference) + "时间",
+                q("看看其他" + Periods.label(state.timePreference) + "时间",
                         "SHOW_PERIOD_SLOTS", state.timePreference),
                 q("重新选择日期", "CHANGE_DATE", "")));
     }
 
     private AgentTurnResponse showPeriodSlots(ConversationState state, String preference) {
-        String normalized = "AFTERNOON".equalsIgnoreCase(preference) ? "AFTERNOON" : "MORNING";
+        String normalized = Periods.normalize(preference);
         List<Slot> candidates = filterByPeriod(state.alternatives, normalized);
         state.stage = ConversationState.Stage.SELECT_SLOT;
         List<QuickReply> choices = new ArrayList<>(slotReplies(candidates));
-        String other = "MORNING".equals(normalized) ? "AFTERNOON" : "MORNING";
-        choices.add(q("改选" + periodLabel(other), "SET_PERIOD", other));
-        return respondWithPlan(state, "以下是" + periodLabel(normalized) +
+        String other = Periods.other(normalized);
+        choices.add(q("改选" + Periods.label(other), "SET_PERIOD", other));
+        return respondWithPlan(state, "以下是" + Periods.label(normalized) +
                 "仍可预约的时间，请选择一个。", choices);
     }
 
     private List<Slot> filterByPeriod(List<Slot> slots, String preference) {
-        return slots.stream().filter(slot -> "MORNING".equals(preference)
+        return slots.stream().filter(slot -> Periods.MORNING.equals(preference)
                 ? slot.time().isBefore(LocalTime.NOON)
                 : !slot.time().isBefore(LocalTime.NOON)).toList();
     }
 
     private List<QuickReply> periodReplies(List<Slot> slots) {
         List<QuickReply> replies = new ArrayList<>();
-        if (!filterByPeriod(slots, "MORNING").isEmpty()) {
-            replies.add(q("上午", "SET_PERIOD", "MORNING"));
+        if (!filterByPeriod(slots, Periods.MORNING).isEmpty()) {
+            replies.add(q(Periods.label(Periods.MORNING), "SET_PERIOD", Periods.MORNING));
         }
-        if (!filterByPeriod(slots, "AFTERNOON").isEmpty()) {
-            replies.add(q("下午", "SET_PERIOD", "AFTERNOON"));
+        if (!filterByPeriod(slots, Periods.AFTERNOON).isEmpty()) {
+            replies.add(q(Periods.label(Periods.AFTERNOON), "SET_PERIOD", Periods.AFTERNOON));
         }
         replies.add(q("直接选择具体时间", "SHOW_PERIOD_SLOTS",
-                !filterByPeriod(slots, "MORNING").isEmpty() ? "MORNING" : "AFTERNOON"));
+                !filterByPeriod(slots, Periods.MORNING).isEmpty() ? Periods.MORNING : Periods.AFTERNOON));
         return replies;
     }
 
     private String periodSummary(LocalDate date, List<Slot> slots) {
-        List<Slot> morning = filterByPeriod(slots, "MORNING");
-        List<Slot> afternoon = filterByPeriod(slots, "AFTERNOON");
+        List<Slot> morning = filterByPeriod(slots, Periods.MORNING);
+        List<Slot> afternoon = filterByPeriod(slots, Periods.AFTERNOON);
         List<String> descriptions = new ArrayList<>();
         if (!morning.isEmpty()) descriptions.add("上午最早" + morning.get(0).time().format(TIME_LABEL));
         if (!afternoon.isEmpty()) descriptions.add("下午最早" + afternoon.get(0).time().format(TIME_LABEL));
         return date.format(DATE_LABEL) + "共查到" + slots.size() + "个可预约时段，" +
                 String.join("，", descriptions) + "。您想上午去还是下午去？";
-    }
-
-    private String periodLabel(String preference) {
-        return "AFTERNOON".equals(preference) ? "下午" : "上午";
     }
 
     private AgentTurnResponse selectSlot(ConversationState state, String slotId) {
@@ -963,7 +985,7 @@ public class FollowupAgentService {
             state.alternatives = sameDay;
             // 当日候选只放 1 个，保证「重新选择日期」和「仍保留这个时间」都落在前端第一页，
             // 不会被每页 3 个的通用分页推到第二页。
-            List<QuickReply> choices = new ArrayList<>(slotReplies(sameDay.stream().limit(1).toList()));
+            List<QuickReply> choices = new ArrayList<>(slotReplies(sameDay.stream().limit(CONFLICT_SAME_DAY_LIMIT).toList()));
             choices.add(q("重新选择日期", "CHANGE_DATE", ""));
             choices.add(q("仍保留这个时间", "KEEP_CONFLICT", ""));
             Conflict first = conflicts.get(0);
@@ -1002,9 +1024,9 @@ public class FollowupAgentService {
         if (state.appointmentId == null) operations.add(state.originalAppointmentId == null ? "提交模拟预约" : "变更原预约 " + state.originalAppointmentId + "，停用原提醒");
         else operations.add("保留已成功预约：" + state.appointmentId + "，仅补办未完成事项");
         operations.add("材料：" + String.join("、", state.materials));
-        if (!state.materialReminderDone) operations.add("创建材料准备提醒：" + at.minusDays(1));
+        if (!state.materialReminderDone) operations.add("创建材料准备提醒：" + at.minus(MATERIAL_REMINDER_LEAD));
         if (Boolean.TRUE.equals(state.needTravel) && !state.departureReminderDone)
-            operations.add("创建出发提醒：" + state.travelPlan.departureAt().minusMinutes(10));
+            operations.add("创建出发提醒：" + state.travelPlan.departureAt().minus(DEPARTURE_REMINDER_LEAD));
         if (!Boolean.TRUE.equals(state.needTravel)) operations.add("不创建出发提醒");
         if (Boolean.TRUE.equals(state.notifyFamily) && !state.notificationDone)
             operations.add("通知" + state.contact.relationship() + " " + state.contact.name() + "：" + notificationMessage(state));
@@ -1038,7 +1060,7 @@ public class FollowupAgentService {
     private AgentTurnResponse askDepartment(ConversationState state, String message) {
         state.stage = ConversationState.Stage.ASK_DEPARTMENT;
         List<QuickReply> choices = new ArrayList<>(catalog.departments(state.hospitalId).stream()
-                .limit(3).map(item -> q(item.name(), "SET_DEPARTMENT", item.id())).toList());
+                .limit(QUICK_REPLY_PAGE_SIZE).map(item -> q(item.name(), "SET_DEPARTMENT", item.id())).toList());
         choices.add(q("我自己说科室", "ASK_HUMAN_INPUT", ""));
         return respond(state, message, choices);
     }
@@ -1070,9 +1092,9 @@ public class FollowupAgentService {
         if (rows.isEmpty()) {
             return respond(state, "暂时没有找到这家医院的模拟资料。" + resumeHint(state), List.of());
         }
-        String summary = rows.stream().limit(3).map(this::hospitalSummary)
+        String summary = rows.stream().limit(PROFILE_SUMMARY_LIMIT).map(this::hospitalSummary)
                 .collect(java.util.stream.Collectors.joining("；"));
-        List<QuickReply> choices = rows.stream().limit(3)
+        List<QuickReply> choices = rows.stream().limit(QUICK_REPLY_PAGE_SIZE)
                 .map(item -> q("选择" + item.name(), "SET_HOSPITAL", item.id())).toList();
         return respond(state, "目前的模拟医院资料如下：" + summary + "。" + resumeHint(state), choices);
     }
@@ -1097,7 +1119,7 @@ public class FollowupAgentService {
         }
         String names = rows.stream().map(item -> item.name() + "（" + joinOrDefault(item.specialtyTags(), "常规复诊") + "）")
                 .collect(java.util.stream.Collectors.joining("、"));
-        List<QuickReply> choices = rows.stream().limit(3)
+        List<QuickReply> choices = rows.stream().limit(QUICK_REPLY_PAGE_SIZE)
                 .map(item -> q(item.name(), "SET_DEPARTMENT", item.id())).toList();
         return respond(state, state.hospital + "目前可办理：" + names + "。请选择医生要求您复诊的科室。", choices);
     }
@@ -1106,9 +1128,9 @@ public class FollowupAgentService {
         String department = requestedDepartment != null ? requestedDepartment : state.department;
         if (department == null) {
             List<HospitalProfile> rows = hospitalCatalogTool.listHospitals(state.id);
-            String summary = rows.stream().limit(3).map(this::hospitalSummary)
+            String summary = rows.stream().limit(PROFILE_SUMMARY_LIMIT).map(this::hospitalSummary)
                     .collect(java.util.stream.Collectors.joining("；"));
-            List<QuickReply> choices = rows.stream().limit(3)
+            List<QuickReply> choices = rows.stream().limit(QUICK_REPLY_PAGE_SIZE)
                     .map(item -> q("了解" + item.name(), "SET_HOSPITAL", item.id())).toList();
             return respond(state, "我不能判断哪家医院‘最好’，但可以根据数据库中的科室特色、适老服务和号源帮您筛选。"
                     + summary + "。请先告诉我医生要求复诊的科室。", choices);
@@ -1122,7 +1144,7 @@ public class FollowupAgentService {
         state.department = department;
         state.departmentId = null;
         List<String> reasons = new ArrayList<>();
-        for (HospitalProfile item : rows.stream().limit(3).toList()) {
+        for (HospitalProfile item : rows.stream().limit(PROFILE_SUMMARY_LIMIT).toList()) {
             DepartmentProfile departmentProfile = departmentCatalogTool
                     .listDepartments(state.id, item.id()).stream()
                     .filter(candidate -> candidate.name().equals(department))
@@ -1134,7 +1156,7 @@ public class FollowupAgentService {
                     joinOrDefault(item.elderlyServices(), "人工服务"));
         }
         String summary = String.join("。", reasons);
-        List<QuickReply> choices = rows.stream().limit(3)
+        List<QuickReply> choices = rows.stream().limit(QUICK_REPLY_PAGE_SIZE)
                 .map(item -> q("选择" + item.name(), "SET_HOSPITAL", item.id())).toList();
         return respond(state, "根据“" + department + "”和模拟医院资料，我找到了以下选择。" + summary
                 + "。这是办理信息筛选，不是医疗诊断，请选择您原就诊医院或医生建议的医院。", choices);
@@ -1236,7 +1258,7 @@ public class FollowupAgentService {
             if (state.selectedSlot != null && !state.selectedSlot.time().equals(facts.selectedTime())) state.selectedSlot = null;
         }
         if (facts.timePreference() != null && state.selectedSlot != null
-                && ("MORNING".equals(facts.timePreference()) != state.selectedSlot.time().isBefore(LocalTime.NOON))) state.selectedSlot = null;
+                && (Periods.MORNING.equals(facts.timePreference()) != state.selectedSlot.time().isBefore(LocalTime.NOON))) state.selectedSlot = null;
         if (!java.util.Objects.equals(oldHospital, state.hospitalId) || !java.util.Objects.equals(oldDepartment, state.department)
                 || !java.util.Objects.equals(oldDate, state.date)) {
             state.selectedSlot = null;

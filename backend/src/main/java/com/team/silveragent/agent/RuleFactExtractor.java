@@ -1,6 +1,7 @@
 package com.team.silveragent.agent;
 
 import com.team.silveragent.application.CareCatalogRepository;
+import com.team.silveragent.domain.model.Periods;
 import org.springframework.stereotype.Component;
 
 import java.time.DateTimeException;
@@ -17,6 +18,11 @@ public class RuleFactExtractor implements FactExtractor {
     private static final Pattern ISO_DATE = Pattern.compile("(20\\d{2})-(\\d{1,2})-(\\d{1,2})");
     private static final Pattern SHORT_DATE = Pattern.compile("(?<!\\d)(\\d{1,2})\\s*[./-]\\s*(\\d{1,2})(?!\\d)");
     private static final Pattern TIME = Pattern.compile("(\\d{1,2})[:：点时](\\d{1,2})?");
+    /**
+     * 用户只说“9月18日”不带年份时的容忍度：这一天即使刚刚过去也仍算今年，
+     * 否则刚过零点就会把“昨天的日期”理解成明年。
+     */
+    private static final int RECENT_PAST_TOLERANCE_DAYS = 1;
 
     public RuleFactExtractor(CareCatalogRepository catalog) {
         this.catalog = catalog;
@@ -88,7 +94,7 @@ public class RuleFactExtractor implements FactExtractor {
             int month = Integer.parseInt(shortDate.group(1));
             int day = Integer.parseInt(shortDate.group(2));
             LocalDate candidate = safeDate(today.getYear(), month, day);
-            if (candidate != null && candidate.isBefore(today.minusDays(1))) candidate = safeDate(today.getYear() + 1, month, day);
+            if (candidate != null && candidate.isBefore(today.minusDays(RECENT_PAST_TOLERANCE_DAYS))) candidate = safeDate(today.getYear() + 1, month, day);
             return candidate;
         }
         Matcher cn = CN_DATE.matcher(message);
@@ -96,7 +102,7 @@ public class RuleFactExtractor implements FactExtractor {
         int month = Integer.parseInt(cn.group(1));
         int day = Integer.parseInt(cn.group(2));
         LocalDate candidate = safeDate(today.getYear(), month, day);
-        if (candidate != null && candidate.isBefore(today.minusDays(1))) candidate = safeDate(today.getYear() + 1, month, day);
+        if (candidate != null && candidate.isBefore(today.minusDays(RECENT_PAST_TOLERANCE_DAYS))) candidate = safeDate(today.getYear() + 1, month, day);
         return candidate;
     }
 
@@ -140,8 +146,8 @@ public class RuleFactExtractor implements FactExtractor {
     }
 
     private String timePreference(String value) {
-        if (containsAny(value, "上午", "早上", "早一点", "最早")) return "MORNING";
-        if (containsAny(value, "下午", "午后", "晚一点")) return "AFTERNOON";
+        if (containsAny(value, "上午", "早上", "早一点", "最早")) return Periods.MORNING;
+        if (containsAny(value, "下午", "午后", "晚一点")) return Periods.AFTERNOON;
         return null;
     }
 

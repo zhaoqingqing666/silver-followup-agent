@@ -16,6 +16,9 @@ import java.util.UUID;
 
 @Component
 public class MockAppointmentTool implements AppointmentTool {
+    /** 「附近日期」向前找的天数，从指定日期的次日起算。 */
+    private static final int ALTERNATIVE_WINDOW_DAYS = 3;
+
     private final JdbcTemplate jdbc;
     private final ToolTraceStore traces;
 
@@ -63,7 +66,7 @@ public class MockAppointmentTool implements AppointmentTool {
     @Override
     public List<Slot> queryAlternatives(String conversationId, String hospitalId, String department, LocalDate date) {
         LocalDate from = date.plusDays(1);
-        LocalDate to = date.plusDays(3);
+        LocalDate to = date.plusDays(ALTERNATIVE_WINDOW_DAYS);
         Map<String, Object> input = Map.of("hospitalId", hospitalId, "department", department,
                 "from", from, "to", to);
         List<Slot> result = jdbc.query("""

@@ -1,5 +1,6 @@
 package com.team.silveragent.infrastructure.persistence;
 
+import com.team.silveragent.domain.model.BookingWindow;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -60,7 +61,8 @@ public class RollingAppointmentSlotInitializer implements ApplicationRunner {
                 rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4)));
 
         LocalDate start = LocalDate.now();
-        LocalDate end = start.plusMonths(1);
+        // 与日期校验共用同一个可预约窗口，避免“能选到却没有号源”。
+        LocalDate end = BookingWindow.lastBookableDate(start);
         for (DepartmentSeed department : departments) {
             for (LocalDate date = start; !date.isAfter(end); date = date.plusDays(1)) {
                 if (date.getDayOfWeek().getValue() >= 6) {

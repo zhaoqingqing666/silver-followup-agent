@@ -1,10 +1,8 @@
 import type { AgentTurnResponse } from '@/types/domain';
-import { DEMO_USER_ID } from '@/lib/app-config';
-
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:8080';
+import { API_BASE_URL, DEMO_USER_ID } from '@/lib/app-config';
 
 async function request(path: string, init?: RequestInit): Promise<AgentTurnResponse> {
-  const response = await fetch(API_BASE + path, {
+  const response = await fetch(API_BASE_URL + path, {
     ...init,
     headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
   });

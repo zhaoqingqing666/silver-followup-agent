@@ -5,6 +5,8 @@ import { BellRing, CalendarPlus, Clock3, History, LoaderCircle, MapPin, Navigati
 import { PageHeader } from '@/components/common/page-header';
 import { MaterialChecklist } from '@/features/materials/material-checklist';
 import { getAppointments } from '@/lib/appointment-api';
+import { formatDate, formatTime } from '@/lib/datetime';
+import { APPOINTMENT_STATUS } from '@/types/domain';
 import type { AppointmentSummary, TabId } from '@/types/domain';
 
 export function TasksView({ onNavigate }: { onNavigate: (tab: TabId) => void }) {
@@ -19,7 +21,7 @@ export function TasksView({ onNavigate }: { onNavigate: (tab: TabId) => void }) 
     try {
       const rows = await getAppointments();
       setAppointments(rows);
-      const preferred = rows.find(row => row.status === 'CONFIRMED') ?? rows[0];
+      const preferred = rows.find(row => row.status === APPOINTMENT_STATUS.CONFIRMED) ?? rows[0];
       setSelectedId(preferred?.appointmentId ?? '');
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '无法读取复诊事项');
@@ -71,7 +73,7 @@ export function TasksView({ onNavigate }: { onNavigate: (tab: TabId) => void }) 
                 <button key={row.appointmentId} onClick={() => selectAppointment(row)} className={'rounded-2xl border p-4 text-left ' + (selectedId === row.appointmentId ? 'border-primary bg-[#fff3e4] ring-1 ring-primary/20' : 'bg-white')}>
                   <div className="flex items-start justify-between gap-3">
                     <div><strong className="text-lg">{formatDate(row.date)} {formatTime(row.time)}</strong><p className="mt-1 text-base">{row.hospital} · {row.department}</p></div>
-                    <span className={'shrink-0 rounded-full px-3 py-1 text-sm font-bold ' + (row.status === 'CONFIRMED' ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-600')}>{row.status === 'CONFIRMED' ? '已预约' : '已取消'}</span>
+                    <span className={'shrink-0 rounded-full px-3 py-1 text-sm font-bold ' + (row.status === APPOINTMENT_STATUS.CONFIRMED ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-600')}>{row.status === APPOINTMENT_STATUS.CONFIRMED ? '已预约' : '已取消'}</span>
                   </div>
                 </button>
               ))}
@@ -82,17 +84,17 @@ export function TasksView({ onNavigate }: { onNavigate: (tab: TabId) => void }) 
             <div className="flex items-center gap-3">
               <div className="grid size-12 place-items-center rounded-2xl bg-primary text-white"><Clock3 /></div>
               <div>
-                <p className="text-base text-muted-foreground">{appointment.status === 'CONFIRMED' ? '当前选择的复诊预约' : '已取消的预约记录'}</p>
+                <p className="text-base text-muted-foreground">{appointment.status === APPOINTMENT_STATUS.CONFIRMED ? '当前选择的复诊预约' : '已取消的预约记录'}</p>
                 <h2 className="text-xl font-bold">{formatDate(appointment.date)} {formatTime(appointment.time)}</h2>
               </div>
             </div>
             <div className="mt-4 space-y-2 text-base">
               <p className="flex items-center gap-2"><MapPin className="size-5 text-primary" />{appointment.hospital} · {appointment.department}</p>
-              <p className="flex items-center gap-2"><Navigation className="size-5 text-primary" />{appointment.departureAt ? `建议 ${formatDateTime(appointment.departureAt)} 出发` : '未设置出行提醒'}</p>
+              <p className="flex items-center gap-2"><Navigation className="size-5 text-primary" />{appointment.departureAt ? `建议 ${formatTime(appointment.departureAt)} 出发` : '未设置出行提醒'}</p>
             </div>
           </section>
 
-          <MaterialChecklist appointmentId={appointment.appointmentId} disabled={appointment.status !== 'CONFIRMED'} />
+          <MaterialChecklist appointmentId={appointment.appointmentId} disabled={appointment.status !== APPOINTMENT_STATUS.CONFIRMED} />
 
           <section className="grid gap-3">
             <div className="flex items-center gap-4 rounded-3xl border bg-card p-4"><BellRing className="size-7 text-primary" /><div><strong className="text-lg">{appointment.reminderStatus ?? '未创建提醒'}</strong><p className="text-sm text-muted-foreground">以数据库中的执行结果为准</p></div></div>
@@ -104,15 +106,3 @@ export function TasksView({ onNavigate }: { onNavigate: (tab: TabId) => void }) 
   );
 }
 
-function formatDate(value: string) {
-  const [, month, day] = value.split('-');
-  return `${Number(month)}月${Number(day)}日`;
-}
-
-function formatTime(value: string) {
-  return value.slice(0, 5);
-}
-
-function formatDateTime(value: string) {
-  return value.includes('T') ? value.split('T')[1].slice(0, 5) : value.slice(11, 16);
-}

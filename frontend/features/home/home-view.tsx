@@ -3,6 +3,9 @@
 import { useEffect, useState } from 'react';
 import { CalendarCheck2, ChevronRight, ClipboardCheck, Headphones, HeartHandshake, Mic, Route } from 'lucide-react';
 import { getAppointments, getUserProfile } from '@/lib/appointment-api';
+import { DEMO_HELP_MESSAGE } from '@/lib/app-config';
+import { dayOfMonth, formatTime, monthOfYear } from '@/lib/datetime';
+import { APPOINTMENT_STATUS } from '@/types/domain';
 import type { AppointmentSummary, TabId } from '@/types/domain';
 
 interface HomeViewProps { onNavigate: (tab: TabId) => void }
@@ -12,7 +15,7 @@ export function HomeView({ onNavigate }: HomeViewProps) {
   const [userName, setUserName] = useState('您好');
 
   useEffect(() => {
-    void getAppointments().then(rows => setAppointment(rows.find(row => row.status === 'CONFIRMED') ?? null)).catch(() => setAppointment(null));
+    void getAppointments().then(rows => setAppointment(rows.find(row => row.status === APPOINTMENT_STATUS.CONFIRMED) ?? null)).catch(() => setAppointment(null));
     void getUserProfile().then(user => setUserName(user.name)).catch(() => setUserName('您好'));
   }, []);
 
@@ -20,7 +23,7 @@ export function HomeView({ onNavigate }: HomeViewProps) {
     <main className="space-y-6 px-5 pb-8 pt-6">
       <header className="flex items-center justify-between">
         <div><p className="text-base text-muted-foreground">下午好</p><h1 className="text-2xl font-bold tracking-tight">{userName}</h1></div>
-        <button onClick={() => window.alert('这里是比赛演示的人工帮助入口，当前页面信息已经为您保留。')} aria-label="咨询人工" className="flex min-h-12 items-center gap-2 rounded-2xl border-2 border-primary/60 bg-secondary px-4 text-[17px] font-bold text-primary shadow-sm"><Headphones className="size-6" />人工帮助</button>
+        <button onClick={() => window.alert(DEMO_HELP_MESSAGE)} aria-label="咨询人工" className="flex min-h-12 items-center gap-2 rounded-2xl border-2 border-primary/60 bg-secondary px-4 text-[17px] font-bold text-primary shadow-sm"><Headphones className="size-6" />人工帮助</button>
       </header>
 
       <section className="overflow-hidden rounded-3xl bg-gradient-to-br from-[#c86436] to-[#de8b55] p-5 text-white shadow-lg shadow-orange-900/10">
@@ -40,10 +43,10 @@ export function HomeView({ onNavigate }: HomeViewProps) {
           <button onClick={() => onNavigate('tasks')} className="w-full rounded-3xl border bg-card p-5 text-left shadow-sm">
             <div className="flex gap-4">
               <div className="grid min-w-20 place-items-center rounded-2xl bg-secondary px-3 py-2 text-center text-secondary-foreground">
-                <strong className="text-2xl">{Number(appointment.date.split('-')[2])}</strong><span className="text-sm">{Number(appointment.date.split('-')[1])}月</span>
+                <strong className="text-2xl">{dayOfMonth(appointment.date)}</strong><span className="text-sm">{monthOfYear(appointment.date)}月</span>
               </div>
               <div className="min-w-0 flex-1">
-                <p className="text-xl font-bold">{appointment.time.slice(0, 5)}</p>
+                <p className="text-xl font-bold">{formatTime(appointment.time)}</p>
                 <p className="mt-1 truncate text-base">{appointment.hospital}</p>
                 <p className="mt-1 text-base text-muted-foreground">{appointment.department} · {appointment.reminderStatus}</p>
               </div>

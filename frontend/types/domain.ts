@@ -1,5 +1,20 @@
 export type TabId = 'home' | 'tasks' | 'assistant' | 'profile';
 
+/** 后端 appointments.status 的取值；比较时用这里的常量，不要另写字符串。 */
+export const APPOINTMENT_STATUS = {
+  CONFIRMED: 'CONFIRMED',
+  CANCELLED: 'CANCELLED',
+} as const;
+
+/** 后端 appointment_materials.status 的取值。 */
+export const MATERIAL_STATUS = {
+  NOT_PREPARED: 'NOT_PREPARED',
+  PREPARED: 'PREPARED',
+  PHOTO_CONFIRMED: 'PHOTO_CONFIRMED',
+} as const;
+
+export type MaterialStatus = (typeof MATERIAL_STATUS)[keyof typeof MATERIAL_STATUS];
+
 export interface AppointmentSummary {
   appointmentId: string;
   date: string;
@@ -22,7 +37,7 @@ export interface MaterialItem {
   materialCode: string;
   materialName: string;
   required: boolean;
-  status: 'NOT_PREPARED' | 'PREPARED' | 'PHOTO_CONFIRMED';
+  status: MaterialStatus;
   confirmSource: string | null;
   photoUrl: string | null;
   updatedAt: string;

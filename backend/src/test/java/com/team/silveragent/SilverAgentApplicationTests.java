@@ -153,7 +153,7 @@ class SilverAgentApplicationTests {
     @Test void failedReminderCanBeRetriedWithoutAnotherBooking() {
         AgentTurnResponse turn = prepare(true, true);
         doThrow(new IllegalStateException("模拟提醒服务故障")).doCallRealMethod()
-                .when(schedule).createReminder(anyString(), anyString(), eq("复诊材料准备提醒"), any());
+                .when(schedule).createReminder(anyString(), anyString(), eq(FollowupAgentService.MATERIAL_REMINDER_TITLE), any());
         AgentTurnResponse partial = approve(turn);
         assertThat(partial.stage()).isEqualTo("PARTIAL");
         assertThat(count("appointments")).isEqualTo(1);
@@ -275,7 +275,7 @@ class SilverAgentApplicationTests {
     @Test void partialProgressSurvivesSessionReload() {
         AgentTurnResponse turn = prepare(true, false);
         doThrow(new IllegalStateException("模拟出发提醒失败")).doCallRealMethod()
-                .when(schedule).createReminder(anyString(), anyString(), eq("复诊出发提醒"), any());
+                .when(schedule).createReminder(anyString(), anyString(), eq(FollowupAgentService.DEPARTURE_REMINDER_TITLE), any());
         assertThat(approve(turn).stage()).isEqualTo("PARTIAL");
         ((java.util.Map<?, ?>) org.springframework.test.util.ReflectionTestUtils.getField(service, "sessions")).clear();
         assertThat(service.resume(turn.conversationId()).stage()).isEqualTo("PARTIAL");

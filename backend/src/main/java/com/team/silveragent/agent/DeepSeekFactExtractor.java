@@ -16,6 +16,11 @@ import java.util.Map;
 
 @Component
 public class DeepSeekFactExtractor implements FactExtractor {
+    /** 结构化抽取要的是稳定复现，不是创造性；温度压到接近确定。 */
+    private static final double TEMPERATURE = 0.1;
+    /** 单轮意图 JSON 很短，500 足够且能限制异常输出。 */
+    private static final int MAX_TOKENS = 500;
+
     private final boolean enabled;
     private final String apiKey;
     private final String model;
@@ -54,8 +59,8 @@ public class DeepSeekFactExtractor implements FactExtractor {
             body.put("messages", messages);
             body.put("response_format", Map.of("type", "json_object"));
             body.put("thinking", Map.of("type", "disabled"));
-            body.put("temperature", 0.1);
-            body.put("max_tokens", 500);
+            body.put("temperature", TEMPERATURE);
+            body.put("max_tokens", MAX_TOKENS);
 
             String raw = client.post().uri("/chat/completions")
                     .contentType(MediaType.APPLICATION_JSON)

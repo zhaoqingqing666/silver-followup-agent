@@ -12,6 +12,9 @@ import java.util.List;
 
 @Repository
 public class ToolTraceStore {
+    /** 一次返回给前端的最近工具调用条数。 */
+    private static final int TOOL_TRACE_LIMIT = 12;
+
     private final JdbcTemplate jdbc;
     private final ObjectMapper json;
 
@@ -29,9 +32,9 @@ public class ToolTraceStore {
         return jdbc.query("""
                 SELECT tool_name,request_json,response_json,success FROM (
                   SELECT id,tool_name,request_json,response_json,success
-                  FROM tool_call_logs WHERE conversation_id=? ORDER BY id DESC LIMIT 12
+                  FROM tool_call_logs WHERE conversation_id=? ORDER BY id DESC LIMIT %d
                 ) recent ORDER BY id
-                """,
+                """.formatted(TOOL_TRACE_LIMIT),
                 (rs, row) -> new ToolTrace(rs.getString(1), rs.getString(2), rs.getString(3), rs.getBoolean(4)), conversationId);
     }
 

@@ -1,6 +1,7 @@
 'use client';
 
 import { ChevronLeft, Headphones } from 'lucide-react';
+import { DEMO_HELP_MESSAGE } from '@/lib/app-config';
 
 export function PageHeader({ title, subtitle, onBack, onHelp }: {
   title: string;
@@ -26,7 +27,7 @@ export function PageHeader({ title, subtitle, onBack, onHelp }: {
       </div>
       <button
         type="button"
-        onClick={onHelp ?? (() => window.alert('这里是比赛演示的人工帮助入口，当前页面信息已经为您保留。'))}
+        onClick={onHelp ?? (() => window.alert(DEMO_HELP_MESSAGE))}
         className="flex min-h-12 items-center gap-2 rounded-2xl border-2 border-primary/60 bg-secondary px-4 text-[17px] font-bold text-primary shadow-sm active:bg-accent"
       >
         <Headphones className="size-6" aria-hidden="true" />

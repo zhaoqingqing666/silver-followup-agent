@@ -9,13 +9,15 @@ import { ProfileView } from '@/features/profile/profile-view';
 import { TasksView } from '@/features/tasks/tasks-view';
 import type { TabId } from '@/types/domain';
 import { getVoicePreference, updateVoicePreference } from '@/lib/appointment-api';
+import { DEFAULT_SPEECH_RATE, DEFAULT_SPEECH_VOLUME, DEMO_USER_ID } from '@/lib/app-config';
 import type { VoicePreference } from '@/types/domain';
 
 export default function HomePage() {
   const [activeTab, setActiveTab] = useState<TabId>('home');
   const [largeText, setLargeText] = useState(false);
   const [voicePreference, setVoicePreference] = useState<VoicePreference>({
-    userId: 'user-001', autoSpeakEnabled: false, speechRate: 0.9, speechVolume: 1,
+    userId: DEMO_USER_ID, autoSpeakEnabled: false,
+    speechRate: DEFAULT_SPEECH_RATE, speechVolume: DEFAULT_SPEECH_VOLUME,
   });
   const [voicePreferenceBusy, setVoicePreferenceBusy] = useState(false);
   const [voicePreferenceError, setVoicePreferenceError] = useState('');

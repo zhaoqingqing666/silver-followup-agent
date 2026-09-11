@@ -1,5 +1,6 @@
 package com.team.silveragent.application;
 
+import com.team.silveragent.domain.model.SimulatedData;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
@@ -109,7 +110,7 @@ public class CareCatalogRepository {
     }
 
     private String clean(String value) {
-        return value == null ? "" : value.replace("（模拟）", "").replace("(模拟)", "").trim();
+        return SimulatedData.stripMarker(value);
     }
 
     private Department department(java.sql.ResultSet rs) throws java.sql.SQLException {
