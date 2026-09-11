@@ -36,6 +36,8 @@ final class AgentOrchestrator {
         RESOLVE_HOSPITAL, RESOLVE_DEPARTMENT, VALIDATE_DRAFT,
         QUERY_AVAILABLE_SLOTS, QUERY_NEARBY_SLOTS, CHECK_CONFLICT, CHECK_DUPLICATE,
         ASK_MATERIALS, QUERY_TRAVEL_GUIDE, QUERY_LOCATION_GUIDE,
+        // 药品知识查询：命中的是知识库里的真实条目，查不到就如实说没查到。
+        QUERY_DRUG_KNOWLEDGE,
         CHANGE_HOSPITAL, CHANGE_DEPARTMENT, CHANGE_DATE, CHANGE_TIME,
         // 健康备忘与健康数值不属于复诊预约流程：写操作仍由 Java 的解析器填槽、
         // 仍走各自的门禁（备忘先确认、数值异常先反问），这里只负责把它们从模型那边接过来。
@@ -103,6 +105,7 @@ final class AgentOrchestrator {
             case "CHANGE_DEPARTMENT" -> Route.CHANGE_DEPARTMENT;
             case "CHANGE_DATE" -> Route.CHANGE_DATE;
             case "CHANGE_TIME" -> Route.CHANGE_TIME;
+            case "QUERY_DRUG" -> Route.QUERY_DRUG_KNOWLEDGE;
             default -> Route.CURRENT_FLOW;
         };
     }

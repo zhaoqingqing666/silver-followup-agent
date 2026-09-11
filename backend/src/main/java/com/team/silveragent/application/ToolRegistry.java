@@ -58,6 +58,10 @@ final class ToolRegistry {
                 List.of("appointmentId", "transport"), AgentOrchestrator.Route.QUERY_TRAVEL_GUIDE);
         register("hospital.locationGuide", "查询门诊楼入口、楼层、诊室、报到点和无障碍指引；只读",
                 List.of("appointmentId", "hospital", "department"), AgentOrchestrator.Route.QUERY_LOCATION_GUIDE);
+        // 药品知识：只能查知识库里有的药，查不到就如实说没查到。老人本人和照护端都可能问，
+        // 所以不加角色限制。
+        register("drug.queryKnowledge", "查询药品的名称、规格、类别、用途和用药提醒；只读，不提供诊断、不判断该不该吃、不建议换药加量",
+                List.of("drugName", "specification"), AgentOrchestrator.Route.QUERY_DRUG_KNOWLEDGE);
         // 下面两条只对被协同的长辈有意义，老人本人查不到也不需要：注册表按角色限定可见性。
         register("care.timeline", "查询当前协助长辈的复诊动态时间线；只读，仅家属/志愿者可用",
                 List.of("elderUserId"), AgentOrchestrator.Route.QUERY_CARE_TIMELINE,

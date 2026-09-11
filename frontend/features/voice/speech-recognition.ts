@@ -1,14 +1,27 @@
 'use client';
 
-/** 浏览器语音识别：只负责“听”，朗读仍由 lib/speech-service 负责。 */
+/** 浏览器语音识别：只负责“听”，朗读仍由 lib/tts-player 负责。 */
+
+export interface SpeechRecognitionAlternativeLike {
+  transcript: string;
+}
+
+export interface SpeechRecognitionResultLike {
+  0: SpeechRecognitionAlternativeLike;
+  /** 这一段是否已定稿。按住说话时要靠它把中途字幕和最终文字分开。 */
+  isFinal?: boolean;
+}
 
 export interface SpeechRecognitionResultEvent {
-  results: ArrayLike<{ 0: { transcript: string } }>;
+  results: ArrayLike<SpeechRecognitionResultLike>;
+  /** 本次事件从第几段开始是新的；不认这个字段会把前面几段重复累加。 */
+  resultIndex?: number;
 }
 
 export interface SpeechRecognitionLike {
   lang: string;
   interimResults: boolean;
+  continuous?: boolean;
   onresult: ((event: SpeechRecognitionResultEvent) => void) | null;
   onend: (() => void) | null;
   onerror: ((event: { error?: string }) => void) | null;
@@ -28,19 +41,45 @@ function recognizerConstructor(): (new () => SpeechRecognitionLike) | null {
   return scope.SpeechRecognition ?? scope.webkitSpeechRecognition ?? null;
 }
 
+export interface SpeechRecognitionOptions {
+  /**
+   * 打开中途结果。按住说话时要一边听一边显示字幕，所以需要 true；
+   * 点一下就识别一次的场景保持默认 false。
+   */
+  interimResults?: boolean;
+  /** 中途（还没定稿）的累计文字，用来显示实时字幕 */
+  onInterim?: (text: string) => void;
+  /** 按住期间不许浏览器自己断开：默认 false（说完一句就结束） */
+  continuous?: boolean;
+}
+
 export function createSpeechRecognition(handlers: {
+  /** 已定稿的累计文字。按连续模式说话时会多次回调，取最后一次即可。 */
   onTranscript: (text: string) => void;
   onEnd: () => void;
   onError?: (message: string) => void;
-}): SpeechRecognitionLike | null {
+}, options: SpeechRecognitionOptions = {}): SpeechRecognitionLike | null {
   const Constructor = recognizerConstructor();
   if (!Constructor) return null;
   const instance = new Constructor();
   instance.lang = 'zh-CN';
-  instance.interimResults = false;
+  instance.interimResults = options.interimResults === true;
+  if (options.continuous != null) instance.continuous = options.continuous;
+  // 定稿的文字要自己累计：连续模式下每来一段新的就追加，不能只看 results[0]。
+  let finalText = '';
   instance.onresult = event => {
-    const text = event.results?.[0]?.[0]?.transcript ?? '';
-    if (text.trim()) handlers.onTranscript(text.trim());
+    const results = event.results;
+    const total = results?.length ?? 0;
+    let interim = '';
+    for (let index = event.resultIndex ?? 0; index < total; index += 1) {
+      const chunk = results[index];
+      const text = chunk?.[0]?.transcript ?? '';
+      if (chunk?.isFinal) finalText += text;
+      else interim += text;
+    }
+    if (interim) options.onInterim?.(`${finalText}${interim}`.trim());
+    const settled = finalText.trim();
+    if (settled) handlers.onTranscript(settled);
   };
   instance.onend = () => handlers.onEnd();
   // 以前没有 onerror，识别失败时“正在听…”会一直挂着。

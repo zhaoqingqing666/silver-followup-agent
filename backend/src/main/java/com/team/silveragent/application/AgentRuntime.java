@@ -265,6 +265,7 @@ final class AgentRuntime {
             case "CHANGE_DEPARTMENT" -> AgentOrchestrator.Route.CHANGE_DEPARTMENT;
             case "CHANGE_DATE" -> AgentOrchestrator.Route.CHANGE_DATE;
             case "CHANGE_TIME" -> AgentOrchestrator.Route.CHANGE_TIME;
+            case "QUERY_DRUG" -> AgentOrchestrator.Route.QUERY_DRUG_KNOWLEDGE;
             case "PROVIDE_INFORMATION" -> AgentOrchestrator.Route.CURRENT_FLOW;
             // 备忘 / 健康数值 / 发周报不在这里：它们在 {@link #dailyRoute} 里先于「直接回答」判定，
             // 免得模型用一句 ANSWER 把要落库的事带过去。

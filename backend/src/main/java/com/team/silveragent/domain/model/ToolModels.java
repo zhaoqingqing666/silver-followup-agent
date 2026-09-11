@@ -35,6 +35,9 @@ public final class ToolModels {
                                       String materialName, boolean required, String status,
                                       String confirmSource, String photoUrl,
                                       LocalDateTime updatedAt) { }
+    /** 药品知识库里的一条真实记录：只讲「是什么、做什么用、要注意什么」，不含剂量与用药调整建议。 */
+    public record DrugKnowledge(String name, String specification, String category, String purpose,
+                                String reminder, String followupTip, List<String> aliases) { }
     public record AppointmentSummary(String appointmentId, String hospital, String department,
                                      LocalDate date, LocalTime time, String status,
                                      LocalDateTime departureAt, String transport,

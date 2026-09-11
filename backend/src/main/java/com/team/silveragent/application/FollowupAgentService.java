@@ -15,10 +15,12 @@ import com.team.silveragent.domain.model.AgentTurnResponse.ResultCard;
 import com.team.silveragent.domain.model.AgentTurnResponse.TaskProgress;
 import com.team.silveragent.domain.model.AgentTurnResponse.UiDirective;
 import com.team.silveragent.domain.model.ConversationHistoryResponse;
+import com.team.silveragent.domain.model.ConversationSummary;
 import com.team.silveragent.domain.model.ToolModels.AppointmentSummary;
 import com.team.silveragent.domain.model.ToolModels.Conflict;
 import com.team.silveragent.domain.model.ToolModels.Contact;
 import com.team.silveragent.domain.model.ToolModels.DepartmentProfile;
+import com.team.silveragent.domain.model.ToolModels.DrugKnowledge;
 import com.team.silveragent.domain.model.ToolModels.HospitalProfile;
 import com.team.silveragent.domain.model.ToolModels.AppointmentTravelGuide;
 import com.team.silveragent.domain.model.ToolModels.FacilityGuide;
@@ -28,6 +30,7 @@ import com.team.silveragent.domain.tool.AppointmentTool;
 import com.team.silveragent.domain.tool.CareGuideTool;
 import com.team.silveragent.domain.tool.CareGuideTool.GuideArticle;
 import com.team.silveragent.domain.tool.DepartmentCatalogTool;
+import com.team.silveragent.domain.tool.DrugKnowledgeTool;
 import com.team.silveragent.domain.tool.FamilyNotificationTool;
 import com.team.silveragent.domain.tool.HealthRecordTool;
 import com.team.silveragent.domain.tool.HospitalCatalogTool;
@@ -40,6 +43,7 @@ import com.team.silveragent.domain.tool.ScheduleTool;
 import com.team.silveragent.domain.tool.TravelTool;
 import com.team.silveragent.domain.tool.RouteGuideTool;
 import com.team.silveragent.infrastructure.mock.ToolTraceStore;
+import com.team.silveragent.service.VlService;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -64,6 +68,15 @@ import java.util.regex.Pattern;
 @Service
 public class FollowupAgentService {
     private static final int MAX_MODEL_TOOL_ROUNDS = 3;
+    /** 一轮最多接受几张图：再多会超过并发识别池的批次，也会让这一轮明显变慢。 */
+    private static final int MAX_IMAGES_PER_TURN = 3;
+    /**
+     * 单张 data URL 的字符上限（约 3MB 原图）。前端已经压到长边 2048，
+     * 超过这个数说明没走压缩，直接拒绝比让它撑爆内存和数据库好。
+     */
+    private static final int MAX_IMAGE_DATA_URL_CHARS = 4_000_000;
+    /** 老人只传图、没写文字时的默认问法。 */
+    private static final String DEFAULT_IMAGE_QUESTION = "请帮我看看这些图片里的药品或材料是什么、有什么要注意的。";
     private static final DateTimeFormatter DATE_LABEL = DateTimeFormatter.ofPattern("yyyy年M月d日");
     private static final DateTimeFormatter TIME_LABEL = DateTimeFormatter.ofPattern("HH:mm");
     private static final Pattern SPOKEN_DATE = Pattern.compile("(\\d{1,2})月(\\d{1,2})[日号]?");
@@ -130,6 +143,10 @@ public class FollowupAgentService {
     private final CareBookingService careBooking;
     private final CareService careService;
     private final HealthReportService healthReportService;
+    private final DrugKnowledgeTool drugKnowledgeTool;
+    private final VlService vlService;
+    private final TurnProgress turnProgress;
+    private final MemoryStore memories;
     private final String defaultUserId;
     private final Map<String, ConversationState> sessions = new ConcurrentHashMap<>();
     /** 工具循环中的中间响应不能写入对话，也不能提前再调用一次回答模型。 */
@@ -165,6 +182,10 @@ public class FollowupAgentService {
             CareBookingService careBooking,
             CareService careService,
             HealthReportService healthReportService,
+            DrugKnowledgeTool drugKnowledgeTool,
+            VlService vlService,
+            TurnProgress turnProgress,
+            MemoryStore memories,
             @Value("${demo.user-id:user-001}") String defaultUserId) {
         this.appointmentTool = appointmentTool;
         this.careGuideTool = careGuideTool;
@@ -195,6 +216,10 @@ public class FollowupAgentService {
         this.careBooking = careBooking;
         this.careService = careService;
         this.healthReportService = healthReportService;
+        this.drugKnowledgeTool = drugKnowledgeTool;
+        this.vlService = vlService;
+        this.turnProgress = turnProgress;
+        this.memories = memories;
         this.defaultUserId = defaultUserId;
     }
 
@@ -266,7 +291,7 @@ public class FollowupAgentService {
         AgentTurnResponse current = conversations.lastResponse(conversationId)
                 .orElseGet(() -> AgentTurnResponse.message(conversationId, state.stage.name(),
                         "已恢复上次办理进度。", List.of(q("继续办理", "CONTINUE", ""))));
-        return new ConversationHistoryResponse(conversationId, state.stage.name(),
+        return new ConversationHistoryResponse(conversationId, state.status.name(), state.stage.name(),
                 conversations.messages(conversationId), current);
     }
 
@@ -278,8 +303,74 @@ public class FollowupAgentService {
         catch (RuntimeException error) { return toolError(requireSession(conversationId), error); }
     }
 
+    /**
+     * 只读地看一眼这轮办到哪了。不落库、不改状态，评审页面每几百毫秒调一次，
+     * 所以这里绝不能有副作用——真正的调用记录另由 {@code tool_call_logs} 保存。
+     */
+    public TurnProgress.Snapshot progressSnapshot(String conversationId, long afterSeq) {
+        return turnProgress.snapshot(conversationId, afterSeq);
+    }
+
+    /**
+     * 历史记录：这个人最近聊过的会话，新的在前。
+     *
+     * <p>只按就诊人查，不带操作者身份——家属代办的会话同样记在被服务的长辈名下，
+     * 所以长辈在自己手机上看得到「女儿帮我约的那次」，这是想要的结果。
+     */
+    public List<ConversationSummary> conversations(String requestedUserId, int limit) {
+        String userId = requestedUserId == null || requestedUserId.isBlank() ? defaultUserId : requestedUserId;
+        return conversations.list(userId, limit <= 0 ? 20 : limit);
+    }
+
+    /**
+     * 助手记住的关于这位老人的事。给「我的」页面看的——记了什么必须能看见，
+     * 看不见的记忆就是黑箱，老人没有理由信任它。
+     */
+    public List<MemoryStore.Memory> memories(String requestedUserId) {
+        return memories.list(resolveUserId(requestedUserId));
+    }
+
+    /** 忘掉一条。用户自己按的按钮，直接生效，不需要再确认一遍——「忘掉」本来就是他的意思。 */
+    public boolean forgetMemory(String requestedUserId, String key) {
+        return key != null && !key.isBlank() && memories.forget(resolveUserId(requestedUserId), key);
+    }
+
+    private String resolveUserId(String requested) {
+        return requested == null || requested.isBlank() ? defaultUserId : requested;
+    }
+
+    /**
+     * 结束一段对话，用于「新对话」。结束后这个会话只读：还能翻看，但不再接受
+     * 新的办理和确认（见 {@link #closedResponse}）。
+     *
+     * <p>幂等：对已经结束的会话再调一次不会报错，也不会改动任何东西。
+     */
+    public synchronized void closeConversation(String conversationId) {
+        ConversationState state = requireSession(conversationId);
+        if (closed(state)) return;
+        state.status = ConversationState.Status.CLOSED;
+        // 先把内存里的状态改掉再落库，这样紧跟其后的 /actions、/confirmations
+        // 即使命中了缓存的同一个对象，也一样会被拦下来。
+        conversations.close(state.id);
+    }
+
+    /**
+     * 一轮真实办理的开始与结束。进度打点必须包在最外层：识图会把结论交给 {@link #chatInternalBody}
+     * 继续走同一条主链路，无论中途从哪个分支返回，收尾都要执行一次，否则前端会一直以为「还在处理」。
+     */
     private AgentTurnResponse chatInternal(String conversationId, String message) {
         ConversationState state = requireSession(conversationId);
+        if (closed(state)) return closedResponse(state);
+        reactivateIfExpired(state);
+        turnProgress.begin(state.id);
+        try {
+            return chatInternalBody(state, conversationId, message);
+        } finally {
+            turnProgress.end(state.id);
+        }
+    }
+
+    private AgentTurnResponse chatInternalBody(ConversationState state, String conversationId, String message) {
         String value = message == null ? "" : message.trim();
         if (value.isEmpty()) return respond(state, "我没有听清，请再说一次。", List.of(q("重新说一遍", "ASK_HUMAN_INPUT", "")));
 
@@ -330,7 +421,15 @@ public class FollowupAgentService {
             }
         }
         AgentContext context = new AgentContext(state.stage.name(), knownFacts(state),
-                LocalDate.now(), conversations.recentMessages(state.id), identityOf(state));
+                LocalDate.now(), conversations.recentMessages(state.id), identityOf(state),
+                conversations.recentVision(state.id));
+        // 「把图上的字念一遍」不走模型：这种问题只要求逐字照抄，让语言模型过一手反而可能
+        // 把规格、文号、日期改写掉。识别结果本身就是权威的，直接念。
+        AgentTurnResponse readAloud = readVisionAloud(state, context, value);
+        if (readAloud != null) {
+            conversations.addMessage(state.id, "user", value);
+            return readAloud;
+        }
         AgentRuntime.Outcome outcome = agentRuntime.plan(value, context, state);
         ExtractedFacts facts = outcome.facts();
         conversations.addMessage(state.id, "user", value);
@@ -493,6 +592,151 @@ public class FollowupAgentService {
         return dispatchOutcome(state, value, outcome);
     }
 
+    /**
+     * 图片走对话：拍完照或选完图之后，走的是和文字<b>完全同一条</b>主链路。
+     *
+     * <p>识别结论作为本轮上下文交给同一个主模型，安全预检、规划、只读工具循环、
+     * 完成态装配全部照常 —— 图片只是换了一种「用户说了什么」的输入形式，
+     * 不新开一条绕过确认门禁的旁路。本方法不会触碰 confirmationId，也不会调用 act/confirm。
+     */
+    public synchronized AgentTurnResponse handleImages(String conversationId, List<String> imageDataUrls,
+                                                       String hint) {
+        try { return handleImagesInternal(conversationId, imageDataUrls, hint); }
+        catch (RuntimeException error) { return toolError(requireSession(conversationId), error); }
+    }
+
+    private AgentTurnResponse handleImagesInternal(String conversationId, List<String> imageDataUrls, String hint) {
+        ConversationState state = requireSession(conversationId);
+        // 结束检查要在存附件之前：往一个已经关掉的会话里写图片，等于给只读的东西留了写入路径。
+        if (closed(state)) return closedResponse(state);
+        reactivateIfExpired(state);
+        // 识图这一轮多数时间花在视觉模型上，而且「视觉关掉 / 看不清」会提前返回。
+        // 所以进度也要从这一层就开始记，否则老人传完图只会看到一片安静。
+        turnProgress.begin(state.id);
+        try {
+            return handleImagesBody(state, imageDataUrls, hint);
+        } finally {
+            turnProgress.end(state.id);
+        }
+    }
+
+    private AgentTurnResponse handleImagesBody(ConversationState state, List<String> imageDataUrls, String hint) {
+        String note = hint == null ? "" : hint.trim();
+        List<QuickReply> fallbackReplies = List.of(
+                q("继续办理复诊", "CONTINUE", ""), q("咨询人工", "CONTACT_HUMAN", ""));
+
+        List<String> images = sanitizeImages(imageDataUrls);
+        if (images.isEmpty()) {
+            return respond(state, "我没有收到图片，请重新拍一张或从相册里选一张。", fallbackReplies);
+        }
+        for (String image : images) {
+            if (image.length() > MAX_IMAGE_DATA_URL_CHARS) {
+                return respond(state, "这张图太大了，我没法处理。请重新拍一张，"
+                        + "或者把手机相机的分辨率调低一点再拍。", fallbackReplies);
+            }
+        }
+
+        // 先落库再识别：识别可能失败或超时，但「老人确实传过这张图」这件事必须留下痕迹。
+        List<Long> attachmentIds = new ArrayList<>(images.size());
+        for (String image : images) {
+            attachmentIds.add(conversations.addAttachment(state.id, null, "IMAGE", image));
+        }
+        conversations.addMessage(state.id, "user",
+                note.isEmpty() ? "[图片]" : "[图片] " + note, "IMAGE", attachmentIds.get(0));
+
+        // 没配视觉模型时第一步就返回。这是「没有百炼 key 也能把整个 Demo 走完」的关键分支：
+        // 必须在任何模型调用之前，否则老人要等一次注定失败的请求才知道看不了图。
+        if (!vlService.isEnabled()) {
+            // 这句话必须原样说出去：它是在教老人「换个办法」，绝不能被回答模型改写掉。
+            // 走 respondWithoutModel 还有个好处——主模型开着、只有视觉关掉时（配了别的厂商的 key），
+            // 也不必为一句固定说明白等一次模型调用。
+            return respondWithoutModel(state, "图片识别功能暂时没有开启，我还没法帮您看这张图。"
+                    + "您可以先用文字告诉我这是什么，或者继续办理复诊。", fallbackReplies);
+        }
+
+        List<VlService.VisionResult> results = vlService.recognizeAll(images, note);
+        StringBuilder description = new StringBuilder();
+        int recognized = 0;
+        for (int i = 0; i < results.size(); i++) {
+            VlService.VisionResult result = results.get(i);
+            if (result == null || result.isBlank()) continue;
+            recognized++;
+            conversations.saveVisionResult(attachmentIds.get(i), state.id, note,
+                    joinText(result.description(), result.keyFacts()), result.ocr());
+            if (description.length() > 0) description.append('\n');
+            description.append(nullToEmpty(result.description()));
+        }
+        traces.record(state.id, "vision.recognize",
+                Map.of("images", images.size(), "hint", note),
+                Map.of("recognized", recognized), recognized > 0);
+
+        if (recognized == 0) {
+            return respond(state, "这张图我看不太清楚，没法确认上面写的是什么。"
+                    + "麻烦靠近一点、对着光线再拍一张，或者直接用文字告诉我。", fallbackReplies);
+        }
+
+        // 视觉可用但主模型不可用：只如实复述识别结论，绝不代替模型编造解读。
+        if (!agentRuntime.modelAvailable()) {
+            return respondWithoutModel(state, description.toString().trim(), fallbackReplies);
+        }
+        // 交给同一个主模型。识别结论已经作为 vision 上下文挂在会话上，
+        // 所以这里只需要把「用户想问什么」递进去。
+        return chatInternal(state.id, note.isEmpty() ? DEFAULT_IMAGE_QUESTION : note);
+    }
+
+    /**
+     * 「把图上的字念一遍」不走模型：这种问题只要求逐字照抄，
+     * 让语言模型过一手反而可能把规格、批准文号、日期改写掉。识别结果本身就是权威的。
+     *
+     * <p>以「本会话有识图记录」为门，纯文字会话完全不受影响；
+     * 有待确认的重要操作时也不抢，先让老人把确认卡处理完。
+     */
+    private AgentTurnResponse readVisionAloud(ConversationState state, AgentContext context, String value) {
+        if (!context.hasVision() || value == null || value.isBlank()) return null;
+        if (state.confirmationId != null || stopped(state)) return null;
+        if (!containsAny(value, "念一遍", "念一下", "念给我听", "读一遍", "读一下",
+                "全部念", "都念出来", "原样念", "上面写了什么", "上面写的是什么", "批准文号")) {
+            return null;
+        }
+        String ocr = context.latestVisionOcr();
+        String text = ocr.isBlank() ? context.visionSummary() : ocr;
+        if (text.isBlank()) return null;
+        return respondWithoutModel(state, text,
+                List.of(q("继续办理复诊", "CONTINUE", ""), q("咨询人工", "CONTACT_HUMAN", "")));
+    }
+
+    /**
+     * 同一张图重复上传时只识别一次：指纹取逗号之后的 base64 正文，
+     * 前面的 {@code data:image/jpeg;base64,} 前缀不参与比较。
+     */
+    private List<String> sanitizeImages(List<String> imageDataUrls) {
+        if (imageDataUrls == null || imageDataUrls.isEmpty()) return List.of();
+        Set<String> seen = new LinkedHashSet<>();
+        List<String> images = new ArrayList<>();
+        for (String raw : imageDataUrls) {
+            if (raw == null || raw.isBlank()) continue;
+            String value = raw.trim();
+            int comma = value.indexOf(',');
+            String fingerprint = comma >= 0 ? value.substring(comma + 1) : value;
+            if (!seen.add(fingerprint)) continue;
+            images.add(value);
+            if (images.size() >= MAX_IMAGES_PER_TURN) break;
+        }
+        return images;
+    }
+
+    private static String joinText(String first, String second) {
+        String a = nullToEmpty(first);
+        String b = nullToEmpty(second);
+        if (a.isEmpty()) return b;
+        if (b.isEmpty() || b.equals(a)) return a;
+        return a + "\n" + b;
+    }
+
+    private static String nullToEmpty(String value) {
+        return value == null ? "" : value.trim();
+    }
+
     private AgentTurnResponse dispatchOutcome(ConversationState state, String value,
                                               AgentRuntime.Outcome outcome) {
         ExtractedFacts facts = outcome.facts();
@@ -571,6 +815,7 @@ public class FollowupAgentService {
                     respond(state, "这句话我还没听准。您是想记一条提醒、看看以前记过的数值，还是把它发给家里人？可以再说一遍。",
                             List.of(q("记一条提醒", "CONTINUE", ""), q("继续办理复诊", "CONTINUE", ""),
                                     q("咨询人工", "CONTACT_HUMAN", "")));
+            case QUERY_DRUG_KNOWLEDGE -> showDrugKnowledge(state, outcome);
             case QUERY_CARE_TIMELINE -> showCareTimeline(state);
             case QUERY_CARE_NOTIFICATIONS -> showCareNotifications(state);
             case REMIND_ELDER -> remindElder(state, value);
@@ -607,6 +852,9 @@ public class FollowupAgentService {
                 applyFacts(state, current.facts());
                 syncPresentationStage(state);
             }
+            // 参数是模型这一步真实生成的，先原样记下来再执行——
+            // 「参数由智能体生成」这件事只有在执行之前才看得见。
+            turnProgress.toolProposed(state.id, freshCalls);
             AgentRuntime.Outcome executable = withToolCalls(current, freshCalls);
             deferFinalization.set(true);
             try {
@@ -625,7 +873,9 @@ public class FollowupAgentService {
 
             String evidence = toolLoopEvidence(round, freshCalls, latestToolResponse);
             AgentContext nextContext = new AgentContext(state.stage.name(), knownFacts(state),
-                    LocalDate.now(), conversations.recentMessages(state.id), identityOf(state));
+                    LocalDate.now(), conversations.recentMessages(state.id), identityOf(state),
+                    conversations.recentVision(state.id));
+            turnProgress.mark(state.id, TurnProgress.Kind.PLANNING);
             current = agentRuntime.continueAfterTools(originalMessage, nextContext, state, evidence);
 
             SafetyGuard.Decision safety = current.modelDriven()
@@ -706,6 +956,7 @@ public class FollowupAgentService {
             case "material.checklist" -> AgentOrchestrator.Route.ASK_MATERIALS;
             case "travel.routePlan" -> AgentOrchestrator.Route.QUERY_TRAVEL_GUIDE;
             case "hospital.locationGuide" -> AgentOrchestrator.Route.QUERY_LOCATION_GUIDE;
+            case "drug.queryKnowledge" -> AgentOrchestrator.Route.QUERY_DRUG_KNOWLEDGE;
             default -> fallback;
         };
     }
@@ -933,6 +1184,8 @@ public class FollowupAgentService {
 
     private AgentTurnResponse actInternal(String conversationId, String action, String value, String label) {
         ConversationState state = requireSession(conversationId);
+        if (closed(state)) return closedResponse(state);
+        reactivateIfExpired(state);
         String safeValue = value == null ? "" : value.trim();
         String displayLabel = label == null || label.isBlank() ? (safeValue.isBlank() ? "继续办理" : safeValue) : label.trim();
         conversations.addMessage(state.id, "user", "[按钮] " + action + "：" + displayLabel);
@@ -1135,6 +1388,11 @@ public class FollowupAgentService {
 
     public synchronized AgentTurnResponse confirm(String conversationId, boolean approved, String confirmationId) {
         ConversationState state = requireSession(conversationId);
+        // 会话结束之后，之前发出去的确认卡一律失效：确认门禁靠 confirmationId 绑定「当时那份
+        // 操作快照」，而结束会话意味着那份快照不再作数。少了这一条，一个已经关掉的会话仍然能把
+        // 预约提交或取消写进库，「结束后只读」就成了空话——这是所有写入路径里最要紧的一道。
+        if (closed(state)) return closedResponse(state);
+        reactivateIfExpired(state);
         if (stopped(state)) return stoppedResponse(state);
         if (state.stage != ConversationState.Stage.AWAITING_CONFIRMATION || confirmationId == null
                 || !confirmationId.equals(state.confirmationId)) {
@@ -1206,6 +1464,7 @@ public class FollowupAgentService {
                         : appointmentTool.reschedule(state.id, state.originalAppointmentId, state.selectedSlot.id(), state.userId);
                 state.originalAppointmentId = null;
                 conversations.save(state, null);
+                rememberBookingPreferences(state);
             }
             LocalDateTime at = LocalDateTime.of(state.selectedSlot.date(), state.selectedSlot.time());
             if (!state.materialReminderDone) {
@@ -1417,6 +1676,37 @@ public class FollowupAgentService {
 
     private boolean stopped(ConversationState state) {
         return state.stage == ConversationState.Stage.CANCELLED || state.stage == ConversationState.Stage.EMERGENCY_PAUSED;
+    }
+
+    /** 用户主动结束过的会话。之后只读：还能翻看，但不再接受新的办理与确认。 */
+    private boolean closed(ConversationState state) {
+        return state.status == ConversationState.Status.CLOSED;
+    }
+
+    /**
+     * 已经结束的会话收到新指令时的回复。
+     *
+     * <p>这里给不出「新对话」按钮：新建会话必须换一个 conversationId，而按钮走的是
+     * 同一个会话的 /actions，前端只会把这条回复贴进旧会话。所以换新对话由前端直接调
+     * 建会话接口完成，这条回复只负责说清楚「为什么这里办不了了」。
+     *
+     * <p>刻意不落库：这是一句拒绝，不是一轮对话。落库的话，一个还开着确认卡的老页面
+     * 每重试一次就多一条一模一样的「已经结束」，老人回头翻这段历史，真正聊过的内容
+     * 反倒被一串复读淹掉。回复照常返回，界面上照常看得见。
+     */
+    private AgentTurnResponse closedResponse(ConversationState state) {
+        String reply = "这段对话已经结束了。之前聊过的都保存在历史记录里，"
+                + "随时可以翻看；要办新的事情，请点上面的「新对话」重新开始。";
+        return new AgentTurnResponse(state.id, state.stage.name(), reply, List.of(),
+                null, null, null, List.of(), null, reply, null);
+    }
+
+    /**
+     * 太久没说话只是显示口径，人回来了就接着办：不因为离开过一会儿就要求老人重说一遍。
+     * 真正的结束只有用户主动点「新对话」这一条路径。
+     */
+    private void reactivateIfExpired(ConversationState state) {
+        if (state.status == ConversationState.Status.EXPIRED) state.status = ConversationState.Status.ACTIVE;
     }
 
     private AgentTurnResponse stoppedResponse(ConversationState state) {
@@ -1913,6 +2203,51 @@ public class FollowupAgentService {
         return respondWithPlan(state, acknowledgement(facts,
                         "这是根据模拟数据库中的医院和科室规则生成的材料清单。"),
                 resumeReplies(state));
+    }
+
+    /**
+     * 药品知识查询。命中就照知识库的原文说，<b>没命中就如实说没查到</b>，
+     * 绝不凭模型记忆补一条出来 —— 药品名称、规格、用途写错比说「不知道」危险得多。
+     */
+    private AgentTurnResponse showDrugKnowledge(ConversationState state, AgentRuntime.Outcome outcome) {
+        String drugName = firstToolArgument(outcome, "drugName", "");
+        if (drugName.isBlank()) {
+            return respond(state, "您想查哪种药？把药盒上的名字说给我听，我帮您查它的用途和注意事项。",
+                    resumeReplies(state));
+        }
+        String specification = firstToolArgument(outcome, "specification", "");
+        List<DrugKnowledge> hits = callTool(state, "drug.queryKnowledge",
+                Map.of("drugName", drugName, "specification", specification),
+                () -> drugKnowledgeTool.search(state.id, drugName, specification));
+        if (hits.isEmpty()) {
+            return respond(state, "我在药品知识库里没有查到「" + drugName + "」这条。"
+                            + "您可以照着药盒把名字再说一遍，或者拿着药盒直接问药师、问开药的医生。",
+                    resumeReplies(state));
+        }
+        StringBuilder text = new StringBuilder();
+        for (DrugKnowledge drug : hits) {
+            if (text.length() > 0) text.append("\n\n");
+            text.append(drugKnowledgeText(drug));
+        }
+        return respond(state, text.toString(), resumeReplies(state));
+    }
+
+    private String drugKnowledgeText(DrugKnowledge drug) {
+        StringBuilder line = new StringBuilder("【" + drug.name() + "】");
+        if (drug.specification() != null && !drug.specification().isBlank()) {
+            line.append(" 规格 ").append(drug.specification());
+        }
+        if (drug.category() != null && !drug.category().isBlank()) {
+            line.append("（").append(drug.category()).append("）");
+        }
+        line.append('\n').append(drug.purpose());
+        if (drug.reminder() != null && !drug.reminder().isBlank()) {
+            line.append('\n').append("注意：").append(drug.reminder());
+        }
+        if (drug.followupTip() != null && !drug.followupTip().isBlank()) {
+            line.append('\n').append("复诊提示：").append(drug.followupTip());
+        }
+        return line.toString();
     }
 
     private AgentTurnResponse showCareGuide(ConversationState state, String query) {
@@ -4003,6 +4338,7 @@ public class FollowupAgentService {
 
     private AgentTurnResponse finish(ConversationState state, AgentTurnResponse response) {
         if (Boolean.TRUE.equals(deferFinalization.get())) return response;
+        turnProgress.mark(state.id, TurnProgress.Kind.ANSWERING);
         ReplyContext context = replyContextBuilder.build(state, response, knownFacts(state),
                 conversations.recentMessages(state.id));
         String reply = answerGenerator.generate(context);
@@ -4221,6 +4557,32 @@ public class FollowupAgentService {
                 state.relationLabel, state.actorRole);
     }
 
+    /** 记忆的 key。改这些名字等于让旧记忆失效，所以它们是对外可见的「事实名」。 */
+    private static final String MEMORY_HOSPITAL = "habit.hospital";
+    private static final String MEMORY_DEPARTMENT = "habit.department";
+    private static final String MEMORY_PERIOD = "habit.period";
+
+    /**
+     * 把这次办成的偏好记下来，下一段对话开始时就认得他。
+     *
+     * <p>只在确认门禁放行、预约真的写进库之后调用——记的是「实际发生的事」，
+     * 不是老人在某一轮随口提过的想法。模型不参与、前端也不能调，它只是已确认动作的副产品。
+     *
+     * <p>时段按号源的实际时间归纳成上午/下午。记「上午」而不是「9:30」：
+     * 号源是时刻，偏好是习惯，把时刻当成习惯下次会去推一个并不合适的具体时间。
+     */
+    private void rememberBookingPreferences(ConversationState state) {
+        Slot slot = state.selectedSlot;
+        if (slot == null) return;
+        memories.remember(state.userId, MEMORY_HOSPITAL, "HABIT",
+                "常去的医院是" + slot.hospitalName(), "CONFIRMED_BOOKING", state.id);
+        memories.remember(state.userId, MEMORY_DEPARTMENT, "HABIT",
+                "常去的科室是" + slot.department(), "CONFIRMED_BOOKING", state.id);
+        memories.remember(state.userId, MEMORY_PERIOD, "PREFERENCE",
+                "习惯" + (slot.time() != null && slot.time().getHour() < 12 ? "上午" : "下午") + "复诊",
+                "CONFIRMED_BOOKING", state.id);
+    }
+
     private String knownFacts(ConversationState state) {
         return "用户=" + state.userId +
                 (state.caregiving()
@@ -4252,7 +4614,21 @@ public class FollowupAgentService {
                 "；预约草稿缺失字段=" + draftMissingFields(state) +
                 "；时段偏好=" + valueOrPending(state.timePreference) +
                 "；数据库可用号源=" + state.alternatives.stream().map(this::slotLabel).toList() +
-                "；当前推荐号源=" + slotLabel(state.recommendedSlot);
+                "；当前推荐号源=" + slotLabel(state.recommendedSlot) +
+                memoryNote(state);
+    }
+
+    /**
+     * 长期记忆拼成的一小段。没有记忆时是空串——那时提示词与没有这个功能时逐字相同，
+     * 老会话和既有测试都不会因为多出一个空段而漂移。
+     *
+     * <p>措辞上明确它是「上次办过的事」，不是「这次已经定好的事」：模型看到这段只该少问一句，
+     * 不该替老人做主。真正写库仍然只能由确认门禁放行。
+     */
+    private String memoryNote(ConversationState state) {
+        String digest = memories.digest(state.userId);
+        return digest.isEmpty() ? ""
+                : "；这位老人以前办过的复诊情况（仅供参考，不要当成这次已经定好的安排，拿它少问一句就好）=" + digest;
     }
 
     /**

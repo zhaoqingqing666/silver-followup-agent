@@ -13,6 +13,24 @@ final class ConversationState {
     enum DialogueMode { GENERAL_CHAT, FOLLOWUP_FLOW, SUPPORT, SMALL_TALK }
     enum TaskStatus { NONE, ACTIVE, PAUSED, AWAITING_CONFIRMATION, COMPLETED, CANCELLED }
 
+    /**
+     * 会话本身的生命周期，与办理进度（{@link Stage}）正交：一段对话可以结束了
+     * 而办理结果仍然留在历史里。只有 CLOSED 会拦下后续操作，EXPIRED 只是显示口径。
+     */
+    enum Status {
+        /** 进行中 */
+        ACTIVE,
+        /** 用户主动点了「新对话」/「结束本次」——之后这个会话只读 */
+        CLOSED,
+        /** 太久没说话，历史里记为已结束；用户回来说话即恢复为进行中 */
+        EXPIRED;
+
+        /** 存储值可能是 NULL（改动之前的历史会话），一律按进行中处理。 */
+        static Status fromStored(String value) {
+            return value == null ? ACTIVE : valueOf(value);
+        }
+    }
+
     enum Stage {
         ASK_HOSPITAL, ASK_DEPARTMENT, ASK_DATE, ASK_ALTERNATIVE,
         ASK_COMPANION, ASK_TRAVEL, ASK_TRANSPORT, ASK_NOTIFY,
@@ -34,6 +52,8 @@ final class ConversationState {
     /** 操作者与就诊人的关系称呼（女儿 / 社区志愿者），只用于话术与确认卡复述。 */
     String relationLabel;
     Stage stage = Stage.ASK_HOSPITAL;
+    /** 会话生命周期状态。存在 conversation_sessions.status 列里，不进 state_json。 */
+    Status status = Status.ACTIVE;
     DialogueMode dialogueMode = DialogueMode.GENERAL_CHAT;
     TaskStatus taskStatus = TaskStatus.NONE;
     String hospitalId;

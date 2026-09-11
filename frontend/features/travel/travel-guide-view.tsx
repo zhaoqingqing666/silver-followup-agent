@@ -8,7 +8,7 @@ import {
 } from 'lucide-react';
 import { matchPageVoiceCommand } from '@/features/voice/voice-commands';
 import { getAppointments, getAppointmentTravelGuide } from '@/lib/appointment-api';
-import { speakText } from '@/lib/speech-service';
+import { speakText } from '@/lib/tts-player';
 import type { AppointmentTravelGuide, GeoPoint, TravelFocus, VoicePreference } from '@/types/domain';
 
 interface AMapInstance {
@@ -73,7 +73,8 @@ export function TravelGuideView({ appointmentId, initialTab = 'outside', forceSp
   useEffect(() => {
     if (!guide) return;
     if (!forceSpeak && !voicePreference?.autoSpeakEnabled) return;
-    speakText(travelNarration(guide), `travel-${guide.appointmentId}`, {
+    // 自动播报是单向的：每次触发换一个 key，否则设置变化重新触发时会变成「停」而不是重念。
+    void speakText(`travel-${guide.appointmentId}-${Date.now()}`, travelNarration(guide), {
       rate: voicePreference?.speechRate,
       volume: voicePreference?.speechVolume,
     });
@@ -81,7 +82,7 @@ export function TravelGuideView({ appointmentId, initialTab = 'outside', forceSp
 
   /** 朗读一次指定内容；用户明确要求时朗读，因此不检查“自动朗读”开关。 */
   const speak = useCallback((text: string) => {
-    speakText(text, `travel-${appointmentId || 'current'}`, {
+    void speakText(`travel-${appointmentId || 'current'}-${Date.now()}`, text, {
       rate: voicePreference?.speechRate,
       volume: voicePreference?.speechVolume,
     });

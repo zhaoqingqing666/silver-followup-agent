@@ -9,8 +9,11 @@ import org.springframework.stereotype.Component;
  */
 @Component
 public class AgentSystemPrompt {
+    /** 塞进提示词的 OCR 上限：够覆盖一张化验单，又不至于每轮都灌满上下文。 */
+    private static final int VISION_OCR_PROMPT_LIMIT = 1500;
+
     public String planning(AgentContext context, String toolsJson) {
-        return core() + roleSection(context) + """
+        return core() + roleSection(context) + visionSection(context) + """
 
                 【本轮运行信息】
                 当前日期：%s
@@ -40,6 +43,7 @@ public class AgentSystemPrompt {
                 EXPLAIN_PROCESS、HEALTH_CONCERN、CHANGE_HOSPITAL、CHANGE_DEPARTMENT、CHANGE_DATE、CHANGE_TIME、
                 QUERY_HOSPITALS、QUERY_HOSPITAL_INFO、QUERY_DEPARTMENTS、QUERY_AVAILABLE_SLOTS、QUERY_NEARBY_SLOTS、
                 CHECK_DUPLICATE、CHECK_CONFLICT、REQUEST_RECOMMENDATION、QUERY_APPOINTMENTS、ASK_MATERIALS、
+                QUERY_DRUG、
                 ASK_TRAVEL_ROUTE、ASK_LOCATION_GUIDE、CANCEL_TASK、CANCEL_APPOINTMENT、CONFIRM_ACTION、DENY_ACTION、
                 EMOTIONAL_SUPPORT、SMALL_TALK、MEDICAL_ADVICE、EMERGENCY、UNKNOWN。
 
@@ -50,6 +54,11 @@ public class AgentSystemPrompt {
                   或查、改、删已有的备忘（“我都有哪些备忘”“把吃药那条改到九点”）。
                 - SEND_HEALTH_REPORT：把一段时间的健康记录发给家属（“把这个月的血压发给女儿”）。
                 这三类由 Java 用固定解析器填槽和落库；你不要在 replyDraft 里假称已经记好或已经发出去了。
+
+                QUERY_DRUG：老人问某种药是什么、做什么用、要注意什么（“阿司匹林是干嘛的”“二甲双胍要注意什么”），
+                用 CALL_READ_TOOL 调 drug.queryKnowledge，drugName 填老人说的药名。这类问题的药名、规格、用途、
+                用药提醒必须全部来自工具返回，不得凭记忆编造；工具没查到就如实说知识库里没有这条，
+                并建议问药师或开药的医生，不要补充任何工具里没有的说明，也不要判断该不该吃、不要建议换药加量。
                 """.formatted(context.currentDate(), context.knownFacts(), context.stage(), toolsJson);
     }
 
@@ -85,6 +94,43 @@ public class AgentSystemPrompt {
                 这次代约完成后系统会自动通知其他照护者，确认卡里会写明归属。
                 陪诊、出行提醒和交通方式仍然照常问，那几项和代约本身一样是给这次复诊决定的。
                 """;
+    }
+
+    /**
+     * 识图片段：本会话最近识别过的图片。
+     *
+     * <p><b>没有识别记录时返回空串</b>，保证纯文字会话的提示词与加这个功能之前逐字相同 ——
+     * 既有的一批提示词断言都建立在这份文本上。
+     *
+     * <p>识别结论只是「本轮已知事实」，不是工具结果：它由视觉模型一次生成、不随轮次变化，
+     * 所以放在这里做 grounding，而不是塞进只读工具循环。
+     */
+    private String visionSection(AgentContext context) {
+        if (context == null || !context.hasVision()) return "";
+        String summary = context.visionSummary();
+        String ocr = context.latestVisionOcr();
+        if (summary.isBlank() && ocr.isBlank()) return "";
+        StringBuilder section = new StringBuilder("""
+
+                【本会话最近的图片识别结果】
+                这些是系统已经识别过的真实结果，不是用户新说的话。
+                """);
+        if (!summary.isBlank()) {
+            section.append("图片内容：").append(summary).append('\n');
+        }
+        if (!ocr.isBlank()) {
+            // 说明书 OCR 可能上千字，必须截断，否则每轮提示词都被它撑爆。
+            String text = ocr.length() > VISION_OCR_PROMPT_LIMIT
+                    ? ocr.substring(0, VISION_OCR_PROMPT_LIMIT) + "……（后略）" : ocr;
+            section.append("图片上的文字（逐字照抄）：\n").append(text).append('\n');
+        }
+        section.append("""
+                用户说“刚才那张图”“上面写了什么”“这个药”时，指的就是这些内容，不要让他重新上传。
+                图片上的名称、规格、数字、用法必须照抄上面的结果，不得凭记忆改写或补充。
+                上面没写的内容就如实说图片里没有，不要编造。
+                仍然只做识别和归类：不诊断疾病、不解读检查数值、不判断该不该吃、不建议换药加量。
+                """);
+        return section.toString();
     }
 
     private String blankTo(String value, String fallback) {

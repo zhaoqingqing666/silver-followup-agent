@@ -2,6 +2,28 @@
 
 进度文件记录“当前事实”，不写大段过程描述。功能完成后由负责人更新，并附对应 Pull Request 或提交。
 
+## 2026-09-11 会话生命周期、实时办理过程与长期记忆（未提交）
+
+- 分支 `zhaotingfang_model-tool-loop-v2`，接在上一段多模态移植之后，功能增量全部围绕「评审要看见真实过程」和「老人能自己收尾」两件事。
+- 会话生命周期：`conversation_sessions` 加一列 `status`（`ACTIVE`/`CLOSED`/`EXPIRED`）。`status` 是**列不是 `state_json` 字段**，所以旧会话快照照常反序列化；`ConversationStore.save()` 用的是显式列 `MERGE INTO ... KEY(id)`，加列不碰快照。`ConversationLifecycle` 只做标记不做清理，空闲超时把会话标成 `EXPIRED` 但不丢草稿——老人过一会儿再说话照常继续，待确认的卡也还在。
+- 历史记录：`GET /api/agent/conversations`（只带六个列表字段，不读 `state_json`）、`POST /api/agent/conversations/{id}/close`（204，幂等）、恢复会话多返回 `status`。已结束的会话能翻看但写入一律被拒，且**拒绝刻意不落库**——落库的话，一个还开着确认卡的老页面每重试一次就多一条一模一样的「已经结束」，真正聊过的内容反倒被复读淹掉。
+- 前端：历史记录浮层（相对时间、已结束徽标）、「新对话」按钮（先关旧的再建新的）、只读态横幅。刷新后用 `localStorage` 恢复上次会话，但刻意不恢复 `CLOSED` 的，不让人一进来就掉进一个打不了字的页面。
+- 实时办理过程：新增 `TurnProgress`（内存、按会话、有界 40 条 / 500 会话、5 分钟无事件即不算进行中）与只读端点 `GET /api/agent/conversations/{id}/progress?afterSeq=`。事件分「理解 / 决定查什么 / 模型提出工具调用 / 工具真实返回 / 整理回答」五种，`parameters` 是模型真实生成的那份。前端在「查看办理过程」卡片上轮询增量渲染，跳动的步骤条，结束后自动收起。
+- 脱敏在读取时做一次：图片 data URL 换「（图片内容已省略）」、手机号变 `138****1234`、`sk-` 串一律 `sk-***`、单字段截断 600 字。内存里保留原始值供排查，HTTP 出去的一律是脱敏后的。
+- 长期记忆：`user_memories` 表（主键 `(user_id, memory_key)`）+ `MemoryStore`。**写入口只有一处**——确认门禁放行、预约真的落库之后，记下常去的医院、科室、习惯时段。草稿阶段一个字都不记；模型和前端都够不着这个写入路径。同一个 key 只留最新一版（换医院就覆盖，不堆历史，否则两版偏好同时进提示词）。`digest()` 无记忆时返回空串，提示词与没有这个功能时逐字相同。`GET`/`DELETE /api/agent/memories`，「忘掉」是软删除。
+- 长期记忆前端露出：「我的」页新增「助手记住的事」，整段摆出来、逐条可忘。忘掉做成两问（「确定忘掉 / 再想想」）——不可逆的动作，老人手抖一下不该就没了。页面写明「助手只是拿它们少问您一句，真要办什么还是您点过确认才算数」。
+- 取消预约入口：事项页新增「取消这次复诊」按钮，但它**不调任何取消接口**，只是把「我想取消这次复诊预约」交给助手页发出，仍旧走查询 → 确认卡 → 确认端点。入口可以多，写路径只有一条。
+- 测试：后端 270 → **294 项**全部通过（新增会话生命周期与历史 7 项、长期记忆 7 项），前端 `tsc` 与生产构建成功，代码规范检查未引入新命中——改动过的文件逐条比对过 HEAD 的结果，**两个本次新增的文件单独补做**（首次比对漏了未跟踪文件，见 PITFALLS「无新增告警的比对漏掉了全新文件」）。`str(unknown)` 收敛了工具返回值里可能出现 `[object Object]` 的拼接；`camera-capture` 的开流逻辑改成链式回调，顺带补上「三路摄像头都打不开时放掉 ready」——原来那种情况快门按钮还是亮的。
+
+## 2026-09-11 移植余柔欣分支的多模态能力（未提交）
+
+- 分支 `zhaotingfang_model-tool-loop-v2`，取 `origin/yurouxin` 的能力模块接到我们的智能体结构上，**不动确认门禁**：她的 `confirmationId` 与 `ActionRequest.label` 被删过，`AgentController`、`agent-api.ts`、`FollowupAgentService`、`assistant-view.tsx` 一个都没对拷。
+- 后端：新增 `DashScopeHttp` 统一超时/退避重试/解析；`VlService`/`AsrService`/`TtsService` 与三个状态接口；`POST /api/agent/images` 走 `chatInternal`，图片落 `conversation_attachments`、结论落 `vision_results`；只读工具 `drug.queryKnowledge`（数据来自 `drug-knowledge.json`，16 条）与意图 `QUERY_DRUG`；`AgentContext` 加 `vision`（保留 4 参构造，无图时提示词逐字不变）。
+- 前端：`lib/asr-tts-api.ts` 串后端三模态；`lib/local-speech.ts` + `lib/tts-player.ts` 取代 `lib/speech-service.ts`（按 key 切换、本地优先云端降级）；`use-press-to-talk` + `level-meter` + 语音气泡（回放原话、上滑取消）；`camera-capture` + `image-compress`（canvas 双档压缩）接到助手页与材料清单。
+- 材料拍照确认：`photo_url` 是 `VARCHAR(500)`，装不下 base64，所以照片本体进附件表（`kind='MATERIAL_PHOTO'`，归属键 `appointment:<id>`），该列只写 `attachment:<id>`；`H2MaterialPreparationTool` 新增护栏（状态仅三种、`confirmSource` 归一 `USER`/`PHOTO`、非图片与超限照片拒绝）。
+- 材料照片回看：新增 `GET .../materials/{materialId}/photo`，清单里拍过照的行多一个「看照片」按钮。归属校验收在 `ConversationStore.findMaterialPhoto` 一处，`attachment:<id>` 引用每次读都要连带核对 `conversation_id` 与 `kind`——引用是客户端回传的，不核对就能指向别人的照片（`PATCH` 回传引用的那条路也按同一规则校验）。
+- 测试：后端 227 → **270 项**全部通过（新增药品工具 11、多模态落库 11、材料拍照与回看 12、识图解析与路由若干），前端 `tsc` 与生产构建成功。
+
 ## 2026-09-11 文档 v0.2 同步协作照护端（提交 b27cfe5 之后）
 
 - 功能已由 `feat: 照护端助手接入真实智能体，会话身份拆成能力轴与数据轴`（b27cfe5）落地，本次补齐文档侧。

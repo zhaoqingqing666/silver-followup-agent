@@ -1,20 +1,25 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { BellRing, CalendarPlus, ChevronRight, Clock3, History, LoaderCircle, MapPin, Navigation, RefreshCw, Route, UsersRound } from 'lucide-react';
+import { BellRing, CalendarPlus, CalendarX, ChevronRight, Clock3, History, LoaderCircle, MapPin, Navigation, RefreshCw, Route, UsersRound } from 'lucide-react';
 import { PageHeader } from '@/components/common/page-header';
 import { MaterialChecklist } from '@/features/materials/material-checklist';
 import { matchPageVoiceCommand } from '@/features/voice/voice-commands';
 import { getAppointments } from '@/lib/appointment-api';
-import { speakText } from '@/lib/speech-service';
+import { speakText } from '@/lib/tts-player';
 import type { AppointmentSummary, TabId, VoicePreference } from '@/types/domain';
 
-export function TasksView({ onNavigate, onOpenTravel, voicePreference, onRegisterVoice }: {
+export function TasksView({ onNavigate, onOpenTravel, voicePreference, onRegisterVoice, onAskAssistant }: {
   onNavigate: (tab: TabId) => void;
   onOpenTravel: (appointmentId?: string) => void;
   voicePreference?: VoicePreference;
   /** 注册本页的只读语音口令（返回、再念一遍）；返回 false 表示交给助手处理。 */
   onRegisterVoice?: (handler: ((text: string) => boolean) | null) => void;
+  /**
+   * 把一句话交给助手去办（切到助手页并替他发出去）。
+   * 本页不直接调取消接口：写操作必须经过确认门禁，这条规矩不能因为换了个入口就破例。
+   */
+  onAskAssistant?: (text: string) => void;
 }) {
   const [appointments, setAppointments] = useState<AppointmentSummary[]>([]);
   const [selectedId, setSelectedId] = useState('');
@@ -56,8 +61,10 @@ export function TasksView({ onNavigate, onOpenTravel, voicePreference, onRegiste
     if (command === 'BACK') { onNavigate('home'); return true; }
     if (command !== 'REPEAT') return false;
     const options = { rate: voicePreference?.speechRate, volume: voicePreference?.speechVolume };
-    if (!appointment) { speakText('现在还没有复诊事项可以念。', 'tasks-empty', options); return true; }
-    speakText(appointmentNarration(appointment, appointments), `appointment-${appointment.appointmentId}`, options);
+    // 「念一遍」是单向按钮：每次念都换一个 key，否则同一句话再点会变成「停」而不是重新念。
+    if (!appointment) { void speakText(`tasks-empty-${Date.now()}`, '现在还没有复诊事项可以念。', options); return true; }
+    void speakText(`appointment-${appointment.appointmentId}-${Date.now()}`,
+      appointmentNarration(appointment, appointments), options);
     return true;
   }, [appointment, appointments, onNavigate, voicePreference?.speechRate, voicePreference?.speechVolume]);
 
@@ -127,6 +134,16 @@ export function TasksView({ onNavigate, onOpenTravel, voicePreference, onRegiste
               <span className="flex items-center gap-3"><Route className="size-6" /><span><strong className="block text-lg">查看地图与院内指引</strong><span className="text-sm text-white/80">路线、楼层和诊室位置</span></span></span>
               <ChevronRight className="size-6" />
             </button>
+
+            {/* 取消不在这里直接调接口，而是交给助手走它那套确认流程：
+                先核对清楚，老人点过「确认」才会真的取消并释放号源。
+                一个按钮直接删数据，快是快，但老人按错一次就没有回头路了。 */}
+            {appointment.status === 'CONFIRMED' && onAskAssistant && (
+              <button onClick={() => onAskAssistant('我想取消这次复诊预约')}
+                className="mt-3 flex min-h-14 w-full items-center justify-center gap-3 rounded-2xl border-2 border-[#c2564a] bg-white text-lg font-bold text-[#a8402f]">
+                <CalendarX className="size-6" />取消这次复诊
+              </button>
+            )}
           </section>
 
           <MaterialChecklist appointmentId={appointment.appointmentId} disabled={appointment.status !== 'CONFIRMED'} />

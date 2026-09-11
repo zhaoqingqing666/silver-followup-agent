@@ -22,6 +22,15 @@ services:
       AGENT_MODEL_JSON_MODE_SUPPORTED: ${AGENT_MODEL_JSON_MODE_SUPPORTED:-true}
       AGENT_MODEL_CONNECT_TIMEOUT_MS: ${AGENT_MODEL_CONNECT_TIMEOUT_MS:-2500}
       AGENT_MODEL_READ_TIMEOUT_MS: ${AGENT_MODEL_READ_TIMEOUT_MS:-12000}
+      # 阿里云百炼：拍照识图 / 语音识别 / 语音合成；留空则三个能力显示未开启，
+      # 前端自动回落浏览器原生朗读与识别（只有拍照识图没有本地替代）
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      DASHSCOPE_BASE_URL: ${DASHSCOPE_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      DASHSCOPE_TTS_BASE_URL: ${DASHSCOPE_TTS_BASE_URL:-https://dashscope.aliyuncs.com}
+      DASHSCOPE_VL_MODEL: ${DASHSCOPE_VL_MODEL:-qwen3-vl-plus}
+      DASHSCOPE_ASR_MODEL: ${DASHSCOPE_ASR_MODEL:-qwen3-asr-flash}
+      DASHSCOPE_TTS_MODEL: ${DASHSCOPE_TTS_MODEL:-qwen3-tts-flash}
+      DASHSCOPE_TTS_VOICE: ${DASHSCOPE_TTS_VOICE:-Cherry}
       # CORS 白名单：允许浏览器里的前端页面跨域调用
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
     ports:

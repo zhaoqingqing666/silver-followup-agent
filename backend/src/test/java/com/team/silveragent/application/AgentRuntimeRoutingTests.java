@@ -125,6 +125,26 @@ class AgentRuntimeRoutingTests {
         assertThat(outcome.route()).isEqualTo(AgentOrchestrator.Route.DIRECT_ANSWER);
     }
 
+    /**
+     * 问药走真实知识库查询，不能由模型凭记忆回答——它的记忆里没有我们的药品库，
+     * 说出来的用法用量也没人核对过。这里断言它被接到 drug.queryKnowledge 上。
+     */
+    @Test
+    void drugQuestionIsRoutedToTheDrugKnowledgeTool() {
+        ConversationPlanner planner = mock(ConversationPlanner.class);
+        when(planner.mode()).thenReturn("MODEL_PLANNER_WITH_RULE_FALLBACK");
+        when(planner.plan(any(), any(), any())).thenReturn(new PlannerDecision(
+                PlannerActionType.CALL_READ_TOOL, "QUERY_DRUG", "drug.queryKnowledge",
+                Map.of("drugName", "阿司匹林"), null, "FOLLOWUP_FLOW",
+                facts("QUERY_DRUG"), "MODEL_PLANNER"));
+
+        AgentRuntime.Outcome outcome = runtime(planner).plan("阿司匹林是干嘛的", context(),
+                new ConversationState("conversation", "user-001"));
+
+        assertThat(outcome.route()).isEqualTo(AgentOrchestrator.Route.QUERY_DRUG_KNOWLEDGE);
+        assertThat(outcome.proposedTool()).isEqualTo("drug.queryKnowledge");
+    }
+
     private AgentRuntime runtime(ConversationPlanner planner) {
         return new AgentRuntime(planner, new ToolRegistry(), new ToolPolicy(),
                 new ActionValidator(), new AgentOrchestrator(emptyCatalog()), mock(RuleFactExtractor.class));

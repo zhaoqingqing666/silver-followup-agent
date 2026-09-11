@@ -17,7 +17,7 @@ flowchart LR
     ORC --> AG[Agent理解模块]
     ORC --> WF[工作流状态机]
     ORC --> CG[确认门禁]
-    WF --> TR[Tool Registry<br/>16 个只读工具]
+    WF --> TR[Tool Registry<br/>17 个只读工具]
     TR --> AP[预约工具]
     TR --> SC[日程工具]
     TR --> TV[出行工具]
@@ -35,7 +35,7 @@ flowchart LR
 
 会话身份由 `AgentRole`（`ELDER` / `FAMILY` / `VOLUNTEER`，`isCaregiver()` 即非 `ELDER`）表示，拆成两个轴：`userId` 是数据轴（这次会话服务谁），`actorId` 是能力轴（谁在操作），只用于关系校验与话术，不注入任何工具参数。身份固化在 `ConversationState` 里，因为确认接口只带 `conversationId`。
 
-当前代码中的实际对应关系是：`AgentSystemPrompt` 是唯一主提示词，`LlmConversationPlanner` 负责首轮理解、草稿补全、工具选择，并通过 `continueAfterTools` 阅读真实工具结果继续同一用户轮次。`AgentRuntime` 负责权限审核和续跑，`FollowupAgentService` 最多执行 3 轮只读工具循环、拦截重复调用，并复用已有无号、冲突、重复预约和模糊匹配处理。模型可用时不运行关键词快速路由，也不使用 Stage 二次覆盖模型结论；`ToolRegistry` 共注册 16 个只读工具：14 个两端通用，另 2 个仅家属/志愿者可见（`care.timeline`、`care.notifications`）。模型可见的工具由 `plannerTools(role)` 按角色过滤，但过滤不等于安全，`ToolPolicy` 在执行时再按角色与风险等级校验一次。写操作仍通过确认卡完成，`ModelGateway` 隔离具体模型厂商。
+当前代码中的实际对应关系是：`AgentSystemPrompt` 是唯一主提示词，`LlmConversationPlanner` 负责首轮理解、草稿补全、工具选择，并通过 `continueAfterTools` 阅读真实工具结果继续同一用户轮次。`AgentRuntime` 负责权限审核和续跑，`FollowupAgentService` 最多执行 3 轮只读工具循环、拦截重复调用，并复用已有无号、冲突、重复预约和模糊匹配处理。模型可用时不运行关键词快速路由，也不使用 Stage 二次覆盖模型结论；`ToolRegistry` 共注册 17 个只读工具：15 个两端通用，另 2 个仅家属/志愿者可见（`care.timeline`、`care.notifications`）。模型可见的工具由 `plannerTools(role)` 按角色过滤，但过滤不等于安全，`ToolPolicy` 在执行时再按角色与风险等级校验一次。写操作仍通过确认卡完成，`ModelGateway` 隔离具体模型厂商。
 
 对话状态与任务状态是两个维度：`DialogueMode` 表示本轮自由交流、支持性交流或流程办理，`TaskStatus` 表示是否存在未完成复诊任务。流程节点只决定恢复任务时从哪里继续，不能覆盖用户本轮真正的问题。地图模块同样保持工具化：`RouteGuideTool` 查询院外路线，`FacilityGuideTool` 查询院内位置，`TravelGuideService` 为事项页组合两类只读结果。
 
@@ -104,16 +104,31 @@ backend/src/main/java/com/team/silveragent/
 │  ├─ model/             模型网关接口
 │  └─ planning/          主提示词、规划器、决策与工具调用模型
 ├─ application/          FollowupAgentService、AgentOrchestrator、AgentRuntime、
-│                        ToolRegistry、ToolPolicy、会话/照护/健康/备忘服务
+│                        ToolRegistry、ToolPolicy、会话/照护/健康/备忘服务、
+│                        MemoryStore（跨对话长期记忆）、TurnProgress（一轮实时进度）、
+│                        ConversationLifecycle（会话状态标记）
 ├─ domain/
 │  ├─ model/             领域对象与 DTO
-│  └─ tool/              14 个领域工具接口（含 HealthRecordTool、MemoTool）
+│  └─ tool/              15 个领域工具接口（含 HealthRecordTool、MemoTool、DrugKnowledgeTool）
 ├─ infrastructure/
 │  ├─ mock/              模拟数据实现（含 MockHealthRecordTool、MockMemoTool）
 │  ├─ model/             模型网关实现
 │  └─ persistence/       持久化
 └─ config/
 ```
+
+### 状态存在哪儿（2026-09-11）
+
+每类状态各有一个该去的地方，不是随手挑的：
+
+| 状态 | 存在哪 | 为什么 |
+|---|---|---|
+| 会话办理到哪一步（草稿、确认卡） | `conversation_sessions.state_json` | 跨请求恢复，随会话走 |
+| 会话生命周期 `ACTIVE`/`CLOSED`/`EXPIRED` | 同表的 `status` **列** | 是列不是快照字段，加它不动 `state_json`，旧会话照常反序列化 |
+| 一轮的实时进度 | `TurnProgress`，纯内存 | 「此刻在做什么」重启后本来就无从谈起；落库反而把工具参数多留一份 |
+| 跨对话长期记忆 | `user_memories` 表 | 必须活过会话结束 |
+| 每次工具调用的事实记录 | `tool_call_logs` | 审计用，与实时进度互不替代 |
+| 图片与识别结论 | `conversation_attachments` / `vision_results` | base64 不能进提示词，也不能进 `VARCHAR(500)` 的 `photo_url` |
 
 ## 三、每层能做什么、不能做什么
 

@@ -33,14 +33,18 @@ export async function getVoicePreference(userId = DEMO_USER_ID): Promise<VoicePr
   return response.json();
 }
 
+/**
+ * 保存语音设置。三个字段都可选，未提供的后端保持原值——
+ * 所以「自动朗读」开关和朗读设置面板里的「语速」互不覆盖。
+ */
 export async function updateVoicePreference(
-  autoSpeakEnabled: boolean,
+  patch: { autoSpeakEnabled?: boolean; speechRate?: number; speechVolume?: number },
   userId = DEMO_USER_ID,
 ): Promise<VoicePreference> {
   const response = await fetch(`${API_BASE}/api/users/${userId}/preferences`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ autoSpeakEnabled }),
+    body: JSON.stringify(patch),
   });
   if (!response.ok) throw new Error('语音设置没有保存成功');
   return response.json();

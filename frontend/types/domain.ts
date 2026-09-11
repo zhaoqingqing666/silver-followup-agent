@@ -61,6 +61,15 @@ export interface ChatMessage {
   id: string;
   role: 'assistant' | 'user';
   text: string;
+  /** 这条消息随附的图片（data URL）。只在本次会话的内存里，刷新后不再有。 */
+  imageDataUrls?: string[];
+  /** 这条消息是按住说话发出来的 */
+  isVoice?: boolean;
+  /** MediaRecorder 录下的原话，点语音条回放；同样是内存态，刷新后失效 */
+  audioUrl?: string;
+  audioDuration?: number;
+  /** 语音消息的识别状态：识别中 / 已出文字 / 识别失败（录音仍可回放） */
+  voiceState?: 'transcribing' | 'done' | 'error';
 }
 
 export interface ToolTrace {
@@ -188,6 +197,8 @@ export interface AppointmentTravelGuide {
 
 export interface ConversationHistoryResponse {
   conversationId: string;
+  /** 会话生命周期状态。CLOSED 的会话只能翻看，不能再办事。 */
+  status: 'ACTIVE' | 'CLOSED' | 'EXPIRED';
   stage: string;
   messages: Array<{
     id: number;
