@@ -50,29 +50,56 @@ public class LlmConversationPlanner implements ConversationPlanner {
     public PlannerDecision plan(String message, AgentContext context, List<PlannerTool> allowedTools) {
         if (!gateway.available()) return fallback.plan(message, context, allowedTools);
         try {
-            List<ModelRequest.Message> messages = new ArrayList<>();
-            messages.add(new ModelRequest.Message("system",
-                    prompt.planning(context, json.writeValueAsString(allowedTools))));
-            for (AgentContext.Message item : context.recentMessages()) {
-                messages.add(new ModelRequest.Message(item.role(), item.content()));
-            }
-            messages.add(new ModelRequest.Message("user", message));
-            // max_tokens 同时包含思维链和正式输出。实测一句“说你好”就要 94 个思考 token，
-            // 业务轮的思考加十四字段 JSON 远超原来的 450，会截断成半截 JSON 再静默回退规则。
-            JsonNode root = json.readTree(jsonText(gateway.complete(new ModelRequest(messages, true, 3000, 0.10))));
-            PlannerActionType actionType = PlannerActionType.valueOf(text(root, "actionType", "PROPOSE_WORKFLOW_ACTION"));
-            String intent = text(root, "intent", "PROVIDE_INFORMATION");
-            JsonNode factsNode = root.path("facts");
-            Map<String, String> arguments = stringMap(root.path("arguments"));
-            List<PlannerToolCall> toolCalls = toolCalls(root, arguments);
-            ExtractedFacts facts = facts(factsNode.isObject() ? factsNode : root, intent, arguments);
-            return new PlannerDecision(actionType, intent, nullableText(root, "toolName"), arguments,
-                    nullableText(root, "replyDraft"), text(root, "dialogueMode", dialogueMode(intent)),
-                    facts, "MODEL_PLANNER", toolCalls);
+            return requestModel(message, context, allowedTools, "MODEL_PLANNER");
         } catch (Exception error) {
             log.warn("Conversation planner failed; using rule fallback: {}", error.toString());
             return fallback.plan(message, context, allowedTools);
         }
+    }
+
+    @Override
+    public PlannerDecision continueAfterTools(String originalMessage, AgentContext context,
+                                              List<PlannerTool> allowedTools, String toolResults) {
+        if (!gateway.available()) return fallback.plan(originalMessage, context, allowedTools);
+        String continuation = """
+                这是同一用户轮次内刚刚执行完成的真实只读工具结果：
+                %s
+
+                请继续完成用户原始请求：“%s”。
+                不要重复调用工具名和参数都相同的工具。你可以继续调用另一个必要的只读工具，
+                也可以依据结果直接回答或提出下一项待确认动作。回复只能使用工具返回的事实，
+                下一步只能从 allowedNextActions 中选择。
+                """.formatted(toolResults, originalMessage);
+        try {
+            return requestModel(continuation, context, allowedTools, "MODEL_TOOL_CONTINUATION");
+        } catch (Exception error) {
+            log.warn("Tool-result continuation failed; using authoritative tool result: {}", error.toString());
+            return new PlannerDecision(PlannerActionType.ANSWER, "UNKNOWN", null, Map.of(),
+                    null, "FOLLOWUP_FLOW", ExtractedFacts.empty(), "TOOL_RESULT_FALLBACK", List.of());
+        }
+    }
+
+    private PlannerDecision requestModel(String message, AgentContext context,
+                                         List<PlannerTool> allowedTools, String source) throws Exception {
+        List<ModelRequest.Message> messages = new ArrayList<>();
+        messages.add(new ModelRequest.Message("system",
+                prompt.planning(context, json.writeValueAsString(allowedTools))));
+        for (AgentContext.Message item : context.recentMessages()) {
+            messages.add(new ModelRequest.Message(item.role(), item.content()));
+        }
+        messages.add(new ModelRequest.Message("user", message));
+        // max_tokens 同时包含思维链和正式输出。业务轮的思考加结构化 JSON 需要足够空间，
+        // 否则会截断成半截 JSON 再静默回退规则。
+        JsonNode root = json.readTree(jsonText(gateway.complete(new ModelRequest(messages, true, 3000, 0.10))));
+        PlannerActionType actionType = PlannerActionType.valueOf(text(root, "actionType", "PROPOSE_WORKFLOW_ACTION"));
+        String intent = text(root, "intent", "PROVIDE_INFORMATION");
+        JsonNode factsNode = root.path("facts");
+        Map<String, String> arguments = stringMap(root.path("arguments"));
+        List<PlannerToolCall> toolCalls = toolCalls(root, arguments);
+        ExtractedFacts facts = facts(factsNode.isObject() ? factsNode : root, intent, arguments);
+        return new PlannerDecision(actionType, intent, nullableText(root, "toolName"), arguments,
+                nullableText(root, "replyDraft"), text(root, "dialogueMode", dialogueMode(intent)),
+                facts, source, toolCalls);
     }
 
     private List<PlannerToolCall> toolCalls(JsonNode root, Map<String, String> legacyArguments) {

@@ -50,6 +50,28 @@ final class AgentRuntime {
         return legacyProposal(message, context, state, null);
     }
 
+    Outcome continueAfterTools(String originalMessage, AgentContext context, ConversationState state,
+                               String toolResults) {
+        if (!modelAvailable()) {
+            return new Outcome(AgentOrchestrator.Route.CURRENT_FLOW, ExtractedFacts.empty(), null,
+                    "FOLLOWUP_FLOW", "TOOL_RESULT_FALLBACK", null, List.of(),
+                    PlannerActionType.ANSWER, "UNKNOWN", false);
+        }
+        PlannerDecision proposal = planner.continueAfterTools(
+                originalMessage, context, registry.plannerTools(), toolResults);
+        if (proposal.source().startsWith("MODEL")) return modelProposal(proposal, state);
+        return new Outcome(AgentOrchestrator.Route.CURRENT_FLOW, ExtractedFacts.empty(), null,
+                "FOLLOWUP_FLOW", proposal.source(), null, List.of(),
+                PlannerActionType.ANSWER, "UNKNOWN", false);
+    }
+
+    boolean isModelReadToolOutcome(Outcome outcome) {
+        return outcome != null && outcome.modelDriven()
+                && (outcome.actionType() == PlannerActionType.CALL_READ_TOOL
+                || outcome.actionType() == PlannerActionType.CALL_READ_TOOLS)
+                && outcome.proposedTools() != null && !outcome.proposedTools().isEmpty();
+    }
+
     private Outcome legacyProposal(String message, AgentContext context, ConversationState state,
                                    PlannerDecision existingProposal) {
         AgentOrchestrator.Route fastRoute = orchestrator.deterministicOverride(message);

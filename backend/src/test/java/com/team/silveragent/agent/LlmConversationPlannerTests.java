@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test;
 
 import java.time.LocalDate;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
@@ -88,6 +89,35 @@ class LlmConversationPlannerTests {
         assertThat(decision.facts().timePreference()).isEqualTo("MORNING");
         assertThat(decision.facts().familyContact()).isEqualTo("女儿小丽");
         assertThat(decision.facts().needCompanion()).isTrue();
+    }
+
+    @Test
+    void toolEvidenceIsReturnedToTheSamePlannerWithTheOriginalRequest() {
+        AtomicReference<ModelRequest> captured = new AtomicReference<>();
+        ModelGateway gateway = new ModelGateway() {
+            @Override public String complete(ModelRequest request) {
+                captured.set(request);
+                return """
+                        {"actionType":"ANSWER","intent":"QUERY_NEARBY_SLOTS","arguments":{},
+                         "replyDraft":"9月19日没有号，9月20日上午还有可选时间。",
+                         "dialogueMode":"FOLLOWUP_FLOW","facts":{}}
+                        """;
+            }
+            @Override public boolean available() { return true; }
+            @Override public String providerName() { return "test"; }
+            @Override public String modelName() { return "test"; }
+        };
+        RuleFactExtractor extractor = new RuleFactExtractor(mock(CareCatalogRepository.class));
+        LlmConversationPlanner planner = new LlmConversationPlanner(gateway, new ObjectMapper(),
+                new RuleConversationPlanner(extractor));
+
+        var decision = planner.continueAfterTools("帮我查9月19日的号", context(), List.of(),
+                "{\"status\":\"NO_SLOT\",\"allowedNextActions\":[\"CHANGE_DATE\"]}");
+
+        assertThat(decision.source()).isEqualTo("MODEL_TOOL_CONTINUATION");
+        assertThat(decision.replyDraft()).contains("9月19日没有号");
+        assertThat(captured.get().messages().get(captured.get().messages().size() - 1).content())
+                .contains("帮我查9月19日的号", "NO_SLOT", "allowedNextActions");
     }
 
     private LlmConversationPlanner planner(String response) {

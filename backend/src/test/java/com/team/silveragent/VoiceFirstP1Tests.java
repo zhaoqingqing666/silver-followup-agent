@@ -43,6 +43,46 @@ class VoiceFirstP1Tests {
             if (system.contains("工具结果后的回答阶段")) {
                 return "{\"reply\":\"我已经根据真实记录为您打开对应指引。\"}";
             }
+            if (latest.contains("同一用户轮次内刚刚执行完成的真实只读工具结果")) {
+                if (latest.contains("material.checklist")) {
+                    return """
+                            {"actionType":"ANSWER","intent":"EXPLAIN_PROCESS","toolName":null,
+                             "arguments":{},"replyDraft":"流程和材料我都查好了，以上内容来自真实模拟知识库。",
+                             "dialogueMode":"FOLLOWUP_FLOW","facts":{}}
+                            """;
+                }
+                if (latest.contains("careGuide.search")) {
+                    return """
+                            {"actionType":"CALL_READ_TOOL","intent":"ASK_MATERIALS",
+                             "toolName":"material.checklist","arguments":{},
+                             "replyDraft":null,"dialogueMode":"FOLLOWUP_FLOW","facts":{}}
+                            """;
+                }
+                if (latest.contains("NO_SLOT")) {
+                    return """
+                            {"actionType":"ANSWER","intent":"QUERY_NEARBY_SLOTS","toolName":null,
+                             "arguments":{},
+                             "replyDraft":"9月19日暂时没有号。我已经查看真实号源，附近日期还有可选时间，请从下面选择。",
+                             "dialogueMode":"FOLLOWUP_FLOW","facts":{}}
+                            """;
+                }
+            }
+            if (latest.contains("连续查流程和材料")) {
+                return """
+                        {"actionType":"CALL_READ_TOOL","intent":"EXPLAIN_PROCESS",
+                         "toolName":"careGuide.search","arguments":{"query":"复诊流程"},
+                         "replyDraft":null,"dialogueMode":"FOLLOWUP_FLOW","facts":{}}
+                        """;
+            }
+            if (latest.contains("2026年9月19日")) {
+                return """
+                        {"actionType":"CALL_READ_TOOL","intent":"QUERY_AVAILABLE_SLOTS",
+                         "toolName":"appointment.querySlots",
+                         "arguments":{"hospital":"市第一医院","department":"心内科","date":"2026-09-19"},
+                         "replyDraft":null,"dialogueMode":"FOLLOWUP_FLOW",
+                         "facts":{"date":"2026-09-19","acceptAlternative":true}}
+                        """;
+            }
             if (latest.contains("胸口疼")) {
                 return """
                         {"actionType":"ANSWER","intent":"EMERGENCY","toolName":null,"arguments":{},
@@ -175,5 +215,33 @@ class VoiceFirstP1Tests {
         assertThat(emergency.reply()).contains("120");
         assertThat(emergency.uiDirective()).isNull();
         assertThat(gateway.calls.get()).as("紧急语义应由主模型识别").isPositive();
+    }
+
+    @Test void noSlotToolResultReturnsToTheSameModelAndKeepsRealChoices() {
+        String id = service.start().conversationId();
+        action(id, "SET_HOSPITAL", "h001");
+        action(id, "SET_DEPARTMENT", "d001");
+        gateway.calls.set(0);
+
+        AgentTurnResponse result = service.chat(id, "帮我查2026年9月19日的号");
+
+        assertThat(gateway.calls.get()).as("一次规划加一次工具结果续跑").isEqualTo(2);
+        assertThat(result.stage()).isEqualTo("NO_SLOT");
+        assertThat(result.reply()).contains("9月19日暂时没有号", "真实号源", "附近日期");
+        assertThat(result.quickReplies()).anyMatch(item -> item.action().equals("SELECT_SLOT"));
+        assertThat(result.toolTraces()).anyMatch(item -> item.toolName().equals("appointment.querySlots"));
+        assertThat(result.toolTraces()).anyMatch(item -> item.toolName().equals("appointment.queryAlternatives"));
+    }
+
+    @Test void modelCanChainTwoReadToolsBeforeOneFinalAnswer() {
+        String id = service.start().conversationId();
+        gateway.calls.set(0);
+
+        AgentTurnResponse result = service.chat(id, "连续查流程和材料");
+
+        assertThat(gateway.calls.get()).as("规划、第二个工具、最终回答").isEqualTo(3);
+        assertThat(result.reply()).contains("流程和材料我都查好了", "真实模拟知识库");
+        assertThat(result.toolTraces()).anyMatch(item -> item.toolName().equals("careGuide.search"));
+        assertThat(result.toolTraces()).anyMatch(item -> item.toolName().equals("material.generateChecklist"));
     }
 }

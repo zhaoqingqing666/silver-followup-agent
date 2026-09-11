@@ -2,6 +2,13 @@
 
 任何前后端共享字段、接口路径、枚举或日期格式变化都记录在这里。
 
+## 2026-09-11 同轮只读工具续跑（内部接口）
+
+- `ConversationPlanner` 新增 `continueAfterTools(originalMessage, context, allowedTools, toolResults)`，用于把只读工具证据返回同一主模型继续决策。
+- `/api/agent/messages` 的外部请求与 `AgentTurnResponse` 结构不变，前端无需同步修改。
+- 查询轮次可能在一次 HTTP 请求内发生多次模型调用；上限为 3 轮工具续跑，并拦截同名同参重复调用。
+- 模型续写失败时返回现有 Java 业务处理产生的权威结果；确认与写操作接口没有变化。
+
 ## 2026-09-09 对话任务状态与地图指引
 
 - `AgentTurnResponse` 新增 `task`，包含 `active/status/currentStage/summary/missingField`；前端已同步。

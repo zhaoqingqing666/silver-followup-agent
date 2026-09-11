@@ -4,18 +4,19 @@
 
 ## 一轮处理
 
-系统不使用持续运行的死循环。用户每发送一次自由语言，就触发一轮：
+系统不使用无上限的持续循环。用户每发送一次自由语言，就触发一个有界轮次：
 
 1. 根据 conversationId 加载会话状态与最近消息（默认 16 条，可配置）；长期业务事实由 ConversationState 保存。
 2. 模型可用时，`ConversationPlanner` 使用 `AgentSystemPrompt` 统一理解普通交流、医疗边界、预约草稿、异常情况和页面目标；模型不可用时才启用规则回退。
 3. 主模型输出 `ANSWER`、`ASK_USER`、`CALL_READ_TOOL`、`CALL_READ_TOOLS` 或 `PROPOSE_WORKFLOW_ACTION`，并一次提取本轮提供的全部预约信息。
 4. `AgentRuntime` 直接采用成功的模型结论，不再叠加 Java 关键词快速路由，也不再让 `AgentOrchestrator` 按 Stage 覆盖模型意图。
 5. 模型选择的真实查询由 `ToolRegistry` 映射到医院、科室、号源、预约、材料、日程、路线等工具；工具结果写入 H2 和 TOOL_CALL_LOGS。
-6. 工具结果仍交给同一个主模型和同一份核心提示词组织回答；普通聊天只有一次模型调用，查询轮次通常是“规划一次＋结果回答一次”。
-7. `ConversationState` 作为结构化预约草稿保存事实；Stage 只兼容前端进度条。写操作继续使用确认卡和 confirmationId 执行，模型不能把一句文本当成数据库成功。
+6. 每批只读工具结果会作为结构化证据交回同一个 `ConversationPlanner`。模型可以直接回答，也可以根据结果再选下一项只读工具；相同工具与参数禁止重复，单个用户轮次最多继续 3 轮。
+7. 无号、冲突、重复预约、模糊名称等结果仍由现有 Java 异常处理生成合法候选项和 `allowedNextActions`，模型只在这些真实边界内解释和选择下一步。模型续写失败时直接返回权威工具结果，不重新执行查询。
+8. `ConversationState` 作为结构化预约草稿保存事实；Stage 只兼容前端进度条。写操作继续使用确认卡和 confirmationId 执行，模型不能把一句文本当成数据库成功。
 
 新会话先处于自由交流模式，不自动进入 `ASK_HOSPITAL` 的用户交互。只有用户明确提出预约复诊目标或点击开始按钮时，Java 才把 `taskStatus` 设为 `ACTIVE`。用户中途聊天时任务转为 `PAUSED`，原 `stage` 继续保存；任务卡负责提示仍有待办，回答不再强制追回当前缺失字段。取消未提交办理后状态为 `CANCELLED`，不影响数据库中已经确认的预约。
-8. 保存本轮状态与消息，等待下一次输入。
+9. 保存本轮状态与消息，等待下一次输入。
 
 自由文字和语音转文字走 POST /api/agent/messages：先规划和权限审核，再在业务处理后生成回答。明确按钮和确认按钮跳过规划节点，但可在执行后调用回答节点。模型不能改变 Java 已确定的状态、确认和工具结果。
 
@@ -49,11 +50,11 @@
 - ConversationState.java：当前流程字段。
 - ConversationStore.java：会话状态和对话持久化。
 - LlmConversationPlanner.java：通过可替换模型网关提出结构化动作、只读工具和自然回答。
-- AgentRuntime.java：协调一轮模型建议、权限审核和工作流路由。
+- AgentRuntime.java：协调首轮模型建议、工具结果续跑、权限审核和工作流路由。
 - ToolRegistry.java / ToolPolicy.java：只读工具白名单和风险策略。
 - CareGuideTool.java / H2CareGuideTool.java：查询复诊办理流程、到院步骤和咨询渠道，不提供医疗判断。
 - ActionValidator.java：阻止模型在直接回答中声称未执行的写操作。
-- LlmAnswerGenerator.java：根据权威业务上下文生成自然回复。
+- LlmAnswerGenerator.java：为无需继续规划的旧业务响应提供自然表达；模型工具循环由 `LlmConversationPlanner.continueAfterTools` 续跑。
 - SafetyGuard.java：模型模式执行主模型给出的医疗分类；关键词检查只用于模型不可用时的回退。
 - DialogueService.java：处理支持性交流和普通聊天，不执行有副作用的工具。
 - AgentOrchestrator.java：仅保留规则降级与兼容动作映射；模型成功时不参与自然语言二次裁决。

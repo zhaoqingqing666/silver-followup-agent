@@ -1,5 +1,6 @@
 package com.team.silveragent.application;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.team.silveragent.agent.AgentContext;
 import com.team.silveragent.agent.AnswerGenerator;
 import com.team.silveragent.agent.ExtractedFacts;
@@ -46,8 +47,12 @@ import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
@@ -55,6 +60,7 @@ import java.util.regex.Pattern;
 
 @Service
 public class FollowupAgentService {
+    private static final int MAX_MODEL_TOOL_ROUNDS = 3;
     private static final DateTimeFormatter DATE_LABEL = DateTimeFormatter.ofPattern("yyyy年M月d日");
     private static final DateTimeFormatter TIME_LABEL = DateTimeFormatter.ofPattern("HH:mm");
     private static final Pattern SPOKEN_DATE = Pattern.compile("(\\d{1,2})月(\\d{1,2})[日号]?");
@@ -88,8 +94,11 @@ public class FollowupAgentService {
     private final DialogueService dialogueService;
     private final ReplyContextBuilder replyContextBuilder;
     private final CatalogEntityResolver entityResolver;
+    private final ObjectMapper json;
     private final String defaultUserId;
     private final Map<String, ConversationState> sessions = new ConcurrentHashMap<>();
+    /** 工具循环中的中间响应不能写入对话，也不能提前再调用一次回答模型。 */
+    private final ThreadLocal<Boolean> deferFinalization = ThreadLocal.withInitial(() -> false);
 
     public FollowupAgentService(
             AppointmentTool appointmentTool,
@@ -115,6 +124,7 @@ public class FollowupAgentService {
             DialogueService dialogueService,
             ReplyContextBuilder replyContextBuilder,
             CatalogEntityResolver entityResolver,
+            ObjectMapper json,
             @Value("${demo.user-id:user-001}") String defaultUserId) {
         this.appointmentTool = appointmentTool;
         this.careGuideTool = careGuideTool;
@@ -139,6 +149,7 @@ public class FollowupAgentService {
         this.dialogueService = dialogueService;
         this.replyContextBuilder = replyContextBuilder;
         this.entityResolver = entityResolver;
+        this.json = json;
         this.defaultUserId = defaultUserId;
     }
 
@@ -306,6 +317,16 @@ public class FollowupAgentService {
                 state.taskStatus = ConversationState.TaskStatus.ACTIVE;
             }
         }
+        if (agentRuntime.isModelReadToolOutcome(outcome)) {
+            return runModelToolLoop(state, value, outcome);
+        }
+        return dispatchOutcome(state, value, outcome);
+    }
+
+    private AgentTurnResponse dispatchOutcome(ConversationState state, String value,
+                                              AgentRuntime.Outcome outcome) {
+        ExtractedFacts facts = outcome.facts();
+        AgentOrchestrator.Route route = outcome.route();
         return switch (route) {
             case DIRECT_ANSWER -> {
                 if (outcome.modelDriven() && hasTaskFacts(facts)
@@ -331,8 +352,8 @@ public class FollowupAgentService {
                 yield respond(state, reply.draft(), reply.quickReplies());
             }
             case KEEP_CONFLICT -> keepConflict(state);
-            case CONFIRM_PENDING -> confirm(conversationId, true, state.confirmationId);
-            case DENY_PENDING -> confirm(conversationId, false, state.confirmationId);
+            case CONFIRM_PENDING -> confirm(state.id, true, state.confirmationId);
+            case DENY_PENDING -> confirm(state.id, false, state.confirmationId);
             case CANCEL_CURRENT_TASK -> cancelTask(state);
             case CANCEL_EXISTING_APPOINTMENT -> beginCancelExistingAppointment(state, facts);
             case QUERY_MY_APPOINTMENTS -> queryMyAppointments(state, facts);
@@ -377,6 +398,163 @@ public class FollowupAgentService {
                     ? modelWorkflowReply(state, facts, outcome.replyDraft(), false)
                     : continueCurrentFlow(state, facts);
         };
+    }
+
+    /**
+     * 模型主导的有界只读工具循环。现有异常处理方法仍负责查询真实数据、更新权威草稿并
+     * 生成合法按钮；中间结果不会直接发给用户，而是作为结构化证据回到同一个主模型。
+     */
+    private AgentTurnResponse runModelToolLoop(ConversationState state, String originalMessage,
+                                               AgentRuntime.Outcome initial) {
+        AgentRuntime.Outcome current = initial;
+        AgentTurnResponse latestToolResponse = null;
+        Set<String> executed = new LinkedHashSet<>();
+
+        for (int round = 1; round <= MAX_MODEL_TOOL_ROUNDS; round++) {
+            if (!agentRuntime.isModelReadToolOutcome(current)) {
+                return finishToolLoopDecision(state, originalMessage, current, latestToolResponse);
+            }
+
+            List<PlannerToolCall> freshCalls = current.proposedTools().stream()
+                    .filter(call -> executed.add(toolSignature(call)))
+                    .toList();
+            if (freshCalls.isEmpty()) {
+                return finalizeToolEvidence(state, latestToolResponse,
+                        "我已经完成了这项查询。您可以根据上面的真实结果继续选择。");
+            }
+
+            if (hasTaskFacts(current.facts()) && taskInProgress(state)) {
+                applyFacts(state, current.facts());
+                syncPresentationStage(state);
+            }
+            AgentRuntime.Outcome executable = withToolCalls(current, freshCalls);
+            deferFinalization.set(true);
+            try {
+                latestToolResponse = dispatchOutcome(state, originalMessage, executable);
+            } finally {
+                deferFinalization.remove();
+            }
+
+            // 确认卡、完成卡和安全暂停都是业务终点，不能为了措辞再让模型改变动作。
+            if (latestToolResponse.confirmation() != null
+                    || state.stage == ConversationState.Stage.EMERGENCY_PAUSED
+                    || state.stage == ConversationState.Stage.COMPLETED
+                    || state.stage == ConversationState.Stage.PARTIAL) {
+                return finalizeToolEvidence(state, latestToolResponse, latestToolResponse.reply());
+            }
+
+            String evidence = toolLoopEvidence(round, freshCalls, latestToolResponse);
+            AgentContext nextContext = new AgentContext(state.stage.name(), knownFacts(state),
+                    LocalDate.now(), conversations.recentMessages(state.id));
+            current = agentRuntime.continueAfterTools(originalMessage, nextContext, state, evidence);
+
+            SafetyGuard.Decision safety = current.modelDriven()
+                    ? safetyGuard.evaluateModel(current.facts())
+                    : SafetyGuard.Decision.NONE;
+            if (safety == SafetyGuard.Decision.EMERGENCY) return emergency(state);
+            if (safety == SafetyGuard.Decision.MEDICAL_BOUNDARY) return medicalBoundary(state);
+            if (current.modelDriven()) prepareModelIntentState(state, current.intent());
+        }
+
+        return finalizeToolEvidence(state, latestToolResponse,
+                "我已经完成当前查询。为避免重复查询，请从现有结果中选择，或告诉我想修改哪项条件。");
+    }
+
+    private AgentTurnResponse finishToolLoopDecision(ConversationState state, String originalMessage,
+                                                     AgentRuntime.Outcome decision,
+                                                     AgentTurnResponse latestToolResponse) {
+        if (!decision.modelDriven() && latestToolResponse != null) {
+            // 工具已经返回真实结果，但模型续写超时或解析失败时，直接交付权威工具结果，
+            // 不再重新进入旧流程路由，避免丢失本轮查询结果或重复调用工具。
+            return finalizeToolEvidence(state, latestToolResponse, latestToolResponse.reply());
+        }
+        if (decision.route() == AgentOrchestrator.Route.CONFIRM_PENDING) {
+            // 工具结果不能替用户确认现实操作；确认只能由用户直接面对当前确认卡明确表达。
+            return finalizeToolEvidence(state, latestToolResponse,
+                    "查询已经完成。涉及预约、取消、提醒或通知的操作，还需要您查看确认内容后明确确认。");
+        }
+        if (decision.route() == AgentOrchestrator.Route.DIRECT_ANSWER
+                && decision.replyDraft() != null && !decision.replyDraft().isBlank()) {
+            if (hasTaskFacts(decision.facts()) && taskInProgress(state)) {
+                applyFacts(state, decision.facts());
+                syncPresentationStage(state);
+            }
+            return finalizeToolEvidence(state, latestToolResponse, decision.replyDraft());
+        }
+        return dispatchOutcome(state, originalMessage, decision);
+    }
+
+    private AgentTurnResponse finalizeToolEvidence(ConversationState state,
+                                                   AgentTurnResponse evidenceResponse,
+                                                   String reply) {
+        if (evidenceResponse == null) {
+            return respondWithoutModel(state, reply, modelSuggestedReplies(state));
+        }
+        String finalReply = reply == null || reply.isBlank() ? evidenceResponse.reply() : reply.trim();
+        AgentTurnResponse finalDraft = new AgentTurnResponse(state.id, state.stage.name(), finalReply,
+                evidenceResponse.quickReplies(), evidenceResponse.plan(), evidenceResponse.confirmation(),
+                evidenceResponse.result(), traces.findByConversation(state.id), null, finalReply,
+                evidenceResponse.uiDirective());
+        return finishWithoutModel(state, finalDraft);
+    }
+
+    private AgentRuntime.Outcome withToolCalls(AgentRuntime.Outcome outcome, List<PlannerToolCall> calls) {
+        AgentOrchestrator.Route route = calls.size() > 1
+                ? AgentOrchestrator.Route.MULTI_READ_TOOLS
+                : toolRoute(calls.get(0), outcome.route());
+        return new AgentRuntime.Outcome(route, outcome.facts(), outcome.replyDraft(),
+                outcome.dialogueMode(), outcome.plannerSource(),
+                calls.size() == 1 ? calls.get(0).toolName() : null, calls,
+                calls.size() == 1 ? com.team.silveragent.agent.planning.PlannerActionType.CALL_READ_TOOL
+                        : com.team.silveragent.agent.planning.PlannerActionType.CALL_READ_TOOLS,
+                outcome.intent(), outcome.modelDriven());
+    }
+
+    private AgentOrchestrator.Route toolRoute(PlannerToolCall call, AgentOrchestrator.Route fallback) {
+        return switch (call.toolName()) {
+            case "appointment.validateDraft" -> AgentOrchestrator.Route.VALIDATE_DRAFT;
+            case "hospital.search" -> AgentOrchestrator.Route.RESOLVE_HOSPITAL;
+            case "department.search" -> AgentOrchestrator.Route.RESOLVE_DEPARTMENT;
+            case "careGuide.search" -> AgentOrchestrator.Route.QUERY_CARE_GUIDE;
+            case "hospital.list" -> AgentOrchestrator.Route.QUERY_HOSPITALS;
+            case "department.list" -> AgentOrchestrator.Route.QUERY_DEPARTMENTS;
+            case "appointment.querySlots" -> AgentOrchestrator.Route.QUERY_AVAILABLE_SLOTS;
+            case "appointment.queryNearbySlots" -> AgentOrchestrator.Route.QUERY_NEARBY_SLOTS;
+            case "appointment.checkDuplicate" -> AgentOrchestrator.Route.CHECK_DUPLICATE;
+            case "schedule.checkConflict" -> AgentOrchestrator.Route.CHECK_CONFLICT;
+            case "appointment.queryMine" -> AgentOrchestrator.Route.QUERY_MY_APPOINTMENTS;
+            case "material.checklist" -> AgentOrchestrator.Route.ASK_MATERIALS;
+            case "travel.routePlan" -> AgentOrchestrator.Route.QUERY_TRAVEL_GUIDE;
+            case "hospital.locationGuide" -> AgentOrchestrator.Route.QUERY_LOCATION_GUIDE;
+            default -> fallback;
+        };
+    }
+
+    private String toolSignature(PlannerToolCall call) {
+        return call.toolName() + ":" + new TreeMap<>(call.arguments());
+    }
+
+    private String toolLoopEvidence(int round, List<PlannerToolCall> calls,
+                                    AgentTurnResponse response) {
+        Map<String, Object> value = new LinkedHashMap<>();
+        value.put("round", round);
+        value.put("status", response.stage());
+        value.put("executedTools", calls.stream().map(call -> Map.of(
+                "name", call.toolName(), "arguments", call.arguments())).toList());
+        value.put("authoritativeResult", response.reply());
+        value.put("allowedNextActions", response.quickReplies() == null ? List.of()
+                : response.quickReplies().stream().map(item -> Map.of(
+                "label", item.label(), "action", item.action(), "value", item.value())).toList());
+        value.put("appointmentDraft", knownFacts(requireSession(response.conversationId())));
+        List<AgentTurnResponse.ToolTrace> recent = response.toolTraces() == null ? List.of()
+                : response.toolTraces().stream()
+                .skip(Math.max(0, response.toolTraces().size() - 4L)).toList();
+        value.put("toolEvidence", recent);
+        try {
+            return json.writeValueAsString(value);
+        } catch (Exception error) {
+            return value.toString();
+        }
     }
 
     private void prepareModelIntentState(ConversationState state, String intent) {
@@ -2342,6 +2520,7 @@ public class FollowupAgentService {
     }
 
     private AgentTurnResponse finish(ConversationState state, AgentTurnResponse response) {
+        if (Boolean.TRUE.equals(deferFinalization.get())) return response;
         ReplyContext context = replyContextBuilder.build(state, response, knownFacts(state),
                 conversations.recentMessages(state.id));
         String reply = answerGenerator.generate(context);
@@ -2363,6 +2542,7 @@ public class FollowupAgentService {
     }
 
     private AgentTurnResponse finishWithoutModel(ConversationState state, AgentTurnResponse response) {
+        if (Boolean.TRUE.equals(deferFinalization.get())) return response;
         AgentTurnResponse finalized = new AgentTurnResponse(response.conversationId(), response.stage(), response.reply(),
                 response.quickReplies(), response.plan(), response.confirmation(), response.result(),
                 response.toolTraces(), taskProgress(state), authoritativeSpeech(response, response.reply()), response.uiDirective());

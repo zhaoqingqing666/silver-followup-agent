@@ -27,7 +27,7 @@ flowchart LR
 
 `FollowUpOrchestrator` 是协调者，不负责实现所有细节。它读取当前状态，调用恰当模块，再组合统一响应。
 
-当前代码中的实际对应关系是：`AgentSystemPrompt` 是唯一主提示词，`LlmConversationPlanner` 负责首轮理解、草稿补全和工具选择，`LlmAnswerGenerator` 使用同一核心提示词读取真实工具结果。模型可用时，`AgentRuntime` 不运行关键词快速路由，也不使用 Stage 二次覆盖模型结论；`ToolRegistry` 暴露办事知识、医院/科室检索、草稿检查、号源、附近号源、重复预约、日程、本人预约、材料和地图工具。`FollowupAgentService` 合并结构化预约草稿并执行真实工具，写操作仍通过确认卡完成。`ModelGateway` 隔离具体模型厂商。
+当前代码中的实际对应关系是：`AgentSystemPrompt` 是唯一主提示词，`LlmConversationPlanner` 负责首轮理解、草稿补全、工具选择，并通过 `continueAfterTools` 阅读真实工具结果继续同一用户轮次。`AgentRuntime` 负责权限审核和续跑，`FollowupAgentService` 最多执行 3 轮只读工具循环、拦截重复调用，并复用已有无号、冲突、重复预约和模糊匹配处理。模型可用时不运行关键词快速路由，也不使用 Stage 二次覆盖模型结论；`ToolRegistry` 暴露办事知识、医院/科室检索、草稿检查、号源、附近号源、重复预约、日程、本人预约、材料和地图工具。写操作仍通过确认卡完成，`ModelGateway` 隔离具体模型厂商。
 
 对话状态与任务状态是两个维度：`DialogueMode` 表示本轮自由交流、支持性交流或流程办理，`TaskStatus` 表示是否存在未完成复诊任务。流程节点只决定恢复任务时从哪里继续，不能覆盖用户本轮真正的问题。地图模块同样保持工具化：`RouteGuideTool` 查询院外路线，`FacilityGuideTool` 查询院内位置，`TravelGuideService` 为事项页组合两类只读结果。
 

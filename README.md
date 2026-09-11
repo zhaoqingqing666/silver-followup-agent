@@ -130,6 +130,6 @@ AGENT_MODEL_HISTORY_LIMIT=16
 
 ## Agent 的控制边界
 
-页面不直接调用大模型，大模型也不能直接提交预约。`LlmConversationPlanner` 可提出回答、一个或多个只读工具及工作流动作，`AgentRuntime`、`ToolRegistry`、`ToolPolicy` 和 `ActionValidator` 负责白名单、权限和回复边界；办事流程来自 `careGuide.search`，材料、路线、楼层和诊室来自数据库工具。普通聊天不再重复调用回答模型；预约、取消、创建提醒和通知家属仍全部经过 Java 明确确认。
+页面不直接调用大模型，大模型也不能直接提交预约。`LlmConversationPlanner` 可提出回答、一个或多个只读工具及工作流动作；工具的真实结构化结果会回到同一个规划器，模型可继续选择下一项只读工具或生成最终回答。单轮最多续跑 3 次，并拦截相同工具和参数的重复调用。`AgentRuntime`、`ToolRegistry`、`ToolPolicy` 和 `ActionValidator` 负责白名单、权限和回复边界；办事流程来自 `careGuide.search`，材料、路线、楼层和诊室来自数据库工具。普通聊天只调用一次模型；预约、取消、创建提醒和通知家属仍全部经过 Java 明确确认。
 
 下一步按 `docs/08-beginner-implementation-guide.md` 打通一条完整竖向链路，再扩展语音、图片材料检查等锦上添花功能。
