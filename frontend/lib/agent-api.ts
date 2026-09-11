@@ -1,4 +1,4 @@
-import type { AgentTurnResponse, ConversationHistoryResponse } from '@/types/domain';
+import type { AgentTurnResponse } from '@/types/domain';
 import { DEMO_USER_ID } from '@/lib/app-config';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:8080';
@@ -38,10 +38,4 @@ export function confirmAgentActions(conversationId: string, approved: boolean, c
     method: 'POST',
     body: JSON.stringify({ conversationId, approved, confirmationId }),
   });
-}
-
-export async function getConversationHistory(conversationId: string): Promise<ConversationHistoryResponse> {
-  const response = await fetch(API_BASE + '/api/agent/conversations/' + conversationId, { cache: 'no-store' });
-  if (!response.ok) throw new Error('无法恢复上次对话');
-  return response.json();
 }

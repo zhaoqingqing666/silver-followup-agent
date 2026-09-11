@@ -55,8 +55,6 @@ final class ConversationState {
     /** 用户是否已明确选择保留冲突时间。 */
     boolean conflictAcknowledged;
 
-    ConversationState(String id) { this(id, "user-001"); }
-
     ConversationState(String id, String userId) {
         this.id = id;
         this.userId = userId;

@@ -1,14 +1,5 @@
 export type TabId = 'home' | 'tasks' | 'assistant' | 'profile';
 
-export type PlanStepStatus = 'done' | 'active' | 'pending';
-
-export interface PlanStep {
-  id: string;
-  title: string;
-  detail: string;
-  status: PlanStepStatus;
-}
-
 export interface AppointmentSummary {
   appointmentId: string;
   date: string;
@@ -117,18 +108,6 @@ export interface AgentTurnResponse {
   result: AgentResultCard | null;
   toolTraces: ToolTrace[];
   notice: AgentNotice | null;
-}
-
-export interface ConversationHistoryResponse {
-  conversationId: string;
-  stage: string;
-  messages: Array<{
-    id: number;
-    role: 'assistant' | 'user';
-    content: string;
-    createdAt: string;
-  }>;
-  current: AgentTurnResponse;
 }
 
 export interface UserProfile {

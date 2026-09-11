@@ -282,7 +282,6 @@ public class FollowupAgentService {
             case "START_PLAN" -> { return ready(state) ? checkSchedule(state) : advance(state, ExtractedFacts.empty()); }
             case "RETRY_QUERY" -> { return querySlots(state); }
             case "SHOW_AVAILABLE_DATES" -> { return showAvailableSlots(state); }
-            case "NEW_BOOKING" -> { return restartInCurrentConversation(state); }
             case "SELECT_SLOT" -> { return selectSlot(state, safeValue); }
             case "KEEP_CONFLICT" -> {
                 state.scheduleChecked = true;

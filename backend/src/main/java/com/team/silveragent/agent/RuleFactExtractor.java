@@ -49,7 +49,6 @@ public class RuleFactExtractor implements FactExtractor {
         if (containsAny(value, "开始办理", "开始吧", "开始执行", "执行吧", "开始预约", "办理吧", "下一步")) return "START_EXECUTION";
         if (containsAny(value, "取消整个", "不办了", "停止办理", "不想预约了", "退出预约", "先不约了")) return "CANCEL_TASK";
         if (value.contains("取消") && containsAny(value, "预约", "复诊")) return "CANCEL_APPOINTMENT";
-        if (containsAny(value, "取消预约", "取消这次预约", "取消已经预约", "取消已预约")) return "CANCEL_APPOINTMENT";
         if (containsAny(value, "确认", "执行操作", "确定执行")) return "CONFIRM_ACTION";
         if (containsAny(value, "不执行", "暂不执行", "返回修改", "先别执行")) return "DENY_ACTION";
         if (containsAny(value, "我的预约", "我的复诊时间", "预约情况", "查预约", "查询预约", "已经约了")) return "QUERY_APPOINTMENTS";

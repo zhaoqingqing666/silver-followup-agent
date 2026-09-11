@@ -53,17 +53,6 @@ public class CareCatalogRepository {
                 split(rs.getString(7))), departmentName);
     }
 
-    public List<Department> searchDepartments(String keyword) {
-        if (keyword == null || keyword.isBlank()) return List.of();
-        String like = "%" + keyword.trim() + "%";
-        return jdbc.query("""
-                SELECT id,hospital_id,name,description,specialty_tags,followup_scope,location
-                FROM departments
-                WHERE enabled=TRUE AND (name LIKE ? OR specialty_tags LIKE ? OR followup_scope LIKE ?)
-                ORDER BY hospital_id,id
-                """, (rs, row) -> department(rs), like, like, like);
-    }
-
     public Optional<Department> department(String hospitalId, String idOrName) {
         if (hospitalId == null || idOrName == null || idOrName.isBlank()) return Optional.empty();
         return departments(hospitalId).stream()

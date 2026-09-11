@@ -80,9 +80,9 @@ quickReplies：[{"label":"心内科","action":"SET_DEPARTMENT","value":"d001"}]
 
 - catalog.queryHospitals：读取启用的医院、等级、地址、特色和适老服务。
 - catalog.queryDepartments：按 hospitalId 查询该医院的科室及复诊服务范围。
-- catalog.searchDepartments：按科室或特色关键词查询科室。
 - catalog.recommendHospitals：按明确的复诊科室筛选候选医院。
 - 以上均为后端内部模拟工具，执行参数和数据库结果记录在 tool_call_logs。
+- `catalog.searchDepartments`（按关键词查科室）在 2026-09-11 的清理中移除：它从未被任何流程调用，按科室选择走 `queryDepartments`，按科室筛医院走 `recommendHospitals`。
 
 ## 会话恢复与预约记录（2026-09-03）
 
