@@ -170,6 +170,20 @@ public class CareService {
         return events.size() > 50 ? events.subList(0, 50) : events;
     }
 
+    /**
+     * 照护关系本身：role 决定会话身份，relationship 只用于话术。
+     * 建立会话时用它做归属校验，并把关系称呼固定进会话；查不到就是没授权。
+     */
+    public java.util.Optional<CareRelation> relation(String caregiverId, String elderUserId) {
+        if (caregiverId == null || elderUserId == null) return java.util.Optional.empty();
+        return jdbc.query("""
+                SELECT cr.role, cr.relationship FROM care_relations cr
+                WHERE cr.caregiver_id = ? AND cr.elder_user_id = ?
+                ORDER BY cr.id LIMIT 1
+                """, (rs, row) -> new CareRelation(rs.getString(1), rs.getString(2)),
+                caregiverId, elderUserId).stream().findFirst();
+    }
+
     public boolean bound(String caregiverId, String elderUserId) {
         Integer count = jdbc.queryForObject("""
                 SELECT COUNT(*) FROM care_relations
@@ -223,6 +237,9 @@ public class CareService {
             "schedule.createReminder", new ToolLabel("success", "已创建复诊提醒"),
             "travel.plan", new ToolLabel("info", "已生成出行建议"),
             "workflow.error", new ToolLabel("danger", "办理遇到问题"));
+
+    /** 一条照护关系：role = FAMILY / VOLUNTEER，relationship = 女儿 / 社区志愿者 等称呼。 */
+    public record CareRelation(String role, String relationship) { }
 
     /** 照护总览里的一位长辈及其最近预约快照。 */
     public record ElderSummary(

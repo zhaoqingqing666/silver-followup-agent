@@ -2,6 +2,7 @@ package com.team.silveragent.application;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.team.silveragent.agent.AgentContext;
+import com.team.silveragent.agent.AgentRole;
 import com.team.silveragent.domain.model.AgentTurnResponse;
 import com.team.silveragent.domain.model.ConversationHistoryResponse;
 import com.team.silveragent.domain.model.ToolModels.Contact;
@@ -105,7 +106,8 @@ class ConversationStore {
     private record Snapshot(
             ConversationState.Stage stage, ConversationState.DialogueMode dialogueMode,
             ConversationState.TaskStatus taskStatus,
-            String userId, String hospitalId, String hospital,
+            String userId, String actorUserId, AgentRole actorRole, String relationLabel,
+            String hospitalId, String hospital,
             String departmentId, String department, LocalDate date,
             Boolean acceptAlternative, Boolean needCompanion, Boolean needTravel, Boolean notifyFamily,
             String transport, Slot selectedSlot, Slot recommendedSlot, String timePreference,
@@ -122,7 +124,8 @@ class ConversationStore {
     ) {
         static Snapshot from(ConversationState state) {
             return new Snapshot(state.stage, state.dialogueMode, state.taskStatus,
-                    state.userId, state.hospitalId, state.hospital,
+                    state.userId, state.actorUserId, state.actorRole, state.relationLabel,
+                    state.hospitalId, state.hospital,
                     state.departmentId, state.department, state.date,
                     state.acceptAlternative, state.needCompanion, state.needTravel, state.notifyFamily,
                     state.transport, state.selectedSlot, state.recommendedSlot, state.timePreference,
@@ -139,6 +142,11 @@ class ConversationStore {
 
         ConversationState toState(String id) {
             ConversationState state = new ConversationState(id, userId == null ? "user-001" : userId);
+            // 身份必须随会话恢复：确认卡是另一个请求打进来的，那时只剩 conversationId。
+            // 旧快照没有这几个字段，缺省即“本人自办”，与合并前的行为一致。
+            state.actorUserId = actorUserId == null || actorUserId.isBlank() ? state.userId : actorUserId;
+            state.actorRole = actorRole == null ? AgentRole.ELDER : actorRole;
+            state.relationLabel = relationLabel;
             state.stage = stage;
             state.dialogueMode = dialogueMode == null ? ConversationState.DialogueMode.GENERAL_CHAT : dialogueMode;
             state.taskStatus = taskStatus == null ? inferTaskStatus(stage) : taskStatus;

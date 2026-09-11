@@ -1,5 +1,6 @@
 package com.team.silveragent.application;
 
+import com.team.silveragent.agent.AgentRole;
 import com.team.silveragent.domain.model.ToolModels.Contact;
 import com.team.silveragent.domain.model.ToolModels.Slot;
 import com.team.silveragent.domain.model.ToolModels.TravelPlan;
@@ -21,7 +22,17 @@ final class ConversationState {
     }
 
     final String id;
+    /**
+     * 本次会话服务的就诊人（老人端=本人；家属/志愿者端=被协同的长辈）。
+     * 所有工具的 userId 都由它注入，界面上的预约、材料、路线也都属于这个人。
+     */
     String userId;
+    /** 谁在操作这个会话。老人端与 userId 相同；家属/志愿者端是那个照护者。 */
+    String actorUserId;
+    /** 操作者身份，由后端查 care_relations 判定；绝不来自模型或前端的角色字段。 */
+    AgentRole actorRole = AgentRole.ELDER;
+    /** 操作者与就诊人的关系称呼（女儿 / 社区志愿者），只用于话术与确认卡复述。 */
+    String relationLabel;
     Stage stage = Stage.ASK_HOSPITAL;
     DialogueMode dialogueMode = DialogueMode.GENERAL_CHAT;
     TaskStatus taskStatus = TaskStatus.NONE;
@@ -95,5 +106,20 @@ final class ConversationState {
     ConversationState(String id, String userId) {
         this.id = id;
         this.userId = userId;
+        this.actorUserId = userId;
+        this.actorRole = AgentRole.ELDER;
+    }
+
+    /** 家属/志愿者会话：userId 是就诊人，actorUserId 是操作者。 */
+    ConversationState(String id, String userId, String actorUserId, AgentRole actorRole, String relationLabel) {
+        this(id, userId);
+        if (actorUserId != null && !actorUserId.isBlank()) this.actorUserId = actorUserId;
+        if (actorRole != null) this.actorRole = actorRole;
+        this.relationLabel = relationLabel;
+    }
+
+    /** 是否为“代他人办理”的会话。 */
+    boolean caregiving() {
+        return actorRole != null && actorRole.isCaregiver() && !userId.equals(actorUserId);
     }
 }

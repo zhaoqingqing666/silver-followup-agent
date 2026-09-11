@@ -10,7 +10,7 @@ import org.springframework.stereotype.Component;
 @Component
 public class AgentSystemPrompt {
     public String planning(AgentContext context, String toolsJson) {
-        return core() + """
+        return core() + roleSection(context) + """
 
                 【本轮运行信息】
                 当前日期：%s
@@ -51,6 +51,44 @@ public class AgentSystemPrompt {
                 - SEND_HEALTH_REPORT：把一段时间的健康记录发给家属（“把这个月的血压发给女儿”）。
                 这三类由 Java 用固定解析器填槽和落库；你不要在 replyDraft 里假称已经记好或已经发出去了。
                 """.formatted(context.currentDate(), context.knownFacts(), context.stage(), toolsJson);
+    }
+
+    /**
+     * 身份片段：老人本人自办时不加任何东西，保持合并前的提示词逐字不变。
+     * 家属/志愿者代他人办理时，本节把“谁在操作、替谁办”讲清楚，避免把两个人的信息混在一起。
+     * 这些事实由 Java 从已验证的会话身份生成，不是模型自己推断出来的。
+     */
+    private String roleSection(AgentContext context) {
+        AgentContext.Identity identity = context == null ? null : context.identity();
+        if (identity == null || !identity.isCaregiver()) return "";
+        String actor = blankTo(identity.actorName(), "这位照护者");
+        String subject = blankTo(identity.subjectName(), "这位长辈");
+        String relation = blankTo(identity.relationLabel(), "照护者");
+        return """
+
+                【本轮身份：代他人办理】
+                %s 正在为 %s 办理复诊事务，二人的关系是%s。
+                对话里的“我、我们”指%s；“长辈、老人、他、她、我妈”这类说法指%s。
+                所有查询、预约和材料都以%s为准：说“他的预约”指的是%s名下的预约。
+                绝对不要把%s的个人信息、联系方式或健康记录当成%s的，反之也一样。
+                提出任何会改变数据的操作前，必须先把对象复述清楚，例如“您将为%s预约……”。
+                只展示完成这次协助所必需的信息；与本次协助无关的健康记录、家庭联系方式不主动展开。
+
+                【本身份额外可用的意图】
+                REMIND_ELDER：操作者想给%s留一条提醒，例如“提醒我妈明天带身份证”“跟我爸说一声别忘了带医保卡”。
+                命中时用这个 intent，不要用 MANAGE_MEMO——MANAGE_MEMO 是本人给自己记账本，
+                而这条要写进%s的备忘里，并标明是操作者留的。
+                """.formatted(actor, subject, relation, actor, subject, subject, subject, actor, subject, subject,
+                subject, subject) + """
+                【本身份不必问的这一步】
+                预约流程里不要问“需要通知哪位家属”：操作者本人就是被通知的那一方，
+                这次代约完成后系统会自动通知其他照护者，确认卡里会写明归属。
+                陪诊、出行提醒和交通方式仍然照常问，那几项和代约本身一样是给这次复诊决定的。
+                """;
+    }
+
+    private String blankTo(String value, String fallback) {
+        return value == null || value.isBlank() ? fallback : value;
     }
 
     public String toolResultAnswer() {

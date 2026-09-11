@@ -138,3 +138,12 @@
 - 新增后端内部工具 appointment.queryMine，可按 userId、date、hospital、department 查询已确认预约。
 - AgentTurnResponse 未新增或删除字段；查询到单条预约时复用 result 卡，多条时返回摘要和预约ID绑定的快捷操作。
 - 兼容性：仅增加动作与意图，原前端字段结构不变。
+
+## 2026-09-11 照护端助手会话身份与角色限定工具
+
+- `POST /api/agent/conversations` 新增可选参数 `actorId`：不传即本人自办（老人端行为不变），传入则按 `care_relations` 校验操作者与就诊人的绑定关系，未绑定一律 400「没有权限查看这位就诊人的信息」。
+- `userId` 语义明确为「本次会话服务的就诊人」；`actorId` 只用于关系校验与话术，不会被注入任何工具参数。
+- 工具目录新增两个只读工具，仅家属/志愿者可见：`care.timeline`、`care.notifications`。
+- 自由语言意图新增 `REMIND_ELDER`（给长辈留提醒，区别于本人记账的 `MANAGE_MEMO`）。
+- 结构化动作新增 `QUERY_CARE_TIMELINE`、`QUERY_CARE_NOTIFICATIONS`；代约确认后返回 `result` 卡（归属与陪同人取自代约记录）。
+- 兼容性：未传 `actorId` 的旧请求字段与行为完全不变。

@@ -42,7 +42,7 @@ final class AgentRuntime {
 
     Outcome plan(String message, AgentContext context, ConversationState state) {
         if (modelAvailable()) {
-            PlannerDecision proposal = planner.plan(message, context, registry.plannerTools());
+            PlannerDecision proposal = planner.plan(message, context, registry.plannerTools(state.actorRole));
             if (proposal.source().startsWith("MODEL")) return modelProposal(proposal, state);
             // 模型本轮失败时才退回旧规则路径；不能把旧关键词规则叠加在成功的模型结论之上。
             return legacyProposal(message, context, state, proposal);
@@ -58,7 +58,7 @@ final class AgentRuntime {
                     PlannerActionType.ANSWER, "UNKNOWN", false);
         }
         PlannerDecision proposal = planner.continueAfterTools(
-                originalMessage, context, registry.plannerTools(), toolResults);
+                originalMessage, context, registry.plannerTools(state.actorRole), toolResults);
         if (proposal.source().startsWith("MODEL")) return modelProposal(proposal, state);
         return new Outcome(AgentOrchestrator.Route.CURRENT_FLOW, ExtractedFacts.empty(), null,
                 "FOLLOWUP_FLOW", proposal.source(), null, List.of(),
@@ -103,7 +103,7 @@ final class AgentRuntime {
                     pageFacts.intent(), false);
         }
         PlannerDecision proposal = existingProposal == null
-                ? planner.plan(message, context, registry.plannerTools()) : existingProposal;
+                ? planner.plan(message, context, registry.plannerTools(state.actorRole)) : existingProposal;
         ExtractedFacts facts = proposal.facts();
 
         AgentOrchestrator.Route deterministic = orchestrator.deterministicOverride(message);
@@ -120,7 +120,7 @@ final class AgentRuntime {
             List<PlannerToolCall> approved = new ArrayList<>();
             for (PlannerToolCall call : proposal.toolCalls()) {
                 ToolRegistry.RegisteredTool tool = registry.find(call.toolName()).orElse(null);
-                if (toolPolicy.evaluate(proposal, tool) != ToolPolicy.Decision.ALLOW) {
+                if (toolPolicy.evaluate(state.actorRole, tool) != ToolPolicy.Decision.ALLOW) {
                     return workflow(message, proposal, state);
                 }
                 approved.add(call);
@@ -171,7 +171,7 @@ final class AgentRuntime {
             List<PlannerToolCall> approved = new ArrayList<>();
             for (PlannerToolCall call : proposal.toolCalls()) {
                 ToolRegistry.RegisteredTool tool = registry.find(call.toolName()).orElse(null);
-                if (toolPolicy.evaluate(proposal, tool) == ToolPolicy.Decision.ALLOW) approved.add(call);
+                if (toolPolicy.evaluate(state.actorRole, tool) == ToolPolicy.Decision.ALLOW) approved.add(call);
             }
             if (approved.size() == 1) {
                 ToolRegistry.RegisteredTool tool = registry.find(approved.get(0).toolName()).orElseThrow();
@@ -226,6 +226,8 @@ final class AgentRuntime {
             case "MANAGE_MEMO" -> AgentOrchestrator.Route.MANAGE_MEMO;
             case "RECORD_HEALTH_VALUE" -> AgentOrchestrator.Route.RECORD_HEALTH_VALUE;
             case "SEND_HEALTH_REPORT" -> AgentOrchestrator.Route.SEND_HEALTH_REPORT;
+            // 代他人办理时给长辈留提醒，和老人“记一条提醒”是两件事：主语和落点都不同。
+            case "REMIND_ELDER" -> AgentOrchestrator.Route.REMIND_ELDER;
             default -> null;
         };
     }

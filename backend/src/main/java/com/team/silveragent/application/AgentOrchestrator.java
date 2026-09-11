@@ -40,6 +40,11 @@ final class AgentOrchestrator {
         // 健康备忘与健康数值不属于复诊预约流程：写操作仍由 Java 的解析器填槽、
         // 仍走各自的门禁（备忘先确认、数值异常先反问），这里只负责把它们从模型那边接过来。
         MANAGE_MEMO, RECORD_HEALTH_VALUE, SEND_HEALTH_REPORT,
+        // 协同照护端（家属/志愿者）专用只读查询：老人本人没有这两个入口，
+        // 工具可见性由 ToolRegistry 按角色限定，这里只负责把模型选中的工具接到执行。
+        QUERY_CARE_TIMELINE, QUERY_CARE_NOTIFICATIONS,
+        // 家属/志愿者给长辈留一条提醒：落到长辈自己的备忘里，反向通知。
+        REMIND_ELDER,
         CURRENT_FLOW
     }
 

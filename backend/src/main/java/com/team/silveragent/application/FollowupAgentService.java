@@ -2,6 +2,7 @@ package com.team.silveragent.application;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.team.silveragent.agent.AgentContext;
+import com.team.silveragent.agent.AgentRole;
 import com.team.silveragent.agent.AnswerGenerator;
 import com.team.silveragent.agent.ExtractedFacts;
 import com.team.silveragent.agent.ReplyContext;
@@ -127,6 +128,7 @@ public class FollowupAgentService {
     private final CatalogEntityResolver entityResolver;
     private final ObjectMapper json;
     private final CareBookingService careBooking;
+    private final CareService careService;
     private final HealthReportService healthReportService;
     private final String defaultUserId;
     private final Map<String, ConversationState> sessions = new ConcurrentHashMap<>();
@@ -161,6 +163,7 @@ public class FollowupAgentService {
             CatalogEntityResolver entityResolver,
             ObjectMapper json,
             CareBookingService careBooking,
+            CareService careService,
             HealthReportService healthReportService,
             @Value("${demo.user-id:user-001}") String defaultUserId) {
         this.appointmentTool = appointmentTool;
@@ -190,6 +193,7 @@ public class FollowupAgentService {
         this.entityResolver = entityResolver;
         this.json = json;
         this.careBooking = careBooking;
+        this.careService = careService;
         this.healthReportService = healthReportService;
         this.defaultUserId = defaultUserId;
     }
@@ -199,11 +203,45 @@ public class FollowupAgentService {
     }
 
     public synchronized AgentTurnResponse start(String requestedUserId) {
+        return start(requestedUserId, null);
+    }
+
+    /**
+     * 建立一次会话。
+     *
+     * @param requestedUserId 本次要服务的<b>就诊人</b>：本人自办时就是说话的人，家属/志愿者办理时是被协同的长辈。
+     * @param actorId         真正在操作的人；为空表示本人自办。
+     *                        <p>两者不同时必须能在 care_relations 里查到关系，否则拒绝建会话。
+     *                        身份一律由后端按关系表判定，前端传来的角色字段不作数。
+     */
+    public synchronized AgentTurnResponse start(String requestedUserId, String actorId) {
         String userId = requestedUserId == null || requestedUserId.isBlank() ? defaultUserId : requestedUserId;
         CareCatalogRepository.UserProfile user = catalog.user(userId)
                 .orElseThrow(() -> new IllegalArgumentException("没有找到当前用户，请检查模拟用户数据"));
         String id = UUID.randomUUID().toString();
         ConversationState state = new ConversationState(id, user.id());
+
+        String actor = actorId == null || actorId.isBlank() ? user.id() : actorId.trim();
+        if (!actor.equals(user.id())) {
+            // 代他人办理：这是唯一一处把“别人”的身份带进会话的地方，所以校验必须在这里做死。
+            // 不查关系就建会话，等于把任意长辈的预约、材料和动态开放给任何知道 id 的人。
+            CareService.CareRelation relation = careService.relation(actor, user.id())
+                    .orElseThrow(() -> new IllegalArgumentException("没有权限查看这位就诊人的信息"));
+            AgentRole role = AgentRole.fromRelationRole(relation.role());
+            if (role == null || !role.isCaregiver()) {
+                throw new IllegalArgumentException("没有权限查看这位就诊人的信息");
+            }
+            CareCatalogRepository.UserProfile actorUser = catalog.user(actor)
+                    .orElseThrow(() -> new IllegalArgumentException("没有找到当前操作者账号"));
+            state.actorUserId = actor;
+            state.actorRole = role;
+            state.relationLabel = relation.relationship() == null || relation.relationship().isBlank()
+                    ? (role == AgentRole.VOLUNTEER ? "社区志愿者" : "家属")
+                    : relation.relationship();
+            sessions.put(id, state);
+            return caregiverGreeting(state, actorUser.name(), user.name());
+        }
+
         sessions.put(id, state);
         // 开场主动告知：若家属/志愿者已帮老人约好复诊，先把计划亮出来，供老人随时查看/改期/取消/求助
         AppointmentRecordStore.AppointmentView arranged = upcomingArranged(state).orElse(null);
@@ -292,7 +330,7 @@ public class FollowupAgentService {
             }
         }
         AgentContext context = new AgentContext(state.stage.name(), knownFacts(state),
-                LocalDate.now(), conversations.recentMessages(state.id));
+                LocalDate.now(), conversations.recentMessages(state.id), identityOf(state));
         AgentRuntime.Outcome outcome = agentRuntime.plan(value, context, state);
         ExtractedFacts facts = outcome.facts();
         conversations.addMessage(state.id, "user", value);
@@ -305,6 +343,11 @@ public class FollowupAgentService {
         if (!agentRuntime.modelAvailable()) {
             if ("EMERGENCY".equals(facts.intent()) || containsAny(value, "胸痛", "呼吸困难", "昏迷", "大出血", "喘不上气")) {
                 return emergency(state);
+            }
+            // 代他人办理时“提醒长辈”是独立的一件事，要排在老人那套备忘识别之前，
+            // 否则“提醒我妈带身份证”会被当成操作者自己要记一条备忘，写到他自己名下。
+            if (state.caregiving() && value.contains("提醒")) {
+                return remindElder(state, value);
             }
             // 助手侧管理已有备忘（查/改/删）：先于“新记一条”判断，“我有哪些备忘”不能被当成新托付
             if (memoContext(state)) {
@@ -528,6 +571,9 @@ public class FollowupAgentService {
                     respond(state, "这句话我还没听准。您是想记一条提醒、看看以前记过的数值，还是把它发给家里人？可以再说一遍。",
                             List.of(q("记一条提醒", "CONTINUE", ""), q("继续办理复诊", "CONTINUE", ""),
                                     q("咨询人工", "CONTACT_HUMAN", "")));
+            case QUERY_CARE_TIMELINE -> showCareTimeline(state);
+            case QUERY_CARE_NOTIFICATIONS -> showCareNotifications(state);
+            case REMIND_ELDER -> remindElder(state, value);
             case CURRENT_FLOW -> outcome.modelDriven()
                     ? modelWorkflowReply(state, facts, outcome.replyDraft(), false)
                     : continueCurrentFlow(state, facts);
@@ -579,7 +625,7 @@ public class FollowupAgentService {
 
             String evidence = toolLoopEvidence(round, freshCalls, latestToolResponse);
             AgentContext nextContext = new AgentContext(state.stage.name(), knownFacts(state),
-                    LocalDate.now(), conversations.recentMessages(state.id));
+                    LocalDate.now(), conversations.recentMessages(state.id), identityOf(state));
             current = agentRuntime.continueAfterTools(originalMessage, nextContext, state, evidence);
 
             SafetyGuard.Decision safety = current.modelDriven()
@@ -806,9 +852,8 @@ public class FollowupAgentService {
         else if (state.needCompanion == null) state.stage = ConversationState.Stage.ASK_COMPANION;
         else if (state.needTravel == null) state.stage = ConversationState.Stage.ASK_TRAVEL;
         else if (state.transport == null) state.stage = ConversationState.Stage.ASK_TRANSPORT;
-        else if (state.notifyFamily == null || (state.notifyFamily && state.contact == null)) {
-            state.stage = ConversationState.Stage.ASK_NOTIFY;
-        } else state.stage = ConversationState.Stage.READY_TO_PLAN;
+        else if (!notifySettled(state)) state.stage = ConversationState.Stage.ASK_NOTIFY;
+        else state.stage = ConversationState.Stage.READY_TO_PLAN;
     }
 
     private String firstToolArgument(AgentRuntime.Outcome outcome, String name, String fallback) {
@@ -1043,6 +1088,8 @@ public class FollowupAgentService {
             }
             case "QUERY_APPOINTMENTS" -> { return queryMyAppointments(state, ExtractedFacts.empty()); }
             case "QUERY_CARE_GUIDE" -> { return showCareGuide(state, "复诊办理流程"); }
+            case "QUERY_CARE_TIMELINE" -> { return showCareTimeline(state); }
+            case "QUERY_CARE_NOTIFICATIONS" -> { return showCareNotifications(state); }
             case "SELECT_APPOINTMENT_TO_CANCEL" -> { return prepareExistingCancellation(state, safeValue); }
             case "SELECT_TRAVEL_APPOINTMENT" -> { return selectTravelAppointment(state, safeValue); }
             case "CANCEL_TASK" -> { return cancelTask(state); }
@@ -1130,6 +1177,9 @@ public class FollowupAgentService {
                     state.appointmentId == null ? List.of(q("修改日期", "CHANGE_DATE", ""), q("修改偏好", "EDIT_PREFERENCES", ""), q("检查计划", "START_PLAN", "")) : bookedActions(state));
         }
         try {
+            // 代他人办理走照护端那条真实链路。老人端下面这段会把预约直接建到 state.userId 名下，
+            // 既不写 arranged_by 也不跑协同通知，老人端就看不出这份安排是别人代约的。
+            if (state.caregiving()) return executeCaregiverBooking(state);
             if ("CANCEL".equals(state.pendingAction) || "CANCEL_EXISTING".equals(state.pendingAction)) {
                 String targetId = state.pendingAppointmentId != null ? state.pendingAppointmentId : state.appointmentId;
                 appointmentTool.cancel(state.id, targetId, state.userId);
@@ -1209,6 +1259,75 @@ public class FollowupAgentService {
         AgentTurnResponse response = new AgentTurnResponse(state.id, state.stage.name(), narration, actions,
                 plan(state), null, card, traces.findByConversation(state.id), null, narration, null);
         return finishWithoutModel(state, response);
+    }
+
+    /**
+     * 家属/志愿者确认后，替长辈把这次复诊落到真实数据里。
+     *
+     * <p>交给 {@link CareBookingService} 而不是在这里重写一遍：它本来就带归属校验、真实号源、
+     * 防重复预约、给老人的提醒，以及代约结果对家属/志愿者的协同通知。
+     * 自己再走一遍老人端的执行，等于让同一个业务有两条会逐渐走散的实现。
+     */
+    private AgentTurnResponse executeCaregiverBooking(ConversationState state) {
+        String subject = elderName(state.userId);
+        try {
+            if ("CANCEL".equals(state.pendingAction) || "CANCEL_EXISTING".equals(state.pendingAction)) {
+                careBooking.cancelUpcoming(state.actorUserId, state.userId);
+                state.pendingAction = "CREATE";
+                state.pendingAppointmentId = null;
+                state.appointmentId = null;
+                state.stage = ConversationState.Stage.CANCELLED;
+                state.taskStatus = ConversationState.TaskStatus.CANCELLED;
+                conversations.save(state, null);
+                return respondWithoutModel(state, "已取消" + subject + "的这次复诊，号源已经释放。"
+                                + "如果这张预约原本是别的照护者安排的，对方也会收到通知。",
+                        List.of(q("重新安排", "NEW_BOOKING", ""),
+                                q("查看" + subject + "的复诊安排", "QUERY_APPOINTMENTS", "")));
+            }
+            if (!ready(state)) {
+                state.stage = ConversationState.Stage.READY_TO_PLAN;
+                return advance(state, ExtractedFacts.empty());
+            }
+            CareBookingService.BookingRequest request = new CareBookingService.BookingRequest(
+                    state.hospitalId, state.departmentId, state.date.toString(), state.selectedSlot.id(),
+                    state.needTravel, state.transport, state.needCompanion);
+            // 改期走 modify（原位换号源、不停旧记录）；新约才走 book。
+            AppointmentRecordStore.AppointmentView booked = state.originalAppointmentId == null
+                    ? careBooking.book(state.actorUserId, state.userId, request)
+                    : careBooking.modify(state.actorUserId, state.userId, request);
+            state.appointmentId = booked.appointmentId();
+            state.originalAppointmentId = null;
+            // 提醒、材料与协同通知都已由 CareBookingService 落库，这里只把会话状态对齐，
+            // 免得界面上继续显示“未完成”。
+            state.materialReminderDone = true;
+            state.departureReminderDone = Boolean.TRUE.equals(state.needTravel);
+            state.notificationDone = true;
+            state.stage = ConversationState.Stage.COMPLETED;
+            state.taskStatus = ConversationState.TaskStatus.COMPLETED;
+            conversations.save(state, null);
+            String reply = "已经替" + subject + "安排好复诊：" + managedShort(booked)
+                    + "。复诊提醒已经建好，" + subject + "下次打开助手就会看到这次安排。";
+            // 结果卡直接取 CareBookingService 写好的那条记录：它已经写明了代约人和陪同人，
+            // 再走一遍老人端的 recordResult 会把这两项覆盖成“不通知家属”那套口径。
+            ResultCard result = new ResultCard(booked.appointmentId(), booked.hospital(), booked.department(),
+                    booked.date().format(DATE_LABEL), booked.time().format(TIME_LABEL),
+                    state.materials.isEmpty() ? booked.materials() : state.materials,
+                    booked.departureAt() == null ? "未提供出发建议（路线或时间信息不足）"
+                            : booked.departureAt().format(TIME_LABEL),
+                    booked.reminderStatus(), booked.familyStatus());
+            return finishWithoutModel(state, new AgentTurnResponse(state.id, state.stage.name(), reply,
+                    caregiverBookedActions(subject), plan(state), null, result,
+                    traces.findByConversation(state.id), null, reply, null));
+        } catch (IllegalArgumentException error) {
+            // 号源已失效、已有进行中的预约、关系被撤销——这些都是用户听得懂也改得动的，
+            // 原样报出来，不要裹成一句“办理遇到问题”。
+            state.stage = ConversationState.Stage.READY_TO_PLAN;
+            return respondWithoutModel(state, error.getMessage(),
+                    List.of(q("先取消已有预约", "CANCEL_APPOINTMENT", ""),
+                            q("重新选择时间", "CHANGE_DATE", ""), q("联系人工帮助", "CONTACT_HUMAN", "")));
+        } catch (RuntimeException error) {
+            return toolError(state, error);
+        }
     }
 
     private ResultCard recordResult(ConversationState state) {
@@ -1351,8 +1470,19 @@ public class FollowupAgentService {
                 && state.date != null && state.date.equals(state.selectedSlot.date())
                 && state.hospitalId.equals(state.selectedSlot.hospitalId()) && state.department.equals(state.selectedSlot.department())
                 && state.acceptAlternative != null && state.needCompanion != null && state.needTravel != null
-                && state.transport != null && state.notifyFamily != null
-                && (!state.notifyFamily || state.contact != null) && !state.materials.isEmpty();
+                && state.transport != null && notifySettled(state) && !state.materials.isEmpty();
+    }
+
+    /**
+     * “通知哪位家属”这一步是否已经了结。
+     *
+     * <p>本人自办时要问：老人得从自己登记的家属里选一个能收到通知的人。
+     * 代他人办理时不问——操作者本人就是家属或志愿者，让他再选一遍“通知家里谁”是多余的，
+     * 而且这次代约由 {@link CareBookingService} 自己通知其他照护者，选的这个联系人根本不会被用到。
+     */
+    private boolean notifySettled(ConversationState state) {
+        if (state.caregiving()) return true;
+        return state.notifyFamily != null && (!state.notifyFamily || state.contact != null);
     }
 
     private AgentTurnResponse validateDraftForModel(ConversationState state) {
@@ -2240,11 +2370,13 @@ public class FollowupAgentService {
                     q("打车", "SET_TRANSPORT", "打车"),
                     q("公交", "SET_TRANSPORT", "公交")));
         }
-        if (state.notifyFamily == null) {
-            state.stage = ConversationState.Stage.ASK_NOTIFY;
-            return respond(state, "需要通知家属吗？", List.of(q("需要通知", "SET_NOTIFY", "true"), q("不用通知", "SET_NOTIFY", "false")));
-        }
-        if (Boolean.TRUE.equals(state.notifyFamily) && state.contact == null) {
+        // 代他人办理时这一步整段跳过，理由见 notifySettled：操作者本人就是家属，
+        // 再问“通知家里谁”不仅多余，长辈名下没有登记联系人时还会把人卡死在这里。
+        if (!notifySettled(state)) {
+            if (state.notifyFamily == null) {
+                state.stage = ConversationState.Stage.ASK_NOTIFY;
+                return respond(state, "需要通知家属吗？", List.of(q("需要通知", "SET_NOTIFY", "true"), q("不用通知", "SET_NOTIFY", "false")));
+            }
             List<QuickReply> contacts = catalog.contacts(state.userId).stream()
                     .map(c -> q(c.relationship() + " " + c.name(), "SET_CONTACT", c.id())).toList();
             if (contacts.isEmpty()) return respond(state, "尚未配置家属联系人。请选择暂不通知，或请求人工帮助。",
@@ -2539,6 +2671,12 @@ public class FollowupAgentService {
         state.stage = ConversationState.Stage.AWAITING_CONFIRMATION;
         state.taskStatus = ConversationState.TaskStatus.AWAITING_CONFIRMATION;
         List<String> operations = new ArrayList<>();
+        // 代他人办理时第一行必须说清“替谁办”：这是按确认之前唯一的关口，
+        // 说错对象就等于替错人动了别人的预约和提醒。
+        if (state.caregiving()) {
+            operations.add("服务对象：" + elderName(state.userId) + "（您以"
+                    + (state.relationLabel == null ? "照护者" : state.relationLabel) + "身份代为办理）");
+        }
         operations.add("医院科室：" + state.hospital + " · " + state.department);
         operations.add("复诊时间：" + slotLabel(state.selectedSlot));
         operations.add("陪同需求：" + (state.needCompanion ? "需要家属陪同" : "不需要陪同"));
@@ -2554,9 +2692,16 @@ public class FollowupAgentService {
         if (Boolean.TRUE.equals(state.needTravel) && !state.departureReminderDone)
             operations.add("创建出发提醒：" + state.travelPlan.departureAt().minusMinutes(10));
         if (!Boolean.TRUE.equals(state.needTravel)) operations.add("不创建出发提醒");
-        if (Boolean.TRUE.equals(state.notifyFamily) && !state.notificationDone)
+        if (state.caregiving()) {
+            // 代办的提醒与通知由 CareBookingService 统一落地，不再列一遍老人端那套“通知家属”，
+            // 否则确认卡上会写着一件不会按那个方式发生的事。
+            operations.add("代约归属：这份预约会记为由您代约，并通知其他照护者");
+            operations.add("为" + elderName(state.userId) + "创建复诊提醒，其助手开场时会主动告知");
+        } else if (Boolean.TRUE.equals(state.notifyFamily) && !state.notificationDone) {
             operations.add("通知" + state.contact.relationship() + " " + state.contact.name() + "：" + notificationMessage(state));
-        else operations.add(state.notificationDone ? "家属已通知，不重复发送" : "不通知家属");
+        } else {
+            operations.add(state.notificationDone ? "家属已通知，不重复发送" : "不通知家属");
+        }
         ConfirmationCard card = new ConfirmationCard("请确认复诊办理计划", operations,
                 "确认后按以上内容更新模拟预约、提醒及通知。原已发送消息不能撤回。", "确认办理", "返回修改", state.confirmationId);
         String narration = confirmationNarration(state);
@@ -2567,7 +2712,8 @@ public class FollowupAgentService {
     }
 
     private String confirmationNarration(ConversationState state) {
-        StringBuilder text = new StringBuilder("请确认本次复诊安排。");
+        StringBuilder text = new StringBuilder(state.caregiving()
+                ? "请确认本次为" + elderName(state.userId) + "办理的复诊安排。" : "请确认本次复诊安排。");
         text.append("复诊时间是")
                 .append(state.selectedSlot.date().format(DATE_LABEL))
                 .append(spokenTime(state.selectedSlot.time().format(TIME_LABEL)))
@@ -2587,7 +2733,10 @@ public class FollowupAgentService {
         } else {
             text.append("确认后会创建材料准备提醒，不创建出发提醒。");
         }
-        if (Boolean.TRUE.equals(state.notifyFamily) && state.contact != null) {
+        // 这一段必须和确认卡上的口径一致：卡片写“会通知其他照护者”，口播就不能说“不会通知家属”。
+        if (state.caregiving()) {
+            text.append("这份预约会记为由您代约，并通知其他照护者。");
+        } else if (Boolean.TRUE.equals(state.notifyFamily) && state.contact != null) {
             text.append("并通知").append(state.contact.relationship()).append(state.contact.name()).append("。");
         } else {
             text.append("不会通知家属。");
@@ -2610,6 +2759,15 @@ public class FollowupAgentService {
                 .findFirst();
     }
 
+    /** 长辈名下进行中、但不是照护者代约的那一份（老人自己约的）。 */
+    private java.util.Optional<AppointmentRecordStore.AppointmentView> upcomingOwn(ConversationState state) {
+        return appointmentRecords.allFor(state.userId).stream()
+                .filter(row -> "CONFIRMED".equals(row.status()))
+                .filter(row -> !row.date().isBefore(LocalDate.now()))
+                .filter(row -> row.arrangedBy() == null)
+                .findFirst();
+    }
+
     private String managedShort(AppointmentRecordStore.AppointmentView plan) {
         return plan.date().format(DATE_LABEL) + " " + plan.time().format(TIME_LABEL)
                 + "，" + plan.hospital() + " " + plan.department();
@@ -2619,6 +2777,127 @@ public class FollowupAgentService {
         return "您好，" + userName + "。您目前有一份由" + plan.arrangedLabel() + "帮您约好的复诊安排："
                 + managedShort(plan) + "。需要查看详情、临时改期或取消时，直接告诉我就可以；"
                 + "遇到紧急情况也请告诉我，我会暂停普通办理并给出求助提示。";
+    }
+
+    /**
+     * 家属/志愿者端的开场。不复用老人端那条“我要预约复诊”的漏斗：那个漏斗的主语是老人自己，
+     * 直接套到代办的会话上，家属会以为是在给自己办。
+     */
+    private AgentTurnResponse caregiverGreeting(ConversationState state, String actorName, String subjectName) {
+        String prefix = "您好，" + actorName + "。我是" + subjectName + "的复诊事务助手。"
+                + "您可以问我" + subjectName + "的复诊安排，也可以查看要带的材料和最近的复诊动态。";
+        AppointmentRecordStore.AppointmentView arranged = upcomingArranged(state).orElse(null);
+        if (arranged != null) {
+            return respondWithoutModel(state, prefix + "目前" + subjectName + "有一份进行中的安排："
+                            + managedShort(arranged) + "。",
+                    caregiverActions(subjectName));
+        }
+        // 本人自己约的那份也要说：一次只能有一份进行中的预约，不说清楚，
+        // 操作者会一路填到确认卡才被拦下，白填一遍。
+        AppointmentRecordStore.AppointmentView own = upcomingOwn(state).orElse(null);
+        if (own != null) {
+            return respondWithoutModel(state, prefix + "目前" + subjectName + "名下有一份进行中的复诊预约："
+                            + managedShort(own) + "。要再安排一次的话，需要先调整或取消这一份。",
+                    caregiverActions(subjectName));
+        }
+        return respondWithoutModel(state, prefix + "目前" + subjectName + "还没有进行中的复诊预约。",
+                caregiverActions(subjectName));
+    }
+
+    /** 照护者端开场的按钮。这里只放已经真正接上的入口，避免出现点了没反应的选择。 */
+    private List<QuickReply> caregiverActions(String subjectName) {
+        return List.of(
+                q("帮" + subjectName + "预约复诊", "NEW_BOOKING", ""),
+                q("查看" + subjectName + "的复诊安排", "QUERY_APPOINTMENTS", ""),
+                q("最近的复诊动态", "QUERY_CARE_TIMELINE", ""),
+                q("发给我的通知", "QUERY_CARE_NOTIFICATIONS", ""));
+    }
+
+    /** 代约完成后的按钮。 */
+    private List<QuickReply> caregiverBookedActions(String subjectName) {
+        return List.of(
+                q("查看" + subjectName + "的复诊安排", "QUERY_APPOINTMENTS", ""),
+                q("最近的复诊动态", "QUERY_CARE_TIMELINE", ""),
+                q("发给我的通知", "QUERY_CARE_NOTIFICATIONS", ""));
+    }
+
+    /**
+     * 家属/志愿者查看长辈的复诊动态。归属校验在 {@link CareService#timeline} 里，
+     * 越权会直接抛错——这里兜成一句人话，不把异常抛给前端。
+     */
+    private AgentTurnResponse showCareTimeline(ConversationState state) {
+        if (!state.caregiving()) {
+            return respondWithoutModel(state, "查看复诊动态需要先指定一位长辈。",
+                    List.of(q("查询我的预约", "QUERY_APPOINTMENTS", "")));
+        }
+        List<CareService.TimelineEvent> events;
+        try {
+            events = careService.timeline(state.actorUserId, state.userId);
+        } catch (IllegalArgumentException error) {
+            // 权限类消息一律不走模型润色：措辞被改软就等于把边界说模糊了。
+            return respondWithoutModel(state, "现在看不了这位长辈的动态：" + error.getMessage(),
+                    List.of(q("联系人工帮助", "CONTACT_HUMAN", "")));
+        }
+        String subject = elderName(state.userId);
+        if (events.isEmpty()) {
+            return respondWithoutModel(state, subject + "最近还没有复诊动态。", caregiverActions(subject));
+        }
+        String lines = events.stream().limit(6)
+                .map(event -> "· " + event.title()
+                        + (event.detail() == null || event.detail().isBlank() ? "" : "：" + event.detail())
+                        + "（" + event.at().toLocalDate() + "）")
+                .collect(java.util.stream.Collectors.joining("\n"));
+        return respondWithoutModel(state, subject + "最近的复诊动态：\n" + lines, caregiverActions(subject));
+    }
+
+    /**
+     * 家属/志愿者给长辈留一条提醒。落到长辈自己的备忘里，长辈打开助手就能看到。
+     *
+     * <p>文本开头必须写明是谁留的：不然长辈收到一条凭空出现的备忘，不知道是谁让做的，
+     * 这正是“协同”最容易丢的一环。同时给操作者自己回一条协同通知，便于事后核对。
+     */
+    private AgentTurnResponse remindElder(ConversationState state, String value) {
+        if (!state.caregiving()) {
+            return respondWithoutModel(state, "想记提醒的话，直接说“提醒我几点做什么”就行。",
+                    List.of(q("记一条提醒", "CONTINUE", "")));
+        }
+        String subject = elderName(state.userId);
+        MemoParser.MemoIntent intent = MemoParser.detect(value);
+        String text = intent == null || intent.text() == null || intent.text().isBlank()
+                ? value.trim() : intent.text().trim();
+        if (text.isBlank()) {
+            return respondWithoutModel(state,
+                    "您想提醒" + subject + "做什么？比如“提醒" + subject + "明天上午带身份证”。",
+                    caregiverActions(subject));
+        }
+        String from = (state.relationLabel == null ? "照护者" : state.relationLabel)
+                + " " + elderName(state.actorUserId);
+        LocalDateTime remindAt = intent == null ? null : intent.remindAt();
+        memoTool.create(state.id, state.userId, "「" + from + "」提醒：" + text, remindAt, null);
+        careBooking.notifyCaregiver(state.actorUserId, state.userId, "已给" + subject + "留提醒：" + text, "info");
+        String when = remindAt == null ? ""
+                : "，到" + remindAt.toLocalDate() + " " + remindAt.toLocalTime() + "会提醒";
+        return respondWithoutModel(state, "已经给" + subject + "留好提醒：" + text + when
+                        + "。" + subject + "打开助手就能在备忘里看到，上面写着是您留的。",
+                caregiverBookedActions(subject));
+    }
+
+    /** 发给当前照护者本人的协同通知（代约结果、老人改动、求助等）。 */
+    private AgentTurnResponse showCareNotifications(ConversationState state) {
+        if (!state.caregiving()) {
+            return respondWithoutModel(state, "协同通知只在协助长辈时才有。",
+                    List.of(q("查询我的预约", "QUERY_APPOINTMENTS", "")));
+        }
+        List<CareService.NotificationView> items = careService.notifications(state.actorUserId);
+        if (items.isEmpty()) {
+            return respondWithoutModel(state, "目前没有发给您的协同通知。",
+                    caregiverActions(elderName(state.userId)));
+        }
+        String lines = items.stream().limit(6)
+                .map(item -> "· " + item.content() + "（" + item.sentAt().toLocalDate() + "）")
+                .collect(java.util.stream.Collectors.joining("\n"));
+        return respondWithoutModel(state, "发给您的协同通知：\n" + lines,
+                caregiverActions(elderName(state.userId)));
     }
 
     private String elderName(String userId) {
@@ -3932,8 +4211,23 @@ public class FollowupAgentService {
         return value == null || value.isBlank() ? fallback : value + " " + fallback;
     }
 
+    /**
+     * 关系上下文交给提示词。老人端返回“本人自办”，此时提示词与合并前逐字相同。
+     * 名字和关系都由 Java 从已验证的会话身份取，模型无从填写。
+     */
+    private AgentContext.Identity identityOf(ConversationState state) {
+        if (!state.caregiving()) return AgentContext.Identity.SELF;
+        return new AgentContext.Identity(elderName(state.actorUserId), elderName(state.userId),
+                state.relationLabel, state.actorRole);
+    }
+
     private String knownFacts(ConversationState state) {
         return "用户=" + state.userId +
+                (state.caregiving()
+                        ? "；本次服务对象=" + elderName(state.userId)
+                        + "；操作者=" + elderName(state.actorUserId) + "（" + state.relationLabel + "）"
+                        + "；本会话是代他人办理，上面所有预约、材料与路线都属于服务对象，不属于操作者"
+                        : "") +
                 "；复诊任务状态=" + state.taskStatus +
                 "；对话模式=" + state.dialogueMode +
                 "；被打断前阶段=" + (state.interruptedStage == null ? "无" : state.interruptedStage) +

@@ -17,9 +17,16 @@ public class AgentController {
 
     public AgentController(FollowupAgentService service) { this.service = service; }
 
+    /**
+     * 建立会话。
+     * userId 是本次要服务的<b>就诊人</b>，actorId 是真正在操作的人。
+     * 两者不同即代他人办理（家属/志愿者端），后端会查 care_relations 校验；查不到关系就拒绝。
+     * actorId 省略时按本人自办处理，老人端现有调用不受影响。
+     */
     @PostMapping("/conversations")
-    public AgentTurnResponse start(@RequestParam(value = "userId", required = false) String userId) {
-        return service.start(userId);
+    public AgentTurnResponse start(@RequestParam(value = "userId", required = false) String userId,
+                                   @RequestParam(value = "actorId", required = false) String actorId) {
+        return service.start(userId, actorId);
     }
 
     @GetMapping("/conversations/{conversationId}")
