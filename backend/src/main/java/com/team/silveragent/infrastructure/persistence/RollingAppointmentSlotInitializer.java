@@ -10,7 +10,12 @@ import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 
-/** Keeps the demo catalogue useful: every department has slots from today to one month later. */
+/**
+ * Keeps the demo catalogue useful: every department has slots from today to one month later.
+ *
+ * <p>号源不由 data.sql 写死，而是每次启动（以及每次场景重置）按“今天”重新生成，
+ * 这样演示脚本里的日期永远不会过期。
+ */
 @Component
 public class RollingAppointmentSlotInitializer implements ApplicationRunner {
 
@@ -26,7 +31,16 @@ public class RollingAppointmentSlotInitializer implements ApplicationRunner {
     }
 
     @Override
-    public void run(ApplicationArguments args) {
+    public void run(ApplicationArguments args) { seed(); }
+
+    /** 可重复调用：周末号源会被清掉，工作日号源按需补齐。 */
+    public void seed() {
+        // 号源只由本类生成。清掉历史 data.sql 留下的写死号源，避免同一档位出现两份数据。
+        jdbc.update("""
+                DELETE FROM appointment_slots
+                WHERE id NOT LIKE 'r-%'
+                  AND NOT EXISTS (SELECT 1 FROM appointments a WHERE a.slot_id = appointment_slots.id)
+                """);
         // Weekend gaps are deliberate so the Demo can still demonstrate the
         // required "requested date has no slots" recovery path.
         List<String> generatedWeekendSlots = jdbc.query("""

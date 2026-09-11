@@ -106,3 +106,18 @@ quickReplies：[{"label":"心内科","action":"SET_DEPARTMENT","value":"d001"}]
 - CHANGE_DEPARTMENT、CHANGE_TIME：清理受影响的下游选择，再进入对应节点。
 - 自由语言 CONFIRM_ACTION、DENY_ACTION 只有在 AWAITING_CONFIRMATION 状态下有效。
 - “取消当前办理”与“取消已确认预约”是不同路由；后者必须调用个人预约查询工具并经过确认端点。
+
+## 演示场景重置（2026-09-11）
+
+- `POST /api/demo/scenarios/{scenarioId}`：重置演示数据并返回可复现的起始会话。
+- `scenarioId` 取值：`normal`、`no-slot`、`conflict`、`boundary`；未知取值返回 400 与 `message`。
+- 返回体：`scenarioId`、`title`、`steps`（演示步骤）、`availableScenarios`、`turn`（与 `/api/agent/conversations` 相同的会话响应，可用其 `conversationId` 继续对话）。
+- 破坏性：会清空预约、提醒、家属通知、工具调用记录和全部会话，并按“今天”重新生成号源与用户已有日程。仅用于录屏与评审查验。
+- `GET /api/demo/health` 不变。
+
+## 轮次响应新增 notice（2026-09-11）
+
+- `/api/agent/**` 的所有轮次响应新增 `notice` 字段，可为 `null`。
+- 结构：`{"type":"MEDICAL_BOUNDARY","title":"...","message":"..."}`；`message` 与 `reply` 内容一致。
+- 用途：医疗越界时前端按独立视觉块渲染，而不是普通聊天气泡。只影响展示，不改变 `stage`，也不使已生成的 `confirmationId` 失效。
+- 兼容性：追加可选字段，不破坏旧客户端。

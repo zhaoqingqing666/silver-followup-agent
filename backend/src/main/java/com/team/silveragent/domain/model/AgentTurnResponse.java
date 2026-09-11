@@ -10,10 +10,11 @@ public record AgentTurnResponse(
         PlanCard plan,
         ConfirmationCard confirmation,
         ResultCard result,
-        List<ToolTrace> toolTraces
+        List<ToolTrace> toolTraces,
+        Notice notice
 ) {
     public static AgentTurnResponse message(String conversationId, String stage, String reply, List<QuickReply> quickReplies) {
-        return new AgentTurnResponse(conversationId, stage, reply, quickReplies, null, null, null, List.of());
+        return new AgentTurnResponse(conversationId, stage, reply, quickReplies, null, null, null, List.of(), null);
     }
 
     public record QuickReply(String label, String action, String value) { }
@@ -30,4 +31,12 @@ public record AgentTurnResponse(
                              String reminderStatus, String familyStatus) { }
 
     public record ToolTrace(String toolName, String parameters, String result, boolean success) { }
+
+    /**
+     * 需要与普通对话气泡区分显示的提示块，例如医疗越界说明。
+     * 只影响展示，不改变 {@code stage}，也不使待确认操作失效。
+     */
+    public record Notice(String type, String title, String message) {
+        public static final String MEDICAL_BOUNDARY = "MEDICAL_BOUNDARY";
+    }
 }

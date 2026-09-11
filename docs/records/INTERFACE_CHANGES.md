@@ -1,5 +1,15 @@
 # 接口变更记录
 
+## 2026-09-11 轮次响应新增 notice 与演示场景重置接口
+
+- `/api/agent/**` 轮次响应新增可选字段 `notice`（可为 `null`）：`{"type","title","message"}`。医疗越界时返回 `type=MEDICAL_BOUNDARY`，前端用 `BoundaryAlert` 独立渲染。不改变 `stage`，也不使已生成的 `confirmationId` 失效。
+- 新增 `POST /api/demo/scenarios/{scenarioId}`，`scenarioId` 取 `normal`/`no-slot`/`conflict`/`boundary`，返回 `scenarioId`、`title`、`steps`、`availableScenarios`、`turn`。未知取值返回 400。
+- 破坏性变更（数据层面）：该接口会清空预约、提醒、家属通知、工具调用记录和全部会话，并按“今天”重新生成号源与用户已有日程。
+- 新增意图 `START_EXECUTION`（“开始办理”“下一步”），中控路由到 `START_PLAN`；`advance()` 在 READY_TO_PLAN 时不再把同一句“请检查当前计划”重复问一遍。
+- 冲突分支的快捷候选由 2 个当日号源改为 1 个，保证「重新选择日期」和「仍保留这个时间」都落在前端第一页（每页 3 个）。
+- 前端 `AgentTurnResponse` 类型新增 `notice: AgentNotice | null`，并新增 `BoundaryAlert` 组件。
+- 容器内验证：待执行 `mvn -B -f backend/pom.xml test -Dagent.llm.enabled=false` 与前端 `npx tsc --noEmit`。
+
 ## 2026-09-10 就诊医院改为直接回答
 
 - 询问就诊医院时 `quickReplies` 返回空数组，取消医院和“我还没想好”快捷按钮；主动查询/推荐医院仍保留候选项。

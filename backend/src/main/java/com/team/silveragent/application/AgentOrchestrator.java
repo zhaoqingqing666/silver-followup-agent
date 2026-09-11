@@ -1,6 +1,7 @@
 package com.team.silveragent.application;
 
 import com.team.silveragent.agent.ExtractedFacts;
+import com.team.silveragent.agent.MedicalBoundaryRules;
 import org.springframework.stereotype.Component;
 
 /**
@@ -12,7 +13,7 @@ final class AgentOrchestrator {
     enum Route {
         EMERGENCY, MEDICAL_BOUNDARY, CONFIRM_PENDING, DENY_PENDING,
         CANCEL_CURRENT_TASK, CANCEL_EXISTING_APPOINTMENT, QUERY_MY_APPOINTMENTS,
-        RESTART_TASK, RESUME_TASK,
+        RESTART_TASK, RESUME_TASK, START_PLAN,
         QUERY_HOSPITALS, QUERY_DEPARTMENTS, RECOMMEND_HOSPITAL,
         QUERY_AVAILABLE_SLOTS, ASK_MATERIALS,
         CHANGE_HOSPITAL, CHANGE_DEPARTMENT, CHANGE_DATE, CHANGE_TIME,
@@ -25,7 +26,8 @@ final class AgentOrchestrator {
         if ("EMERGENCY".equals(intent) || contains(message, "胸痛", "呼吸困难", "昏迷", "大出血", "喘不上气")) {
             return Route.EMERGENCY;
         }
-        if ("MEDICAL_ADVICE".equals(intent) || contains(message, "怎么用药", "药量", "诊断", "检查结果", "是不是得了")) {
+        // 安全边界先于业务意图：越界漏判会表现为“被静默忽略”，代价高于多提示一次。
+        if ("MEDICAL_ADVICE".equals(intent) || MedicalBoundaryRules.looksLikeMedicalAdvice(message)) {
             return Route.MEDICAL_BOUNDARY;
         }
         if (state.stage == ConversationState.Stage.AWAITING_CONFIRMATION) {
@@ -49,6 +51,7 @@ final class AgentOrchestrator {
             case "QUERY_APPOINTMENTS" -> Route.QUERY_MY_APPOINTMENTS;
             case "RESTART_TASK" -> Route.RESTART_TASK;
             case "RESUME_TASK" -> Route.RESUME_TASK;
+            case "START_EXECUTION" -> Route.START_PLAN;
             case "QUERY_HOSPITALS", "QUERY_HOSPITAL_INFO" -> Route.QUERY_HOSPITALS;
             case "QUERY_DEPARTMENTS" -> Route.QUERY_DEPARTMENTS;
             case "REQUEST_RECOMMENDATION" -> Route.RECOMMEND_HOSPITAL;

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.team.silveragent.agent.AgentContext;
 import com.team.silveragent.domain.model.AgentTurnResponse;
 import com.team.silveragent.domain.model.ConversationHistoryResponse;
+import com.team.silveragent.domain.model.ToolModels.Conflict;
 import com.team.silveragent.domain.model.ToolModels.Contact;
 import com.team.silveragent.domain.model.ToolModels.Slot;
 import com.team.silveragent.domain.model.ToolModels.TravelPlan;
@@ -107,9 +108,10 @@ class ConversationStore {
             Contact contact, List<String> materials, String pendingAction, String appointmentId,
             String pendingAppointmentId, ConversationState.Stage interruptedStage,
             String interruptedPendingAction, String interruptedPendingAppointmentId,
-            String sideTask, String returnPolicy, String confirmationId, String originalAppointmentId,
+            String confirmationId, String originalAppointmentId,
             boolean materialReminderDone, boolean departureReminderDone,
-            boolean notificationDone, boolean scheduleChecked
+            boolean notificationDone, boolean scheduleChecked,
+            List<Conflict> conflicts, boolean conflictAcknowledged
     ) {
         static Snapshot from(ConversationState state) {
             return new Snapshot(state.stage, state.userId, state.hospitalId, state.hospital,
@@ -120,9 +122,10 @@ class ConversationStore {
                     state.contact, state.materials, state.pendingAction, state.appointmentId,
                     state.pendingAppointmentId, state.interruptedStage,
                     state.interruptedPendingAction, state.interruptedPendingAppointmentId,
-                    state.sideTask, state.returnPolicy, state.confirmationId, state.originalAppointmentId,
+                    state.confirmationId, state.originalAppointmentId,
                     state.materialReminderDone, state.departureReminderDone,
-                    state.notificationDone, state.scheduleChecked);
+                    state.notificationDone, state.scheduleChecked,
+                    state.conflicts, state.conflictAcknowledged);
         }
 
         ConversationState toState(String id) {
@@ -152,14 +155,14 @@ class ConversationStore {
             state.interruptedStage = interruptedStage;
             state.interruptedPendingAction = interruptedPendingAction;
             state.interruptedPendingAppointmentId = interruptedPendingAppointmentId;
-            state.sideTask = sideTask;
-            state.returnPolicy = returnPolicy;
             state.confirmationId = confirmationId;
             state.originalAppointmentId = originalAppointmentId;
             state.materialReminderDone = materialReminderDone;
             state.departureReminderDone = departureReminderDone;
             state.notificationDone = notificationDone;
             state.scheduleChecked = scheduleChecked;
+            state.conflicts = conflicts == null ? List.of() : conflicts;
+            state.conflictAcknowledged = conflictAcknowledged;
             return state;
         }
     }

@@ -5,6 +5,7 @@ import com.team.silveragent.agent.DeepSeekFactExtractor;
 import com.team.silveragent.agent.ExtractedFacts;
 import com.team.silveragent.domain.model.AgentTurnResponse;
 import com.team.silveragent.domain.model.AgentTurnResponse.ConfirmationCard;
+import com.team.silveragent.domain.model.AgentTurnResponse.Notice;
 import com.team.silveragent.domain.model.AgentTurnResponse.PlanCard;
 import com.team.silveragent.domain.model.AgentTurnResponse.QuickReply;
 import com.team.silveragent.domain.model.AgentTurnResponse.ResultCard;
@@ -27,6 +28,7 @@ import com.team.silveragent.infrastructure.mock.ToolTraceStore;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
+import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
@@ -41,6 +43,13 @@ import java.util.concurrent.ConcurrentHashMap;
 public class FollowupAgentService {
     private static final DateTimeFormatter DATE_LABEL = DateTimeFormatter.ofPattern("yyyy年M月d日");
     private static final DateTimeFormatter TIME_LABEL = DateTimeFormatter.ofPattern("HH:mm");
+    private static final DateTimeFormatter SCHEDULE_LABEL = DateTimeFormatter.ofPattern("M月d日HH:mm");
+    private static final DateTimeFormatter SCHEDULE_END_LABEL = DateTimeFormatter.ofPattern("HH:mm");
+    /**
+     * 单次复诊占用时长，用于把“预约时刻”换算成日程冲突检查区间。
+     * 模拟号源的档位间隔同为 60 分钟（见 RollingAppointmentSlotInitializer）。
+     */
+    private static final Duration APPOINTMENT_DURATION = Duration.ofMinutes(60);
 
     private final AppointmentTool appointmentTool;
     private final HospitalCatalogTool hospitalCatalogTool;
@@ -110,6 +119,9 @@ public class FollowupAgentService {
                 "。我是复诊助手。您可以直接说完整需求，也可以跟着我一步一步办理。请问想去哪家医院复诊？");
     }
 
+    /** 丢弃进程内缓存的会话；演示场景重置后调用，避免旧会话继续命中内存状态。 */
+    public synchronized void forgetAllSessions() { sessions.clear(); }
+
     public synchronized ConversationHistoryResponse resume(String conversationId) {
         ConversationState state = requireSession(conversationId);
         AgentTurnResponse current = conversations.lastResponse(conversationId)
@@ -144,9 +156,11 @@ public class FollowupAgentService {
         AgentOrchestrator.Route route = orchestrator.decide(value, facts, state);
         return switch (route) {
             case EMERGENCY -> emergency(state);
-            case MEDICAL_BOUNDARY -> respond(state,
-                    "我只能协助办理复诊，不能诊断疾病、解释检查结果或调整用药。请咨询医生或专业医疗机构。",
+            case MEDICAL_BOUNDARY -> respondWithNotice(state,
+                    new Notice(Notice.MEDICAL_BOUNDARY, "我不能回答医疗问题",
+                            "我只能协助办理复诊，不能诊断疾病、解释检查结果或调整用药。请咨询医生或专业医疗机构。"),
                     resumeReplies(state, q("咨询人工", "CONTACT_HUMAN", "")));
+            case START_PLAN -> ready(state) ? checkSchedule(state) : advance(state, facts);
             case CONFIRM_PENDING -> confirm(conversationId, true, state.confirmationId);
             case DENY_PENDING -> confirm(conversationId, false, state.confirmationId);
             case CANCEL_CURRENT_TASK -> cancelTask(state);
@@ -205,6 +219,9 @@ public class FollowupAgentService {
             clearSlotSelection(state, false);
             return querySlots(state);
         }
+        // 已经提示过“请检查当前计划”之后，用户用自然语言答“好的”“下一步”“嗯”也应直接开始检查，
+        // 而不是把同一句提示再说一遍——否则场景三在纯语音路径下无法到达。
+        if (state.stage == ConversationState.Stage.READY_TO_PLAN && ready(state)) return checkSchedule(state);
         return advance(state, facts);
     }
 
@@ -252,7 +269,7 @@ public class FollowupAgentService {
         switch (action) {
             case "SET_HOSPITAL" -> { resetAfterHospital(state); chooseHospital(state, safeValue); }
             case "SET_DEPARTMENT" -> { resetAfterDate(state); chooseDepartment(state, safeValue); }
-            case "SET_DATE" -> { resetAfterDate(state); state.date = LocalDate.parse(safeValue); return querySlots(state); }
+            case "SET_DATE" -> { resetAfterDate(state); state.date = LocalDate.parse(safeValue); return advance(state, ExtractedFacts.empty()); }
             case "SET_PERIOD" -> { return recommendPeriod(state, safeValue); }
             case "SHOW_PERIOD_SLOTS" -> { return showPeriodSlots(state, safeValue); }
             case "SET_ALTERNATIVE" -> { state.acceptAlternative = Boolean.parseBoolean(safeValue); if (state.selectedSlot == null && state.date != null) return querySlots(state); }
@@ -267,7 +284,11 @@ public class FollowupAgentService {
             case "SHOW_AVAILABLE_DATES" -> { return showAvailableSlots(state); }
             case "NEW_BOOKING" -> { return restartInCurrentConversation(state); }
             case "SELECT_SLOT" -> { return selectSlot(state, safeValue); }
-            case "KEEP_CONFLICT" -> { state.scheduleChecked = true; return buildConfirmation(state); }
+            case "KEEP_CONFLICT" -> {
+                state.scheduleChecked = true;
+                state.conflictAcknowledged = true;
+                return buildConfirmation(state);
+            }
             case "CHANGE_DATE" -> {
                 discardInterruption(state);
                 resetAfterDate(state);
@@ -407,7 +428,7 @@ public class FollowupAgentService {
                 state.date.format(DATE_LABEL), state.selectedSlot.time().format(TIME_LABEL), state.materials,
                 state.travelPlan == null ? "未提供出发建议（路线或时间信息不足）" : state.travelPlan.departureAt().format(TIME_LABEL), reminders, family);
         return finish(state, new AgentTurnResponse(state.id, state.stage.name(), message, bookedActions(state),
-                plan(state), null, card, traces.findByConversation(state.id)));
+                plan(state), null, card, traces.findByConversation(state.id), null));
     }
 
     private List<QuickReply> bookedActions(ConversationState state) {
@@ -462,6 +483,8 @@ public class FollowupAgentService {
         state.confirmationId = null;
         state.scheduleChecked = false;
         state.travelPlan = null;
+        state.conflicts = List.of();
+        state.conflictAcknowledged = false;
         if (state.stage == ConversationState.Stage.AWAITING_CONFIRMATION) state.stage = ConversationState.Stage.READY_TO_PLAN;
     }
 
@@ -484,10 +507,9 @@ public class FollowupAgentService {
     }
 
     private AgentTurnResponse queryMyAppointments(ConversationState state, ExtractedFacts facts) {
-        rememberInterruptedTask(state, "QUERY_MY_APPOINTMENTS");
+        rememberInterruptedTask(state);
         List<AppointmentSummary> rows = myAppointmentTool.search(
                 state.id, state.userId, facts.date(), facts.hospital(), facts.department());
-        state.sideTask = null;
         if (rows.isEmpty()) {
             return respond(state, "没有找到符合条件的已确认复诊预约。",
                     resumeReplies(state, q("办理新的复诊", "NEW_BOOKING", "")));
@@ -504,15 +526,14 @@ public class FollowupAgentService {
         ResultCard result = rows.size() == 1 ? resultCard(rows.get(0)) : null;
         return finish(state, new AgentTurnResponse(state.id, state.stage.name(),
                 "我从数据库查到" + rows.size() + "条已确认预约：" + summary + "。",
-                choices, null, null, result, traces.findByConversation(state.id)));
+                choices, null, null, result, traces.findByConversation(state.id), null));
     }
 
     private AgentTurnResponse beginCancelExistingAppointment(ConversationState state, ExtractedFacts facts) {
-        rememberInterruptedTask(state, "CANCEL_EXISTING_APPOINTMENT");
+        rememberInterruptedTask(state);
         List<AppointmentSummary> rows = myAppointmentTool.search(
                 state.id, state.userId, facts.date(), facts.hospital(), facts.department());
         if (rows.isEmpty()) {
-            state.sideTask = null;
             return respond(state, "没有找到符合条件的已确认预约，所以没有执行取消。",
                     resumeReplies(state, q("查询我的预约", "QUERY_APPOINTMENTS", "")));
         }
@@ -539,7 +560,6 @@ public class FollowupAgentService {
     private AgentTurnResponse prepareExistingCancellation(ConversationState state, AppointmentSummary target) {
         state.pendingAction = "CANCEL_EXISTING";
         state.pendingAppointmentId = target.appointmentId();
-        state.sideTask = "CANCEL_EXISTING_APPOINTMENT";
         state.confirmationId = UUID.randomUUID().toString();
         state.stage = ConversationState.Stage.AWAITING_CONFIRMATION;
         ConfirmationCard card = new ConfirmationCard("确认取消已经预约的复诊吗？",
@@ -548,7 +568,7 @@ public class FollowupAgentService {
                 "确认取消预约", "保留预约", state.confirmationId);
         return finish(state, new AgentTurnResponse(state.id, state.stage.name(),
                 "取消预约属于重要操作，需要您明确确认。", List.of(), null, card,
-                resultCard(target), traces.findByConversation(state.id)));
+                resultCard(target), traces.findByConversation(state.id), null));
     }
 
     private AgentTurnResponse restartInCurrentConversation(ConversationState state) {
@@ -600,7 +620,7 @@ public class FollowupAgentService {
                     List.of(q("查看可预约日期", "SHOW_AVAILABLE_DATES", "")));
         }
         state.date = facts.date();
-        return state.hospitalId != null && state.department != null ? querySlots(state) : advance(state, facts);
+        return advance(state, facts);
     }
 
     private AgentTurnResponse changeTime(ConversationState state, ExtractedFacts facts) {
@@ -630,15 +650,14 @@ public class FollowupAgentService {
                 resumeReplies(state));
     }
 
-    private void rememberInterruptedTask(ConversationState state, String sideTask) {
+    /** 记录被打断的办理位置，侧路任务结束后由 {@code resumeReplies} 提示用户回来。 */
+    private void rememberInterruptedTask(ConversationState state) {
         if (state.interruptedStage == null && state.stage != ConversationState.Stage.COMPLETED
                 && state.stage != ConversationState.Stage.CANCELLED) {
             state.interruptedStage = state.stage;
             state.interruptedPendingAction = state.pendingAction;
             state.interruptedPendingAppointmentId = state.pendingAppointmentId;
-            state.returnPolicy = "ASK_TO_RESUME";
         }
-        state.sideTask = sideTask;
     }
 
     private List<QuickReply> resumeReplies(ConversationState state, QuickReply... extras) {
@@ -654,8 +673,6 @@ public class FollowupAgentService {
         state.interruptedStage = null;
         state.interruptedPendingAction = null;
         state.interruptedPendingAppointmentId = null;
-        state.sideTask = null;
-        state.returnPolicy = null;
     }
 
     private void discardInterruption(ConversationState state) { clearInterruption(state); }
@@ -693,17 +710,16 @@ public class FollowupAgentService {
             return askDepartment(state, acknowledgement(facts, "好的。请问复诊哪个科室？"));
         }
         if (state.date == null) return askDate(state, acknowledgement(facts, "请问希望哪一天复诊？"));
+        // 先问“这一天没号能不能换日期”，再去查号源：等到选完号才问，等于在已经约上的情况下
+        // 再追问一次前提条件，对老年用户是多余的一轮。
+        if (state.acceptAlternative == null) {
+            return askAlternative(state, acknowledgement(facts, "如果这一天没有号，您接受前后几天的其他时间吗？"));
+        }
         if (state.selectedSlot == null) {
             if (state.alternatives.isEmpty()) return querySlots(state);
             if (state.requestedTime != null) return recommendSpecificTime(state, state.requestedTime);
             if (state.timePreference != null) return recommendPeriod(state, state.timePreference);
             return respondWithPlan(state, "请先告诉我想上午还是下午，也可以直接说具体时间。", periodReplies(state.alternatives));
-        }
-        if (state.acceptAlternative == null) {
-            state.stage = ConversationState.Stage.ASK_ALTERNATIVE;
-            return respond(state, acknowledgement(facts, "如果这一天没有号，您接受前后几天的其他时间吗？"), List.of(
-                    q("可以换日期", "SET_ALTERNATIVE", "true"),
-                    q("只要这一天", "SET_ALTERNATIVE", "false")));
         }
         if (state.needCompanion == null) {
             state.stage = ConversationState.Stage.ASK_COMPANION;
@@ -765,8 +781,8 @@ public class FollowupAgentService {
 
         state.stage = ConversationState.Stage.NO_SLOT;
         state.alternatives = List.of();
-        if (state.acceptAlternative == null) return respondWithPlan(state, "这一天暂无号源。您接受附近的其他日期吗？",
-                List.of(q("接受其他日期", "SET_ALTERNATIVE", "true"), q("只要这一天", "SET_ALTERNATIVE", "false")));
+        // 正常路径已在查号前问过；这里是兜底，用于用户中途改日期等绕过入口的情况。
+        if (state.acceptAlternative == null) return askAlternative(state, "这一天暂无号源。您接受附近的其他日期吗？");
         if (!state.acceptAlternative) return respondWithPlan(state, "这一天暂无号源，已保留只选这一天的意愿。",
                 List.of(q("稍后再查", "RETRY_QUERY", ""), q("主动修改日期", "CHANGE_DATE", ""), q("换医院", "CHANGE_HOSPITAL", "")));
         state.alternatives = callTool(state, "appointment.queryAlternatives", Map.of("hospitalId", state.hospitalId, "date", state.date),
@@ -938,20 +954,29 @@ public class FollowupAgentService {
         if (!ready(state)) return advance(state, ExtractedFacts.empty());
         LocalDateTime start = LocalDateTime.of(state.selectedSlot.date(), state.selectedSlot.time());
         List<Conflict> conflicts = callTool(state, "schedule.checkConflict", Map.of("userId", state.userId, "start", start),
-                () -> scheduleTool.findConflicts(state.id, state.userId, start, start.plusMinutes(60)));
+                () -> scheduleTool.findConflicts(state.id, state.userId, start, start.plus(APPOINTMENT_DURATION)));
+        state.conflicts = conflicts;
+        state.conflictAcknowledged = false;
         if (!conflicts.isEmpty()) {
             state.stage = ConversationState.Stage.CONFLICT;
             List<Slot> sameDay = appointmentTool.queryAvailableSlots(state.id, state.hospitalId, state.department, state.date)
                     .stream().filter(item -> !item.id().equals(state.selectedSlot.id())).toList();
             state.alternatives = sameDay;
-            List<QuickReply> choices = new ArrayList<>(slotReplies(sameDay.stream().limit(2).toList()));
+            // 当日候选只放 1 个，保证「重新选择日期」和「仍保留这个时间」都落在前端第一页，
+            // 不会被每页 3 个的通用分页推到第二页。
+            List<QuickReply> choices = new ArrayList<>(slotReplies(sameDay.stream().limit(1).toList()));
             choices.add(q("重新选择日期", "CHANGE_DATE", ""));
             choices.add(q("仍保留这个时间", "KEEP_CONFLICT", ""));
-            return respondWithPlan(state, "这个时间与您的“" + conflicts.get(0).title() + "（" + conflicts.get(0).startAt() + " 至 " + conflicts.get(0).endAt() + "）" +
-                    "”冲突。您可以选择其他号源，也可以明确保留当前时间。", choices);
+            Conflict first = conflicts.get(0);
+            return respondWithPlan(state, "这个时间与您的“" + first.title() + "（" + scheduleRange(first) +
+                    "）”冲突。您可以选择其他号源，也可以明确保留当前时间。", choices);
         }
         state.scheduleChecked = true;
         return buildConfirmation(state);
+    }
+
+    private String scheduleRange(Conflict conflict) {
+        return conflict.startAt().format(SCHEDULE_LABEL) + " 至 " + conflict.endAt().format(SCHEDULE_END_LABEL);
     }
 
     private AgentTurnResponse buildConfirmation(ConversationState state) {
@@ -965,6 +990,11 @@ public class FollowupAgentService {
         operations.add("医院科室：" + state.hospital + " · " + state.department);
         operations.add("复诊时间：" + slotLabel(state.selectedSlot));
         operations.add("陪同需求：" + (state.needCompanion ? "需要家属陪同" : "不需要陪同"));
+        if (state.conflictAcknowledged && !state.conflicts.isEmpty()) {
+            operations.add(state.conflicts.stream()
+                    .map(item -> "已知冲突：与“" + item.title() + "”（" + scheduleRange(item) + "）时间重叠，您已选择保留")
+                    .collect(java.util.stream.Collectors.joining("；")));
+        }
         operations.add("建议出发：" + state.travelPlan.departureAt() + "（" + state.transport + "）");
         if (state.originalAppointmentId != null) {
             appointmentRecords.allFor(state.userId).stream().filter(row -> row.appointmentId().equals(state.originalAppointmentId)).findFirst()
@@ -982,7 +1012,7 @@ public class FollowupAgentService {
         else operations.add(state.notificationDone ? "家属已通知，不重复发送" : "不通知家属");
         ConfirmationCard card = new ConfirmationCard("请确认复诊办理计划", operations,
                 "确认后按以上内容更新模拟预约、提醒及通知。原已发送消息不能撤回。", "确认办理", "返回修改", state.confirmationId);
-        return finish(state, new AgentTurnResponse(state.id, state.stage.name(), "请核对本次实际执行内容。", List.of(), plan(state), card, null, traces.findByConversation(state.id)));
+        return finish(state, new AgentTurnResponse(state.id, state.stage.name(), "请核对本次实际执行内容。", List.of(), plan(state), card, null, traces.findByConversation(state.id), null));
     }
 
     private AgentTurnResponse cancelTask(ConversationState state) {
@@ -1001,15 +1031,6 @@ public class FollowupAgentService {
                         q("查询我的预约", "QUERY_APPOINTMENTS", "")));
     }
 
-    private AgentTurnResponse respondWithCancelCard(ConversationState state) {
-        state.confirmationId = UUID.randomUUID().toString();
-        ConfirmationCard card = new ConfirmationCard("确认取消已预约的复诊吗？",
-                List.of("医院科室：" + state.hospital + " · " + state.department,
-                        "取消预约：" + slotLabel(state.selectedSlot), "释放号源并停用关联提醒", "不另发家属消息；已发送消息保留，请告知家属取消安排"),
-                "确认后原预约及关联提醒失效；返回则保留预约。", "确认取消预约", "保留预约", state.confirmationId);
-        return finish(state, new AgentTurnResponse(state.id, state.stage.name(), "已有预约，取消需要明确确认。", List.of(), plan(state), card, null, traces.findByConversation(state.id)));
-    }
-
     private AgentTurnResponse askHospital(ConversationState state, String message) {
         state.stage = ConversationState.Stage.ASK_HOSPITAL;
         return respond(state, message, List.of());
@@ -1021,6 +1042,13 @@ public class FollowupAgentService {
                 .limit(3).map(item -> q(item.name(), "SET_DEPARTMENT", item.id())).toList());
         choices.add(q("我自己说科室", "ASK_HUMAN_INPUT", ""));
         return respond(state, message, choices);
+    }
+
+    private AgentTurnResponse askAlternative(ConversationState state, String message) {
+        state.stage = ConversationState.Stage.ASK_ALTERNATIVE;
+        return respond(state, message, List.of(
+                q("可以换日期", "SET_ALTERNATIVE", "true"),
+                q("只要这一天", "SET_ALTERNATIVE", "false")));
     }
 
     private AgentTurnResponse askDate(ConversationState state, String message) {
@@ -1134,12 +1162,21 @@ public class FollowupAgentService {
 
     private AgentTurnResponse respond(ConversationState state, String reply, List<QuickReply> quickReplies) {
         return finish(state, new AgentTurnResponse(state.id, state.stage.name(), reply, quickReplies,
-                plan(state), null, null, traces.findByConversation(state.id)));
+                plan(state), null, null, traces.findByConversation(state.id), null));
     }
 
     private AgentTurnResponse respondWithPlan(ConversationState state, String reply, List<QuickReply> quickReplies) {
         return finish(state, new AgentTurnResponse(state.id, state.stage.name(), reply, quickReplies,
-                plan(state), null, null, traces.findByConversation(state.id)));
+                plan(state), null, null, traces.findByConversation(state.id), null));
+    }
+
+    /**
+     * 需要与普通气泡区分显示的提示。只附加展示用的 notice，
+     * 不改 stage，也不让已经生成的确认凭据失效——问诊断不等于要中断办理。
+     */
+    private AgentTurnResponse respondWithNotice(ConversationState state, Notice notice, List<QuickReply> quickReplies) {
+        return finish(state, new AgentTurnResponse(state.id, state.stage.name(), notice.message(), quickReplies,
+                plan(state), null, null, traces.findByConversation(state.id), notice));
     }
 
     private AgentTurnResponse finish(ConversationState state, AgentTurnResponse response) {

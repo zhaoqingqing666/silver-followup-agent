@@ -1,5 +1,6 @@
 package com.team.silveragent.application;
 
+import com.team.silveragent.domain.model.ToolModels.Conflict;
 import com.team.silveragent.domain.model.ToolModels.Contact;
 import com.team.silveragent.domain.model.ToolModels.Slot;
 import com.team.silveragent.domain.model.ToolModels.TravelPlan;
@@ -43,14 +44,16 @@ final class ConversationState {
     Stage interruptedStage;
     String interruptedPendingAction;
     String interruptedPendingAppointmentId;
-    String sideTask;
-    String returnPolicy;
     String confirmationId;
     String originalAppointmentId;
     boolean materialReminderDone;
     boolean departureReminderDone;
     boolean notificationDone;
     boolean scheduleChecked;
+    /** 最近一次冲突检查命中的日程，供确认卡留痕；无冲突或信息变更后清空。 */
+    List<Conflict> conflicts = List.of();
+    /** 用户是否已明确选择保留冲突时间。 */
+    boolean conflictAcknowledged;
 
     ConversationState(String id) { this(id, "user-001"); }
 

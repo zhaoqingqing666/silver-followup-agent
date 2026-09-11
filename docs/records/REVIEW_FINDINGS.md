@@ -4,22 +4,47 @@
 
 **验证口径**：本次为静态代码阅读，未启动后端、未连接 Dev Container、未执行 `mvn test` 或前端构建。所有"已实现/未实现"结论均指代码路径存在与否，不代表已通过端到端验收。与 `09-demo-acceptance-checklist.md` 的勾选项不互相替代。
 
-问题按严重度排列。`状态` 列留空表示待处理；修复后请填写提交号并同步该行结论。
+问题按严重度排列。`状态` 列中的提交号在提交后回填。
+
+**第二轮修复（2026-09-11）**：12 项全部处理。修复以静态改动 + 单测覆盖为准，尚未在 Dev Container 内执行 `mvn test`，端到端验收仍需按 `09-demo-acceptance-checklist.md` 走一遍。
 
 | ID | 严重度 | 场景 | 一句话问题 | 状态 |
 |---|---|---|---|---|
-| RV-01 | P0 | 场景三 | 自然语言路径无法触发冲突检查，必须点按钮 | 待处理 |
-| RV-02 | P0 | 场景三 | 冲突场景的种子数据与测试日期会过期，9/18 后无法复现 | 待处理 |
-| RV-03 | P0 | 场景四 | 越界词表覆盖不足，未命中时被当作普通信息静默忽略 | 待处理 |
-| RV-04 | P1 | 场景一 | `acceptAlternative` 问在选号之后，正常流程多一轮无意义询问 | 待处理 |
-| RV-05 | P1 | 场景三 | 确认卡不体现"已检测到冲突"，用户保留冲突时无二次提示 | 待处理 |
-| RV-06 | P1 | 场景三 | 「仍保留这个时间」被前端分页隐藏到第 2 页 | 待处理 |
-| RV-07 | P1 | 场景四 | 越界不产生状态、无专属视觉；`BoundaryAlert` 组件未实现 | 待处理 |
-| RV-08 | P1 | 全部 | 没有 `scenarioId` 或场景重置入口，四场景无法按需稳定复现 | 待处理 |
-| RV-09 | P2 | — | `respondWithCancelCard()` 为从未调用的死代码 | 待处理 |
-| RV-10 | P2 | — | `sideTask` / `returnPolicy` 只写不读，却参与持久化快照 | 待处理 |
-| RV-11 | P2 | 场景三 | 冲突检查窗口硬编码 60 分钟，未用科室实际时长 | 待处理 |
-| RV-12 | P2 | 场景二 | `queryAlternatives` 窗口含当天，"附近日期"混入"同日其它时段" | 待处理 |
+| RV-01 | P0 | 场景三 | 自然语言路径无法触发冲突检查，必须点按钮 | 已修复（见下） |
+| RV-02 | P0 | 场景三 | 冲突场景的种子数据与测试日期会过期，9/18 后无法复现 | 已修复（见下） |
+| RV-03 | P0 | 场景四 | 越界词表覆盖不足，未命中时被当作普通信息静默忽略 | 已修复（见下） |
+| RV-04 | P1 | 场景一 | `acceptAlternative` 问在选号之后，正常流程多一轮无意义询问 | 已修复（见下） |
+| RV-05 | P1 | 场景三 | 确认卡不体现"已检测到冲突"，用户保留冲突时无二次提示 | 已修复（见下） |
+| RV-06 | P1 | 场景三 | 「仍保留这个时间」被前端分页隐藏到第 2 页 | 已修复（见下） |
+| RV-07 | P1 | 场景四 | 越界不产生状态、无专属视觉；`BoundaryAlert` 组件未实现 | 已修复（见下） |
+| RV-08 | P1 | 全部 | 没有 `scenarioId` 或场景重置入口，四场景无法按需稳定复现 | 已修复（见下） |
+| RV-09 | P2 | — | `respondWithCancelCard()` 为从未调用的死代码 | 已修复（见下） |
+| RV-10 | P2 | — | `sideTask` / `returnPolicy` 只写不读，却参与持久化快照 | 已修复（见下） |
+| RV-11 | P2 | 场景三 | 冲突检查窗口硬编码 60 分钟，未用科室实际时长 | 已修复（见下） |
+| RV-12 | P2 | 场景二 | `queryAlternatives` 窗口含当天，"附近日期"混入"同日其它时段" | 已修复（见下） |
+
+### 本轮落地方式
+
+| ID | 落地方式 | 主要改动 |
+|---|---|---|
+| RV-01 | 两条路径都做：新增 `START_EXECUTION` 意图与 `Route.START_PLAN`；`continueCurrentFlow` 在 `READY_TO_PLAN` 且 `ready()` 时直接 `checkSchedule` | `AgentOrchestrator`、`RuleFactExtractor`、`DeepSeekFactExtractor`（prompt）、`FollowupAgentService` |
+| RV-02 | `user_schedules` 改为滚动种子；`data.sql` 不再写死号源与日程；测试改用相对日期与滚动号源编号；接线了原本闲置的 `nextWeekday()`，并把 `nextWeekendWithoutSeed()` 简化为 `nextWeekend()` | `RollingUserScheduleInitializer`（新增）、`RollingAppointmentSlotInitializer`、`data.sql`、`SilverAgentApplicationTests` |
+| RV-03 | 新增 `MedicalBoundaryRules`，“症状/药物/检查类词 + 疑问语气”即判定越界，判定提到 `AgentOrchestrator.decide` 顶部；LLM 与规则路径共用 | `MedicalBoundaryRules`（新增）、`AgentOrchestrator`、`RuleFactExtractor`、`DeepSeekFactExtractor`（prompt） |
+| RV-04 | `acceptAlternative` 询问前移到日期确定后、`querySlots` 之前；`NO_SLOT` 分支保留兜底 | `FollowupAgentService.advance/askAlternative/querySlots/changeDate` |
+| RV-05 | `ConversationState` 保存 `conflicts`，`KEEP_CONFLICT` 置 `conflictAcknowledged`，确认卡追加「已知冲突」一行 | `ConversationState`、`ConversationStore`、`FollowupAgentService.buildConfirmation` |
+| RV-06 | 冲突分支当日候选由 2 个压到 1 个，三类动作全部落在第一页 | `FollowupAgentService.checkSchedule` |
+| RV-07 | 采用“增加 `notice` 字段”方案：不切 stage、不使确认凭据失效；前端新增 `BoundaryAlert`；取舍写入 `DECISIONS.md` | `AgentTurnResponse`、`FollowupAgentService`、`assistant-cards.tsx`、`assistant-view.tsx`、`domain.ts` |
+| RV-08 | 新增 `POST /api/demo/scenarios/{id}`，重置可变数据并按“今天”重生成种子，返回起始会话与演示步骤 | `DemoController`、`DemoScenarioService`（新增）、`DemoScenario`（新增）、`DemoScenarioResponse`（新增） |
+| RV-09 | 删除 | `FollowupAgentService` |
+| RV-10 | 删除字段及其快照槽位（而非保留并在文档注明） | `ConversationState`、`ConversationStore`、`FollowupAgentService` |
+| RV-11 | 抽成 `APPOINTMENT_DURATION` 常量并注明与号源档位间隔一致；科室时长仍未进入模拟数据 | `FollowupAgentService` |
+| RV-12 | `queryAlternatives` 改为只查 `date+1` 至 `date+3` | `MockAppointmentTool` |
+
+### 尚未闭环的部分
+
+- **未在 Dev Container 内执行 `mvn test` 与前端构建**。本轮为静态修改，端到端结论仍需容器内验证。
+- **RV-08 只有 API，没有前端入口**。四场景目前靠 `curl`/脚本调用；是否加演示面板由后续决定。
+- **RV-11 只是收敛了常量**。科室时长仍未进入 `departments` 或号源定义，`followup_scope` 是文本描述而非时长。
 
 ---
 

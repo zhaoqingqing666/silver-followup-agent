@@ -1,5 +1,5 @@
-import { CalendarCheck2, Check, ClipboardList, Clock3, MapPin, UsersRound } from 'lucide-react';
-import type { AgentConfirmationCard, AgentPlanCard, AgentResultCard } from '@/types/domain';
+import { CalendarCheck2, Check, ClipboardList, Clock3, MapPin, ShieldAlert, UsersRound } from 'lucide-react';
+import type { AgentConfirmationCard, AgentNotice, AgentPlanCard, AgentResultCard } from '@/types/domain';
 import { MaterialChecklist } from '@/features/materials/material-checklist';
 
 export function PlanCard({ plan }: { plan: AgentPlanCard }) {
@@ -23,6 +23,21 @@ export function PlanCard({ plan }: { plan: AgentPlanCard }) {
         </li>)}
       </ul>
     </div>}
+  </section>;
+}
+
+/**
+ * 医疗越界与其它需要强提示的场景。用独立的边框、图标和 role="alert"
+ * 与普通聊天气泡区分，让老年用户一眼看出这条消息比平时重要。
+ */
+export function BoundaryAlert({ notice }: { notice: AgentNotice }) {
+  return <section role="alert" className="rounded-3xl border-2 border-[#d97706] bg-[#fff7ed] p-5 shadow-sm">
+    <div className="flex items-center gap-3">
+      <span className="grid size-12 shrink-0 place-items-center rounded-full bg-[#d97706] text-white"><ShieldAlert /></span>
+      <div><p className="text-sm font-semibold text-[#b45309]">服务范围提示</p><h2 className="text-xl font-bold">{notice.title}</h2></div>
+    </div>
+    <p className="mt-3 text-base leading-7">{notice.message}</p>
+    <p className="mt-3 rounded-2xl bg-white/75 p-3 text-sm leading-6 text-muted-foreground">这条提示不影响您当前的办理进度，原来的内容仍然保留。</p>
   </section>;
 }
 

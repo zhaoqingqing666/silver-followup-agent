@@ -56,10 +56,16 @@ public class MockAppointmentTool implements AppointmentTool {
         return result;
     }
 
+    /**
+     * “附近日期”只返回严格晚于指定日期的号源：指定日期本身的其它时段由
+     * {@code queryAvailableSlots} 负责，混在一起会让“换日期”的文案与内容不符。
+     */
     @Override
     public List<Slot> queryAlternatives(String conversationId, String hospitalId, String department, LocalDate date) {
+        LocalDate from = date.plusDays(1);
+        LocalDate to = date.plusDays(3);
         Map<String, Object> input = Map.of("hospitalId", hospitalId, "department", department,
-                "from", date.minusDays(3), "to", date.plusDays(3));
+                "from", from, "to", to);
         List<Slot> result = jdbc.query("""
                 SELECT id,hospital_id,hospital_name,department,appointment_date,appointment_time
                 FROM appointment_slots
@@ -67,8 +73,7 @@ public class MockAppointmentTool implements AppointmentTool {
                   AND appointment_date BETWEEN ? AND ? AND available=TRUE
                   AND (appointment_date > CURRENT_DATE OR appointment_time > CURRENT_TIME)
                 ORDER BY appointment_date,appointment_time
-                """, slotMapper(), hospitalId, department,
-                Date.valueOf(date.minusDays(3)), Date.valueOf(date.plusDays(3)));
+                """, slotMapper(), hospitalId, department, Date.valueOf(from), Date.valueOf(to));
         traces.record(conversationId, "appointment.queryAlternatives", input, result, true);
         return result;
     }

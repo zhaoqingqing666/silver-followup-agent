@@ -53,7 +53,7 @@
 6. `ConflictCard`：显示日程冲突和替代选择。
 7. `ConfirmationCard`：关键操作确认。
 8. `ToolCallPanel`：展示工具名、参数、结果和耗时。
-9. `BoundaryAlert`：医疗越界和紧急情况提示。
+9. `BoundaryAlert`：医疗越界提示，按轮次响应的 `notice` 字段渲染为独立视觉块（紧急情况仍由 `EMERGENCY_PAUSED` 阶段表达）。
 10. `HelpActions`：返回、取消、人工帮助。
 
 ### 页面 3：办理结果页 `/tasks/:taskId`

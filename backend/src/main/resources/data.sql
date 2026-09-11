@@ -20,44 +20,9 @@ MERGE INTO departments (id,hospital_id,name,description,specialty_tags,followup_
 ('d005','h001','内分泌科','提供糖尿病和甲状腺疾病的常规复诊服务。','糖尿病,甲状腺疾病','已由医生安排的内分泌科复诊','门诊楼三层',TRUE),
 ('d006','h002','心内科','提供常见心血管慢性疾病的复诊随访服务。','高血压,冠心病','已由医生安排的心内科复诊','门诊楼四层',TRUE);
 
-INSERT INTO appointment_slots(id,hospital_id,hospital_name,department,appointment_date,appointment_time,available)
-SELECT 'slot-0918-0900','h001','市第一医院（模拟）','心内科','2026-09-18','09:00:00',TRUE
-WHERE NOT EXISTS (SELECT 1 FROM appointment_slots WHERE id='slot-0918-0900');
-INSERT INTO appointment_slots(id,hospital_id,hospital_name,department,appointment_date,appointment_time,available)
-SELECT 'slot-0918-1020','h001','市第一医院（模拟）','心内科','2026-09-18','10:20:00',TRUE
-WHERE NOT EXISTS (SELECT 1 FROM appointment_slots WHERE id='slot-0918-1020');
-INSERT INTO appointment_slots(id,hospital_id,hospital_name,department,appointment_date,appointment_time,available)
-SELECT 'slot-0918-1430','h001','市第一医院（模拟）','心内科','2026-09-18','14:30:00',TRUE
-WHERE NOT EXISTS (SELECT 1 FROM appointment_slots WHERE id='slot-0918-1430');
-INSERT INTO appointment_slots(id,hospital_id,hospital_name,department,appointment_date,appointment_time,available)
-SELECT 'slot-0918-1600','h001','市第一医院（模拟）','心内科','2026-09-18','16:00:00',TRUE
-WHERE NOT EXISTS (SELECT 1 FROM appointment_slots WHERE id='slot-0918-1600');
-INSERT INTO appointment_slots(id,hospital_id,hospital_name,department,appointment_date,appointment_time,available)
-SELECT 'slot-0917-0900','h001','市第一医院（模拟）','心内科','2026-09-17','09:00:00',TRUE
-WHERE NOT EXISTS (SELECT 1 FROM appointment_slots WHERE id='slot-0917-0900');
-INSERT INTO appointment_slots(id,hospital_id,hospital_name,department,appointment_date,appointment_time,available)
-SELECT 'slot-0919-1430','h001','市第一医院（模拟）','心内科','2026-09-19','14:30:00',TRUE
-WHERE NOT EXISTS (SELECT 1 FROM appointment_slots WHERE id='slot-0919-1430');
-
-INSERT INTO appointment_slots(id,hospital_id,hospital_name,department,appointment_date,appointment_time,available)
-SELECT 'slot-0920-0900','h002','市人民医院（模拟）','内分泌科','2026-09-20','09:00:00',TRUE
-WHERE NOT EXISTS (SELECT 1 FROM appointment_slots WHERE id='slot-0920-0900');
-INSERT INTO appointment_slots(id,hospital_id,hospital_name,department,appointment_date,appointment_time,available)
-SELECT 'slot-0920-1030','h002','市人民医院（模拟）','内分泌科','2026-09-20','10:30:00',TRUE
-WHERE NOT EXISTS (SELECT 1 FROM appointment_slots WHERE id='slot-0920-1030');
-INSERT INTO appointment_slots(id,hospital_id,hospital_name,department,appointment_date,appointment_time,available)
-SELECT 'slot-0920-1400','h002','市人民医院（模拟）','内分泌科','2026-09-20','14:00:00',TRUE
-WHERE NOT EXISTS (SELECT 1 FROM appointment_slots WHERE id='slot-0920-1400');
-INSERT INTO appointment_slots(id,hospital_id,hospital_name,department,appointment_date,appointment_time,available)
-SELECT 'slot-0920-1500','h002','市人民医院（模拟）','内分泌科','2026-09-20','15:00:00',TRUE
-WHERE NOT EXISTS (SELECT 1 FROM appointment_slots WHERE id='slot-0920-1500');
-INSERT INTO appointment_slots(id,hospital_id,hospital_name,department,appointment_date,appointment_time,available)
-SELECT 'slot-0921-0930','h002','市人民医院（模拟）','内分泌科','2026-09-21','09:30:00',TRUE
-WHERE NOT EXISTS (SELECT 1 FROM appointment_slots WHERE id='slot-0921-0930');
-
-MERGE INTO user_schedules KEY(id) VALUES
-('schedule-001','user-001','社区体检','2026-09-18 10:00:00','2026-09-18 11:00:00'),
-('schedule-002','user-001','和家人吃饭','2026-09-20 12:00:00','2026-09-20 13:30:00');
+-- 号源和用户已有日程不再写死日期，改由 RollingAppointmentSlotInitializer /
+-- RollingUserScheduleInitializer 在每次启动与场景重置时按“今天”滚动生成，
+-- 否则演示只能复现到写死的那一天为止。
 
 MERGE INTO family_contacts KEY(id) VALUES
 ('family-001','user-001','小丽','女儿','13800001234');

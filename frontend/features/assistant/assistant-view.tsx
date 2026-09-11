@@ -6,7 +6,7 @@ import { PageHeader } from '@/components/common/page-header';
 import { confirmAgentActions, sendAgentAction, sendAgentMessage, startConversation } from '@/lib/agent-api';
 import { speakText, stopSpeech } from '@/lib/speech-service';
 import type { AgentPlanCard, AgentTurnResponse, ChatMessage, TabId, VoicePreference } from '@/types/domain';
-import { ConfirmationCardView, PlanCard, ResultCardView } from './assistant-cards';
+import { BoundaryAlert, ConfirmationCardView, PlanCard, ResultCardView } from './assistant-cards';
 import { ChatBubble } from './chat-bubble';
 
 interface SpeechRecognitionLike {
@@ -176,6 +176,7 @@ export function AssistantView({ active, onNavigate, voicePreference }: {
       </section>
 
       {visiblePlan && <PlanCard plan={visiblePlan} />}
+      {turn?.notice && <BoundaryAlert notice={turn.notice} />}
       {turn?.confirmation && <ConfirmationCardView card={turn.confirmation} busy={busy} onConfirm={() => void confirm(true)} onCancel={() => void confirm(false)} />}
       {turn?.result && <ResultCardView result={turn.result} partial={turn.stage === 'PARTIAL'} />}
       {/* 医院询问返回空 quickReplies，继续使用下方语音或文字输入。 */}

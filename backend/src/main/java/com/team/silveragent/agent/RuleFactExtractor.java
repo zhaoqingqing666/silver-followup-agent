@@ -45,7 +45,8 @@ public class RuleFactExtractor implements FactExtractor {
 
     private String detectIntent(String value) {
         if (containsAny(value, "胸痛", "呼吸困难", "昏迷", "大出血", "喘不上气")) return "EMERGENCY";
-        if (containsAny(value, "怎么用药", "药量", "诊断", "检查结果", "是不是得了", "吃什么药", "推荐药", "加量", "减量", "治疗方案", "停药")) return "MEDICAL_ADVICE";
+        if (MedicalBoundaryRules.looksLikeMedicalAdvice(value)) return "MEDICAL_ADVICE";
+        if (containsAny(value, "开始办理", "开始吧", "开始执行", "执行吧", "开始预约", "办理吧", "下一步")) return "START_EXECUTION";
         if (containsAny(value, "取消整个", "不办了", "停止办理", "不想预约了", "退出预约", "先不约了")) return "CANCEL_TASK";
         if (value.contains("取消") && containsAny(value, "预约", "复诊")) return "CANCEL_APPOINTMENT";
         if (containsAny(value, "取消预约", "取消这次预约", "取消已经预约", "取消已预约")) return "CANCEL_APPOINTMENT";

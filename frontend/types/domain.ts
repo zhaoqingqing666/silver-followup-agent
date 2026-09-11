@@ -96,6 +96,16 @@ export interface AgentResultCard {
   familyStatus: string;
 }
 
+/**
+ * 需要与普通气泡区分显示的提示，目前只有医疗越界。
+ * 只影响展示：不改变 stage，也不让已经生成的确认凭据失效。
+ */
+export interface AgentNotice {
+  type: 'MEDICAL_BOUNDARY' | string;
+  title: string;
+  message: string;
+}
+
 export interface AgentTurnResponse {
   conversationId: string;
   stage: string;
@@ -106,6 +116,7 @@ export interface AgentTurnResponse {
   confirmation: AgentConfirmationCard | null;
   result: AgentResultCard | null;
   toolTraces: ToolTrace[];
+  notice: AgentNotice | null;
 }
 
 export interface ConversationHistoryResponse {
