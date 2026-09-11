@@ -17,6 +17,10 @@ data/
 # Frontend local cache (not source)
 frontend/.npm-cache/
 
+# Runtime logs and incremental build cache (not source)
+*.log
+*.tsbuildinfo
+
 # Local secrets and OS files
 .env
 .env.*
