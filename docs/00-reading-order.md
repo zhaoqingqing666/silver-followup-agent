@@ -18,6 +18,7 @@
 8. 准备真正开始搭建：看 `08-beginner-implementation-guide.md`。
 9. 判断 Demo 是否达标：看 `09-demo-acceptance-checklist.md`。
 10. 判断项目创新点、价值及后续方向：看 [创新性与价值评估](10-innovation-assessment.md)。
+11. 想知道四个演示场景还有哪些待修问题：看 [四场景审阅问题清单](records/REVIEW_FINDINGS.md)。
 
-`records/` 下的四个文件从项目开始后持续更新，它们不是一次性报告。
+`records/` 下的文件从项目开始后持续更新，它们不是一次性报告。
 
