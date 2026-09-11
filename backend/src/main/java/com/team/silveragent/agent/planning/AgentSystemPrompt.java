@@ -42,6 +42,14 @@ public class AgentSystemPrompt {
                 CHECK_DUPLICATE、CHECK_CONFLICT、REQUEST_RECOMMENDATION、QUERY_APPOINTMENTS、ASK_MATERIALS、
                 ASK_TRAVEL_ROUTE、ASK_LOCATION_GUIDE、CANCEL_TASK、CANCEL_APPOINTMENT、CONFIRM_ACTION、DENY_ACTION、
                 EMOTIONAL_SUPPORT、SMALL_TALK、MEDICAL_ADVICE、EMERGENCY、UNKNOWN。
+
+                intent 里还有三类与复诊预约流程无关的日常事情，命中时用它们，不要硬塞进预约流程：
+                - RECORD_HEALTH_VALUE：老人报了一个自己量到的数值（“我的血压是100”“血糖6.4”），
+                  或想回看以前记过的数值（“我最近血压多少”）。你只判断这件事，不要自己拆数值和时间。
+                - MANAGE_MEMO：记一条要到点提醒或长期备忘（“明早八点提醒我吃药”），
+                  或查、改、删已有的备忘（“我都有哪些备忘”“把吃药那条改到九点”）。
+                - SEND_HEALTH_REPORT：把一段时间的健康记录发给家属（“把这个月的血压发给女儿”）。
+                这三类由 Java 用固定解析器填槽和落库；你不要在 replyDraft 里假称已经记好或已经发出去了。
                 """.formatted(context.currentDate(), context.knownFacts(), context.stage(), toolsJson);
     }
 

@@ -33,6 +33,13 @@ agent:
     read-timeout-ms: ${AGENT_MODEL_READ_TIMEOUT_MS:12000}
     # 传给规划/回答模型的最近消息条数；用户和助手各一条约等于半轮，默认16条约8轮
     history-limit: ${AGENT_MODEL_HISTORY_LIMIT:16}
+logging:
+  charset:
+    # 容器里 locale 是 POSIX，JVM 默认按 ASCII 写控制台，中文日志会全变成“?”。
+    # 日志本身是中文的（周报发没发就靠它看），所以显式指定 UTF-8。
+    console: UTF-8
+
+
 management:
   endpoints:
     web:
@@ -41,3 +48,11 @@ management:
 
 demo:
   user-id: ${DEMO_USER_ID:user-001}
+
+health-report:
+  weekly:
+    # 每周一早上八点发一份健康小结给家属。后端每次启动还会补发一次（同一周只发一条），
+    # 所以周一那一刻没开机也不会漏。
+    enabled: ${HEALTH_REPORT_WEEKLY_ENABLED:true}
+    cron: ${HEALTH_REPORT_WEEKLY_CRON:0 0 8 * * MON}
+    zone: ${HEALTH_REPORT_WEEKLY_ZONE:Asia/Shanghai}

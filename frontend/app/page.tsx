@@ -3,18 +3,27 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { MobileShell } from '@/components/layout/mobile-shell';
 import { BottomNav } from '@/components/navigation/bottom-nav';
+import { DEMO_ACTOR } from '@/lib/app-config';
 import { AssistantView } from '@/features/assistant/assistant-view';
+import { ActorPicker } from '@/features/care/actor-picker';
+import { CareView } from '@/features/care/care-view';
 import { HomeView } from '@/features/home/home-view';
 import { ProfileView } from '@/features/profile/profile-view';
+import { HealthRecordListView } from '@/features/records/health-record-list-view';
+import { MemoListView } from '@/features/records/memo-list-view';
 import { TasksView } from '@/features/tasks/tasks-view';
 import { TravelGuideView } from '@/features/travel/travel-guide-view';
 import { VoiceMicButton } from '@/features/voice/voice-mic-button';
-import type { TabId, TravelFocus } from '@/types/domain';
 import { getVoicePreference, updateVoicePreference } from '@/lib/appointment-api';
-import type { VoicePreference } from '@/types/domain';
+import type { CareActor, RecordPage, TabId, TravelFocus, VoicePreference } from '@/types/domain';
 
 export default function HomePage() {
+  // 入口先选身份：就诊人本人走老人端，家属 / 志愿者走协同照护端。
+  // DEMO_ACTOR 可在配置里钉死，演示时省掉手动选择这一步。
+  const [actor, setActor] = useState<CareActor | null>(DEMO_ACTOR ?? null);
   const [activeTab, setActiveTab] = useState<TabId>('home');
+  // 首页点按钮进去的二级页，不是底部导航的一格：不占 tab，也就不进 TabId
+  const [recordPage, setRecordPage] = useState<RecordPage | null>(null);
   const [travelAppointmentId, setTravelAppointmentId] = useState('');
   const [travelFocus, setTravelFocus] = useState<TravelFocus>('outside');
   // 每次打开地图页都换一个 key 重新挂载：既让 initialTab 生效，也让“这一轮要朗读”只消费一次。
@@ -31,10 +40,12 @@ export default function HomePage() {
   const pageVoiceRef = useRef<((text: string) => boolean) | null>(null);
 
   useEffect(() => {
+    // 协同照护端没有语音入口，不必拉取朗读设置。
+    if (actor !== 'ELDER') return;
     getVoicePreference().then(setVoicePreference).catch(() => {
       setVoicePreferenceError('后端未连接，暂时使用关闭状态');
     });
-  }, []);
+  }, [actor]);
 
   const changeAutoSpeak = async (enabled: boolean) => {
     const previous = voicePreference;
@@ -79,8 +90,32 @@ export default function HomePage() {
     assistantSendRef.current?.(text);
   }, []);
 
+  // hooks 必须全部先于下面的提前 return，否则身份切换会改变 hook 顺序。
+  if (!actor) {
+    return <MobileShell largeText={false}><ActorPicker onPick={setActor} /></MobileShell>;
+  }
+
+  // 家属 / 志愿者：协同照护端。老人端的语音、地图和助手不在这一支里出现。
+  if (actor !== 'ELDER') {
+    return <MobileShell largeText={false}>
+      <CareView actor={actor} onSwitchActor={() => setActor(null)} />
+    </MobileShell>;
+  }
+
+  // 首页点进去的二级页占满整屏、不显示底部导航：老人从底部溜走再回来会回到首页，容易以为自己点丢了。
+  if (recordPage) {
+    const back = () => setRecordPage(null);
+    const goAssistant = () => { setRecordPage(null); setActiveTab('assistant'); };
+    return <MobileShell largeText={largeText}>
+      {recordPage === 'records'
+        ? <HealthRecordListView onBack={back} onGoAssistant={goAssistant} />
+        : <MemoListView page={recordPage} onBack={back} onGoAssistant={goAssistant} />}
+    </MobileShell>;
+  }
+
   return <MobileShell largeText={largeText}>
-    {activeTab === 'home' && <HomeView onNavigate={setActiveTab} onOpenTravel={openTravel} />}
+    {activeTab === 'home' && <HomeView onNavigate={setActiveTab} onOpenTravel={openTravel}
+      onOpenPage={setRecordPage} />}
     {activeTab === 'tasks' && <TasksView onNavigate={setActiveTab} onOpenTravel={openTravel}
       voicePreference={voicePreference} onRegisterVoice={registerPageVoice} />}
     <div className={activeTab === 'assistant' ? 'block' : 'hidden'} aria-hidden={activeTab !== 'assistant'}>

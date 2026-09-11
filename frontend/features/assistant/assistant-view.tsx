@@ -1,19 +1,23 @@
 'use client';
 
 import { FormEvent, useEffect, useRef, useState } from 'react';
-import { CalendarSearch, ClipboardCheck, LoaderCircle, RefreshCw, Send, Sparkles } from 'lucide-react';
+import { CalendarSearch, ClipboardCheck, LoaderCircle, NotebookPen, RefreshCw, Send, Sparkles } from 'lucide-react';
 import { PageHeader } from '@/components/common/page-header';
 import { confirmAgentActions, sendAgentAction, sendAgentMessage, startConversation } from '@/lib/agent-api';
 import { speakText, stopSpeech } from '@/lib/speech-service';
 import type { AgentPlanCard, AgentTurnResponse, ChatMessage, TabId, TravelFocus, VoicePreference } from '@/types/domain';
 import { ConfirmationCardView, PlanCard, ResultCardView } from './assistant-cards';
 import { ChatBubble } from './chat-bubble';
+import { ToolTracePanel } from './tool-trace-panel';
+
+/** 点一下就填进输入框的示例话：分别对应“记数值 / 记提醒 / 管理已有提醒”三件事。 */
+const EXAMPLE_SAYINGS = ['我的血压是100', '明早八点提醒我吃药', '我都有哪些备忘'];
 
 const stageLabels: Record<string, string> = {
   ASK_HOSPITAL: '确认医院', ASK_DEPARTMENT: '确认科室', ASK_DATE: '确认日期',
   ASK_ALTERNATIVE: '补充偏好', ASK_COMPANION: '陪同安排', ASK_TRAVEL: '出行安排',
   ASK_NOTIFY: '家属通知', ASK_TRANSPORT: '交通方式', READY_TO_PLAN: '检查计划', SELECT_PERIOD: '选择上午或下午', CONFIRM_SLOT: '确认推荐时间', SELECT_SLOT: '选择具体时间', NO_SLOT: '更换时间', CONFLICT: '处理冲突',
-  EMERGENCY_PAUSED: '已暂停，请及时求助', PARTIAL: '部分完成', TOOL_ERROR: '需要重试或修改', AWAITING_CONFIRMATION: '等待确认', COMPLETED: '办理完成', CANCELLED: '已取消',
+  EMERGENCY_PAUSED: '已暂停，请及时求助', PARTIAL: '部分完成', TOOL_ERROR: '需要重试或修改', AWAITING_CONFIRMATION: '等待确认', MEMO_TIME: '补充提醒时间', COMPLETED: '办理完成', CANCELLED: '已取消',
 };
 
 export function AssistantView({ active, onNavigate, onOpenTravel, voicePreference, onRegisterSend }: {
@@ -205,6 +209,14 @@ export function AssistantView({ active, onNavigate, onOpenTravel, voicePreferenc
         <button onClick={() => void sendAction('CONTINUE', '', turn?.task?.active ? '继续刚才的办理' : '我想预约复诊')} className="flex min-h-12 items-center justify-center gap-2 rounded-2xl bg-primary text-base font-bold text-white"><CalendarSearch className="size-5" />{turn?.task?.active ? '继续办理' : '预约复诊'}</button>
         <button onClick={() => onNavigate('tasks')} className="flex min-h-12 items-center justify-center gap-2 rounded-2xl border bg-white text-base font-bold"><ClipboardCheck className="size-5 text-primary" />事项查询</button>
       </div>
+      <div className="mt-2 rounded-2xl border border-dashed border-[#dba976] bg-white px-3 py-2 shadow-sm">
+        <p className="flex items-center gap-2 text-sm font-semibold text-[#6c3d24]"><NotebookPen className="size-4 text-primary" aria-hidden="true" />记数值、记提醒、看看有哪些提醒，都可以说一句</p>
+        <div className="mt-1.5 flex flex-wrap gap-2">
+          {EXAMPLE_SAYINGS.map(saying => (
+            <button key={saying} type="button" onClick={() => setInput(saying)} className="min-h-11 rounded-xl bg-[#fff4e2] px-3 text-base font-semibold text-[#6c3d24]">{saying}</button>
+          ))}
+        </div>
+      </div>
     </div>
 
     {turn?.task?.active && <section className="border-b bg-[#fff4e7] px-5 py-3">
@@ -222,6 +234,8 @@ export function AssistantView({ active, onNavigate, onOpenTravel, voicePreferenc
       {visiblePlan && <PlanCard plan={visiblePlan} />}
       {turn?.confirmation && <ConfirmationCardView card={turn.confirmation} busy={busy} onConfirm={() => void confirm(true)} onCancel={() => void confirm(false)} />}
       {turn?.result && <ResultCardView result={turn.result} partial={turn.stage === 'PARTIAL'} onOpenTravel={onOpenTravel} />}
+      {/* 工具调用过程由后端每轮返回（toolTraces），这里原样渲染，不写死任何一条 */}
+      {turn && <ToolTracePanel traces={turn.toolTraces} />}
       {!!turn?.quickReplies.length && !turn.confirmation && <section aria-label="快捷回答" className="flex flex-wrap gap-2">
         {turn.quickReplies.slice(choicePage * 3, choicePage * 3 + 3).map(choice => <button key={choice.label + choice.action + choice.value} disabled={busy} onClick={() => void sendAction(choice.action, choice.value, choice.label)} className="min-h-12 rounded-2xl border border-[#dfb98f] bg-white px-4 text-base font-semibold text-[#6c3d24] shadow-sm disabled:opacity-50">{choice.label}</button>)}
       </section>}

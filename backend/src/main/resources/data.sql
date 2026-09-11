@@ -1,8 +1,13 @@
 -- 基础模拟数据只负责补齐，不清空预约、会话或工具记录。
 -- 需要重新录制 Demo 时，应使用单独的重置功能，而不是随后端启动自动删除。
 
+-- 必须写明列名：users 还有 home_longitude / home_latitude 两列（见 schema.sql 的 ALTER），
+-- 不写列名的话这里的 4 个值对不上整表列数，MERGE 会直接报错。
 MERGE INTO users (id,name,home_address,preferred_transport) KEY(id) VALUES
-('user-001','王阿姨','幸福小区（模拟）','家属开车');
+('user-001','王阿姨','幸福小区（模拟）','家属开车'),
+('user-f001','小丽',NULL,NULL),
+('user-v001','李阿姨',NULL,NULL),
+('user-002','张伯伯','幸福小区（模拟）','公交');
 
 UPDATE users SET home_longitude=116.365300,home_latitude=39.921900 WHERE id='user-001';
 
@@ -74,6 +79,11 @@ MERGE INTO user_schedules KEY(id) VALUES
 
 MERGE INTO family_contacts KEY(id) VALUES
 ('family-001','user-001','小丽','女儿','13800001234');
+
+MERGE INTO care_relations KEY(id) VALUES
+('rel-f001','user-f001','user-001','FAMILY','女儿'),
+('rel-v001','user-v001','user-001','VOLUNTEER','社区志愿者'),
+('rel-v002','user-v001','user-002','VOLUNTEER','社区志愿者');
 
 MERGE INTO material_templates KEY(id) VALUES
 ('m001','通用','身份证',TRUE,1),

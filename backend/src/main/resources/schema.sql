@@ -198,3 +198,56 @@ ALTER TABLE reminders ADD COLUMN IF NOT EXISTS conversation_id VARCHAR(50);
 ALTER TABLE reminders ADD COLUMN IF NOT EXISTS appointment_id VARCHAR(50);
 ALTER TABLE reminders ADD COLUMN IF NOT EXISTS status VARCHAR(30) DEFAULT 'CREATED';
 ALTER TABLE family_notifications ADD COLUMN IF NOT EXISTS conversation_id VARCHAR(50);
+
+-- 协同照护端：家属/志愿者与其协同的就诊人关系（一对多）
+CREATE TABLE IF NOT EXISTS care_relations (
+  id VARCHAR(40) PRIMARY KEY,
+  caregiver_id VARCHAR(40) NOT NULL,
+  elder_user_id VARCHAR(40) NOT NULL,
+  role VARCHAR(20) NOT NULL,
+  relationship VARCHAR(40)
+);
+
+-- 家属/志愿者代约：标记这份预约由哪位照护者安排（null=老人自己或助手约的）
+ALTER TABLE appointments ADD COLUMN IF NOT EXISTS arranged_by VARCHAR(40);
+
+-- 陪同本次复诊的照护者 id（null=未确认陪同或老人自约）；照护端据此决定是否显示出发建议
+ALTER TABLE appointments ADD COLUMN IF NOT EXISTS accompanied_by VARCHAR(40);
+
+-- 协同照护端定向通知：代约结果、老人改动、途中求助、紧急等，发给指定的照护者账号
+CREATE TABLE IF NOT EXISTS care_notifications (
+  id VARCHAR(50) PRIMARY KEY,
+  caregiver_id VARCHAR(40) NOT NULL,
+  elder_user_id VARCHAR(40) NOT NULL,
+  content VARCHAR(500) NOT NULL,
+  kind VARCHAR(20) NOT NULL,
+  created_at TIMESTAMP NOT NULL
+);
+
+-- 老人端“健康备忘”：复诊助手中老人托付的健康/复诊相关小记；status ACTIVE=进行中 / DONE=已完成 / DELETED=已删除
+CREATE TABLE IF NOT EXISTS memos (
+  id VARCHAR(50) PRIMARY KEY,
+  user_id VARCHAR(40) NOT NULL,
+  text VARCHAR(300) NOT NULL,
+  remind_at TIMESTAMP,
+  status VARCHAR(20) NOT NULL,
+  created_at TIMESTAMP NOT NULL
+);
+
+-- 重复提醒规则：null=只提醒一次；DAILY=每天 / WEEKLY=每周 / MONTHLY=每月。
+-- remind_at 存“下一次到点”的日期时间，同时充当星期几（WEEKLY）/几号（MONTHLY）的锚点。
+ALTER TABLE memos ADD COLUMN IF NOT EXISTS repeat_rule VARCHAR(20);
+
+-- 老人上报的实测数值（血压/血糖/心率…）：和 memos（“要做的事”，带提醒、可完成可删除）分家，
+-- 这里记的是“已经量到的数”，只增不删，用来回查最近几次。有数值记 value_num，只有说法（“有点高”）记 value_text。
+CREATE TABLE IF NOT EXISTS health_records (
+  id VARCHAR(50) PRIMARY KEY,
+  user_id VARCHAR(40) NOT NULL,
+  item VARCHAR(40) NOT NULL,
+  value_num DECIMAL(8,2),
+  value_text VARCHAR(60) NOT NULL,
+  unit VARCHAR(20) NOT NULL,
+  raw_text VARCHAR(200),
+  conversation_id VARCHAR(50),
+  recorded_at TIMESTAMP NOT NULL
+);

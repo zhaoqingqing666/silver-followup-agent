@@ -88,6 +88,43 @@ class AgentRuntimeRoutingTests {
         assertThat(outcome.proposedTool()).isEqualTo("hospital.search");
     }
 
+    /**
+     * 备忘 / 健康数值 / 发周报这三件事必须落库或对外发消息，不能被模型的一句 ANSWER 带过去。
+     * 实测过：不挡住的话，模型会对老人说“我给您记一个提醒”，而库里一条记录都没有。
+     */
+    @Test
+    void memoryAndHealthIntentsAreNotSwallowedByAnAnswerAction() {
+        for (String intent : List.of("MANAGE_MEMO", "RECORD_HEALTH_VALUE", "SEND_HEALTH_REPORT")) {
+            ConversationPlanner planner = mock(ConversationPlanner.class);
+            when(planner.mode()).thenReturn("MODEL_PLANNER_WITH_RULE_FALLBACK");
+            when(planner.plan(any(), any(), any())).thenReturn(new PlannerDecision(
+                    PlannerActionType.ANSWER, intent, null, Map.of(),
+                    "好的，我给您记下了。", "SMALL_TALK", facts(intent), "MODEL_PLANNER"));
+
+            AgentRuntime.Outcome outcome = runtime(planner).plan("明早八点提醒我吃药", context(),
+                    new ConversationState("conversation", "user-001"));
+
+            assertThat(outcome.route()).as(intent)
+                    .isEqualTo(AgentOrchestrator.Route.valueOf(intent));
+            assertThat(outcome.route()).as(intent).isNotEqualTo(AgentOrchestrator.Route.DIRECT_ANSWER);
+        }
+    }
+
+    /** 不相干的 intent 仍旧走原来的“直接回答”，别把日常三类扩成万能兜底。 */
+    @Test
+    void unrelatedIntentStillReachesDirectAnswer() {
+        ConversationPlanner planner = mock(ConversationPlanner.class);
+        when(planner.mode()).thenReturn("MODEL_PLANNER_WITH_RULE_FALLBACK");
+        when(planner.plan(any(), any(), any())).thenReturn(new PlannerDecision(
+                PlannerActionType.ANSWER, "SMALL_TALK", null, Map.of(),
+                "今天天气不错。", "SMALL_TALK", facts("SMALL_TALK"), "MODEL_PLANNER"));
+
+        AgentRuntime.Outcome outcome = runtime(planner).plan("今天天气真好", context(),
+                new ConversationState("conversation", "user-001"));
+
+        assertThat(outcome.route()).isEqualTo(AgentOrchestrator.Route.DIRECT_ANSWER);
+    }
+
     private AgentRuntime runtime(ConversationPlanner planner) {
         return new AgentRuntime(planner, new ToolRegistry(), new ToolPolicy(),
                 new ActionValidator(), new AgentOrchestrator(emptyCatalog()), mock(RuleFactExtractor.class));

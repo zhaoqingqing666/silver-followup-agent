@@ -193,6 +193,12 @@ final class AgentRuntime {
             return outcome(AgentOrchestrator.Route.DIRECT_ANSWER, proposal, null, List.of(), true);
         }
 
+        // 备忘 / 健康数值 / 发周报要先于下面的「直接回答」判定：这三件事都要落库或对外发消息，
+        // 不能让模型用一句 ANSWER 就带过去——实测过，那样它会回“我给您记一个提醒”而库里一条都没有。
+        // 模型只需要认出“这句话属于这三件事”，填槽仍由 Java 做。
+        AgentOrchestrator.Route dailyRoute = dailyRoute(proposal.intent());
+        if (dailyRoute != null) return outcome(dailyRoute, proposal, null, List.of(), true);
+
         // 办理进行中时，模型追问下一句（“您想去哪家医院？”）用的是 ASK_USER，这不是插话闲聊。
         // 走 DIRECT_ANSWER 会把正在办的预约暂停掉，草稿、阶段和按钮也会停在原地，
         // 所以流程内的追问必须回到工作流，由 Java 记录这轮问到了什么。冷启动的追问不受影响。
@@ -211,6 +217,17 @@ final class AgentRuntime {
         if (workflowRoute != null) return outcome(workflowRoute, proposal, null, List.of(), true);
         // 模型未给可用回答时只进入草稿更新，不再运行第二套关键词意图判断。
         return outcome(AgentOrchestrator.Route.CURRENT_FLOW, proposal, null, List.of(), true);
+    }
+
+    /** 复诊预约流程之外的日常三类：备忘、健康数值、把记录发给家属。 */
+    private AgentOrchestrator.Route dailyRoute(String intent) {
+        if (intent == null) return null;
+        return switch (intent) {
+            case "MANAGE_MEMO" -> AgentOrchestrator.Route.MANAGE_MEMO;
+            case "RECORD_HEALTH_VALUE" -> AgentOrchestrator.Route.RECORD_HEALTH_VALUE;
+            case "SEND_HEALTH_REPORT" -> AgentOrchestrator.Route.SEND_HEALTH_REPORT;
+            default -> null;
+        };
     }
 
     private AgentOrchestrator.Route modelRoute(String intent, ConversationState state) {
@@ -247,6 +264,8 @@ final class AgentRuntime {
             case "CHANGE_DATE" -> AgentOrchestrator.Route.CHANGE_DATE;
             case "CHANGE_TIME" -> AgentOrchestrator.Route.CHANGE_TIME;
             case "PROVIDE_INFORMATION" -> AgentOrchestrator.Route.CURRENT_FLOW;
+            // 备忘 / 健康数值 / 发周报不在这里：它们在 {@link #dailyRoute} 里先于「直接回答」判定，
+            // 免得模型用一句 ANSWER 把要落库的事带过去。
             default -> null;
         };
     }
