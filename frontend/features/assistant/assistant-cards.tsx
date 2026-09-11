@@ -1,4 +1,4 @@
-import { CalendarCheck2, Check, ClipboardList, Clock3, MapPin, UsersRound } from 'lucide-react';
+import { CalendarCheck2, Check, ChevronRight, ClipboardList, Clock3, MapPin, Route, UsersRound } from 'lucide-react';
 import type { AgentConfirmationCard, AgentPlanCard, AgentResultCard } from '@/types/domain';
 import { MaterialChecklist } from '@/features/materials/material-checklist';
 
@@ -41,7 +41,11 @@ export function ConfirmationCardView({ card, busy, onConfirm, onCancel }: {
   </section>;
 }
 
-export function ResultCardView({ result, partial = false }: { result: AgentResultCard; partial?: boolean }) {
+export function ResultCardView({ result, partial = false, onOpenTravel }: {
+  result: AgentResultCard;
+  partial?: boolean;
+  onOpenTravel?: (appointmentId: string) => void;
+}) {
   return <section className="rounded-3xl border border-[#b7d6b0] bg-[#edf8e9] p-5 shadow-sm">
     <div className="flex items-center gap-3"><span className="grid size-12 place-items-center rounded-full bg-[#4f8548] text-white"><Check /></span><div><p className="text-sm font-semibold text-green-800">{partial ? '预约已保留，部分事项待补办' : '办理完成'}</p><h2 className="text-xl font-bold">复诊事项卡</h2></div></div>
     <div className="mt-4 space-y-3 text-[17px] leading-7">
@@ -50,6 +54,11 @@ export function ResultCardView({ result, partial = false }: { result: AgentResul
       <p className="flex gap-3"><UsersRound className="mt-1 size-5 shrink-0 text-green-800" /><span>{result.familyStatus}</span></p>
       <p className="flex gap-3 text-sm text-muted-foreground"><MapPin className="mt-1 size-4 shrink-0" />模拟预约编号：{result.appointmentId}</p>
     </div>
+    {onOpenTravel && <button onClick={() => onOpenTravel(result.appointmentId)}
+      className="mt-4 flex min-h-14 w-full items-center justify-between rounded-2xl bg-[#4f8548] px-4 text-left text-white">
+      <span className="flex items-center gap-3"><Route className="size-6" /><span><strong className="block text-lg">查看出行路线</strong><span className="text-sm text-white/80">包含楼层和诊室指引</span></span></span>
+      <ChevronRight className="size-6" />
+    </button>}
     <MaterialChecklist appointmentId={result.appointmentId} compact />
   </section>;
 }

@@ -8,6 +8,7 @@ import com.team.silveragent.domain.model.ToolModels.Contact;
 import com.team.silveragent.domain.model.ToolModels.Slot;
 import com.team.silveragent.domain.model.ToolModels.TravelPlan;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Repository;
 
 import java.sql.Timestamp;
@@ -20,10 +21,13 @@ import java.util.Optional;
 class ConversationStore {
     private final JdbcTemplate jdbc;
     private final ObjectMapper json;
+    private final int modelHistoryLimit;
 
-    ConversationStore(JdbcTemplate jdbc, ObjectMapper json) {
+    ConversationStore(JdbcTemplate jdbc, ObjectMapper json,
+                      @Value("${agent.model.history-limit:16}") int modelHistoryLimit) {
         this.jdbc = jdbc;
         this.json = json;
+        this.modelHistoryLimit = Math.max(4, Math.min(modelHistoryLimit, 40));
     }
 
     void save(ConversationState state, AgentTurnResponse response) {
@@ -73,9 +77,10 @@ class ConversationStore {
         return jdbc.query("""
                 SELECT role,content FROM (
                   SELECT id,role,content FROM conversation_messages
-                  WHERE conversation_id=? ORDER BY id DESC LIMIT 8
+                  WHERE conversation_id=? ORDER BY id DESC LIMIT ?
                 ) recent ORDER BY id
-                """, (rs, row) -> new AgentContext.Message(rs.getString(1), rs.getString(2)), conversationId);
+                """, (rs, row) -> new AgentContext.Message(rs.getString(1), rs.getString(2)),
+                conversationId, modelHistoryLimit);
     }
 
     List<ConversationHistoryResponse.Message> messages(String conversationId) {
@@ -98,7 +103,9 @@ class ConversationStore {
     }
 
     private record Snapshot(
-            ConversationState.Stage stage, String userId, String hospitalId, String hospital,
+            ConversationState.Stage stage, ConversationState.DialogueMode dialogueMode,
+            ConversationState.TaskStatus taskStatus,
+            String userId, String hospitalId, String hospital,
             String departmentId, String department, LocalDate date,
             Boolean acceptAlternative, Boolean needCompanion, Boolean needTravel, Boolean notifyFamily,
             String transport, Slot selectedSlot, Slot recommendedSlot, String timePreference,
@@ -107,12 +114,15 @@ class ConversationStore {
             Contact contact, List<String> materials, String pendingAction, String appointmentId,
             String pendingAppointmentId, ConversationState.Stage interruptedStage,
             String interruptedPendingAction, String interruptedPendingAppointmentId,
-            String sideTask, String returnPolicy, String confirmationId, String originalAppointmentId,
+            String sideTask, String returnPolicy,
+            String pendingEntityType, String pendingEntityId, String pendingEntityName, String pendingEntityRaw,
+            String confirmationId, String originalAppointmentId,
             boolean materialReminderDone, boolean departureReminderDone,
             boolean notificationDone, boolean scheduleChecked
     ) {
         static Snapshot from(ConversationState state) {
-            return new Snapshot(state.stage, state.userId, state.hospitalId, state.hospital,
+            return new Snapshot(state.stage, state.dialogueMode, state.taskStatus,
+                    state.userId, state.hospitalId, state.hospital,
                     state.departmentId, state.department, state.date,
                     state.acceptAlternative, state.needCompanion, state.needTravel, state.notifyFamily,
                     state.transport, state.selectedSlot, state.recommendedSlot, state.timePreference,
@@ -120,7 +130,9 @@ class ConversationStore {
                     state.contact, state.materials, state.pendingAction, state.appointmentId,
                     state.pendingAppointmentId, state.interruptedStage,
                     state.interruptedPendingAction, state.interruptedPendingAppointmentId,
-                    state.sideTask, state.returnPolicy, state.confirmationId, state.originalAppointmentId,
+                    state.sideTask, state.returnPolicy,
+                    state.pendingEntityType, state.pendingEntityId, state.pendingEntityName, state.pendingEntityRaw,
+                    state.confirmationId, state.originalAppointmentId,
                     state.materialReminderDone, state.departureReminderDone,
                     state.notificationDone, state.scheduleChecked);
         }
@@ -128,6 +140,8 @@ class ConversationStore {
         ConversationState toState(String id) {
             ConversationState state = new ConversationState(id, userId == null ? "user-001" : userId);
             state.stage = stage;
+            state.dialogueMode = dialogueMode == null ? ConversationState.DialogueMode.GENERAL_CHAT : dialogueMode;
+            state.taskStatus = taskStatus == null ? inferTaskStatus(stage) : taskStatus;
             state.hospitalId = hospitalId;
             state.hospital = hospital;
             state.departmentId = departmentId;
@@ -154,6 +168,10 @@ class ConversationStore {
             state.interruptedPendingAppointmentId = interruptedPendingAppointmentId;
             state.sideTask = sideTask;
             state.returnPolicy = returnPolicy;
+            state.pendingEntityType = pendingEntityType;
+            state.pendingEntityId = pendingEntityId;
+            state.pendingEntityName = pendingEntityName;
+            state.pendingEntityRaw = pendingEntityRaw;
             state.confirmationId = confirmationId;
             state.originalAppointmentId = originalAppointmentId;
             state.materialReminderDone = materialReminderDone;
@@ -161,6 +179,14 @@ class ConversationStore {
             state.notificationDone = notificationDone;
             state.scheduleChecked = scheduleChecked;
             return state;
+        }
+
+        private ConversationState.TaskStatus inferTaskStatus(ConversationState.Stage stage) {
+            if (stage == ConversationState.Stage.CANCELLED) return ConversationState.TaskStatus.CANCELLED;
+            if (stage == ConversationState.Stage.COMPLETED || stage == ConversationState.Stage.PARTIAL)
+                return ConversationState.TaskStatus.COMPLETED;
+            if (stage == ConversationState.Stage.EMERGENCY_PAUSED) return ConversationState.TaskStatus.PAUSED;
+            return ConversationState.TaskStatus.ACTIVE;
         }
     }
 }

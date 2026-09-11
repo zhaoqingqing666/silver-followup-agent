@@ -1,24 +1,34 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { MobileShell } from '@/components/layout/mobile-shell';
 import { BottomNav } from '@/components/navigation/bottom-nav';
 import { AssistantView } from '@/features/assistant/assistant-view';
 import { HomeView } from '@/features/home/home-view';
 import { ProfileView } from '@/features/profile/profile-view';
 import { TasksView } from '@/features/tasks/tasks-view';
-import type { TabId } from '@/types/domain';
+import { TravelGuideView } from '@/features/travel/travel-guide-view';
+import { VoiceMicButton } from '@/features/voice/voice-mic-button';
+import type { TabId, TravelFocus } from '@/types/domain';
 import { getVoicePreference, updateVoicePreference } from '@/lib/appointment-api';
 import type { VoicePreference } from '@/types/domain';
 
 export default function HomePage() {
   const [activeTab, setActiveTab] = useState<TabId>('home');
+  const [travelAppointmentId, setTravelAppointmentId] = useState('');
+  const [travelFocus, setTravelFocus] = useState<TravelFocus>('outside');
+  // 每次打开地图页都换一个 key 重新挂载：既让 initialTab 生效，也让“这一轮要朗读”只消费一次。
+  const [travelSession, setTravelSession] = useState(0);
+  const [travelForceSpeak, setTravelForceSpeak] = useState(false);
   const [largeText, setLargeText] = useState(false);
   const [voicePreference, setVoicePreference] = useState<VoicePreference>({
     userId: 'user-001', autoSpeakEnabled: false, speechRate: 0.9, speechVolume: 1,
   });
   const [voicePreferenceBusy, setVoicePreferenceBusy] = useState(false);
   const [voicePreferenceError, setVoicePreferenceError] = useState('');
+  // 助手注册的“说一句话就发送”，以及当前页面注册的只读语音口令。
+  const assistantSendRef = useRef<((text: string) => void) | null>(null);
+  const pageVoiceRef = useRef<((text: string) => boolean) | null>(null);
 
   useEffect(() => {
     getVoicePreference().then(setVoicePreference).catch(() => {
@@ -40,15 +50,55 @@ export default function HomePage() {
       setVoicePreferenceBusy(false);
     }
   };
+  /**
+   * forceSpeak 只在“用户主动用语音问出来”的这一次打开时传 true：
+   * 地图页要立刻把路线/院内指引读出来，即使自动朗读开关是关的。它不写回任何设置。
+   */
+  const openTravel = useCallback((appointmentId = '', focus: TravelFocus = 'outside',
+                                  options?: { forceSpeak?: boolean }) => {
+    setTravelAppointmentId(appointmentId);
+    setTravelFocus(focus);
+    setTravelForceSpeak(options?.forceSpeak === true);
+    setTravelSession(session => session + 1);
+    setActiveTab('travel');
+  }, []);
+  const closeTravel = useCallback(() => setActiveTab('tasks'), []);
+  const registerAssistantSend = useCallback((send: ((text: string) => void) | null) => {
+    assistantSendRef.current = send;
+  }, []);
+  const registerPageVoice = useCallback((handler: ((text: string) => boolean) | null) => {
+    pageVoiceRef.current = handler;
+  }, []);
+
+  /**
+   * 全局麦克风：当前页面能自己处理的口令就本地处理（不打断助手对话），
+   * 其余一律在后台交给助手；页面跳转由后端回传的 uiDirective 决定，不在前端猜、也不抢先切页。
+   */
+  const onGlobalVoice = useCallback((text: string) => {
+    if (pageVoiceRef.current?.(text)) return;
+    assistantSendRef.current?.(text);
+  }, []);
+
   return <MobileShell largeText={largeText}>
-    {activeTab === 'home' && <HomeView onNavigate={setActiveTab} />}
-    {activeTab === 'tasks' && <TasksView onNavigate={setActiveTab} />}
+    {activeTab === 'home' && <HomeView onNavigate={setActiveTab} onOpenTravel={openTravel} />}
+    {activeTab === 'tasks' && <TasksView onNavigate={setActiveTab} onOpenTravel={openTravel}
+      voicePreference={voicePreference} onRegisterVoice={registerPageVoice} />}
     <div className={activeTab === 'assistant' ? 'block' : 'hidden'} aria-hidden={activeTab !== 'assistant'}>
-      <AssistantView active={activeTab === 'assistant'} onNavigate={setActiveTab} voicePreference={voicePreference} />
+      <AssistantView active={activeTab === 'assistant'} onNavigate={setActiveTab}
+        onOpenTravel={openTravel} voicePreference={voicePreference} onRegisterSend={registerAssistantSend} />
     </div>
+    {activeTab === 'travel' && <TravelGuideView key={travelSession} appointmentId={travelAppointmentId}
+      initialTab={travelFocus} forceSpeak={travelForceSpeak} voicePreference={voicePreference}
+      onBack={closeTravel} onRegisterVoice={registerPageVoice} />}
     {activeTab === 'profile' && <ProfileView onNavigate={setActiveTab} largeText={largeText} onLargeTextChange={setLargeText}
       autoSpeakEnabled={voicePreference.autoSpeakEnabled} voicePreferenceBusy={voicePreferenceBusy}
-      voicePreferenceError={voicePreferenceError} onAutoSpeakChange={value => void changeAutoSpeak(value)} />}
-    <BottomNav activeTab={activeTab} onChange={setActiveTab} />
+      voicePreferenceError={voicePreferenceError} onAutoSpeakChange={value => void changeAutoSpeak(value)} />
+    }
+    {activeTab !== 'travel' && <BottomNav activeTab={activeTab} onChange={setActiveTab} />}
+    {/* 全局麦克风在所有页面保持同一位置，包括助手页和地图页。
+        它是操作入口而不是第五个路由；助手输入框不再重复放置第二个麦克风。 */}
+    <div className="fixed bottom-[46px] left-1/2 z-40 -translate-x-1/2">
+      <VoiceMicButton variant="floating" onTranscript={onGlobalVoice} />
+    </div>
   </MobileShell>;
 }

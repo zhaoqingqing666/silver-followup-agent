@@ -12,7 +12,8 @@
   "containerEnv": {
     // 前端开发时默认访问宿主映射到 8080 的后端
     "NEXT_PUBLIC_API_BASE_URL": "http://localhost:8080",
-    "AGENT_LLM_ENABLED": "false",
+    // 团队默认使用回退模式；后端 VS Code 任务可用本机 .devcontainer/.env 覆盖
+    "AGENT_MODEL_ENABLED": "false",
     "SPRING_DATASOURCE_URL": "jdbc:h2:file:/workspace/backend/data/silver-agent"
   },
   "mounts": [

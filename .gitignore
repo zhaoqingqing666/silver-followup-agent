@@ -26,6 +26,7 @@ frontend/.npm-cache/
 
 # Dev container 本机私有配置（不进仓库）
 .devcontainer/.env
+!.devcontainer/.env.example
 
 # Local secrets and OS files
 .DS_Store

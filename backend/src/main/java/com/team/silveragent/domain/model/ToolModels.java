@@ -14,6 +14,17 @@ public final class ToolModels {
     public record Contact(String id, String name, String relationship, String maskedPhone) { }
     public record TravelPlan(String transport, int durationMinutes, LocalDateTime departureAt,
                              String summary) { }
+    public record GeoPoint(double longitude, double latitude) { }
+    public record RouteGuide(String transport, int durationMinutes, int distanceMeters,
+                             LocalDateTime departureAt, GeoPoint origin, GeoPoint destination,
+                             List<GeoPoint> polyline, List<String> steps, String source) { }
+    public record FacilityGuide(String hospitalId, String departmentId, String building,
+                                String entrance, String floor, String room, String checkInPoint,
+                                String landmark, String accessibleRouteHint, String helpDesk,
+                                LocalDateTime verifiedAt) { }
+    public record AppointmentTravelGuide(String appointmentId, String hospital, String department,
+                                         LocalDateTime appointmentAt, RouteGuide route,
+                                         FacilityGuide facility, boolean simulated) { }
     public record HospitalProfile(String id, String name, String level, String address,
                                   String description, List<String> specialtyTags,
                                   List<String> elderlyServices) { }

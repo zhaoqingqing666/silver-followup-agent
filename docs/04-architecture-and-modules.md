@@ -1,6 +1,6 @@
 # 大框架与模块边界
 
-> 本文中的分包、类名和对象字段是早期推荐架构，不能直接当作源码目录。实际后端为 `api/`、`agent/`、`application/`、`domain/model/`、`domain/tool/`、`infrastructure/mock/`、`config/`，编排类是 `FollowupAgentService`。实际架构图、模块职责及待补齐设计见 [Design.md](../Design.md)；目前没有独立 `workflow/`、`ConfirmationGate` 或 Tool Registry 实现。
+> 本文中的分包、类名和对象字段包含早期推荐结构。当前源码已采用“单一主模型＋结构化预约草稿＋真实工具”的模型主导架构；写操作确认与执行仍保留在 `FollowupAgentService`，后续再按团队维护需要拆出独立确认服务。
 
 ## 一、推荐形态：模块化单体
 
@@ -27,7 +27,9 @@ flowchart LR
 
 `FollowUpOrchestrator` 是协调者，不负责实现所有细节。它读取当前状态，调用恰当模块，再组合统一响应。
 
-当前代码中的实际对应关系是：`application/AgentOrchestrator.java` 负责中控路由，`application/FollowupAgentService.java` 负责编排和确认门禁，`agent/DeepSeekFactExtractor.java` 负责自然语言理解，`domain/tool/` 定义工具边界，`infrastructure/mock/` 提供 H2 模拟实现。
+当前代码中的实际对应关系是：`AgentSystemPrompt` 是唯一主提示词，`LlmConversationPlanner` 负责首轮理解、草稿补全和工具选择，`LlmAnswerGenerator` 使用同一核心提示词读取真实工具结果。模型可用时，`AgentRuntime` 不运行关键词快速路由，也不使用 Stage 二次覆盖模型结论；`ToolRegistry` 暴露办事知识、医院/科室检索、草稿检查、号源、附近号源、重复预约、日程、本人预约、材料和地图工具。`FollowupAgentService` 合并结构化预约草稿并执行真实工具，写操作仍通过确认卡完成。`ModelGateway` 隔离具体模型厂商。
+
+对话状态与任务状态是两个维度：`DialogueMode` 表示本轮自由交流、支持性交流或流程办理，`TaskStatus` 表示是否存在未完成复诊任务。流程节点只决定恢复任务时从哪里继续，不能覆盖用户本轮真正的问题。地图模块同样保持工具化：`RouteGuideTool` 查询院外路线，`FacilityGuideTool` 查询院内位置，`TravelGuideService` 为事项页组合两类只读结果。
 
 ## 二、后端 IDEA 分包
 

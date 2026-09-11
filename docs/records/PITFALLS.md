@@ -1,5 +1,12 @@
 # 踩坑记录
 
+## 2026-09-09 `.env` 已填写但开发后端仍走规则模式
+
+- 现象：`.devcontainer/.env` 中已设置 `AGENT_MODEL_ENABLED=true`，重启旧的 `mvn spring-boot:run` 命令后，模型状态仍是 `RULE_FALLBACK` / `TEMPLATE_FALLBACK`。
+- 原因：环境变量只会由启动它的 shell 传给 Java 进程；普通 Maven 命令不会自动读取 `.env`。根目录 `.env` 则是 docker compose 的配置文件，也不会被开发容器中的 Maven 自动读取。
+- 处理：统一使用 VS Code 的“Dev Container: 后端服务”任务；该任务启动前可选加载 `.devcontainer/.env`。修改配置后停止并重新运行后端任务，不需要重建容器。
+- 结论：前端与后端在开发容器中是两个独立进程，停止或重启后端不会自动停止前端。
+
 ## 2026-09-02 脚手架默认部署依赖产生安全告警
 
 - 现象：初始站点脚手架带入 Cloudflare/Wrangler 依赖，`npm audit` 报告多项上游漏洞。
@@ -30,7 +37,7 @@
 - 现象：`FollowupAgentService.loadPrimaryContact`（会把一个主联系人放入 state）已定义但**从未被调用**，属死代码。
 - 处理：2026-09-07 已删除整条死代码链（`loadPrimaryContact`、接口 `FamilyNotificationTool.findPrimaryContact`、mock 实现及 `mask` 私有方法），容器内 `mvn test` 16/16 通过。提交见 `refactor/remove-dead-primary-contact`。
 - 结论：删除前后都不存在“默认联系人被当作已确认对象”的路径——`SET_NOTIFY=false` 清空 contact，`SET_CONTACT` 要求从候选人显式选择，`ready()` 也要求 `notifyFamily && contact != null`。
-- 留意点：容器内开启模型联调（`agent.llm.enabled=true`）时，若模型自由语言路径能影响 notify/contact 字段，仍需验证不会把主联系人误读为用户指定。
+- 留意点：容器内开启模型联调（`agent.model.enabled=true`）时，若模型自由语言路径能影响 notify/contact 字段，仍需验证不会把主联系人误读为用户指定。
 
 ## 记录模板
 

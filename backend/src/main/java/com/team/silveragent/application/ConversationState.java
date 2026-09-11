@@ -9,6 +9,9 @@ import java.time.LocalTime;
 import java.util.List;
 
 final class ConversationState {
+    enum DialogueMode { GENERAL_CHAT, FOLLOWUP_FLOW, SUPPORT, SMALL_TALK }
+    enum TaskStatus { NONE, ACTIVE, PAUSED, AWAITING_CONFIRMATION, COMPLETED, CANCELLED }
+
     enum Stage {
         ASK_HOSPITAL, ASK_DEPARTMENT, ASK_DATE, ASK_ALTERNATIVE,
         ASK_COMPANION, ASK_TRAVEL, ASK_TRANSPORT, ASK_NOTIFY,
@@ -19,6 +22,8 @@ final class ConversationState {
     final String id;
     String userId;
     Stage stage = Stage.ASK_HOSPITAL;
+    DialogueMode dialogueMode = DialogueMode.GENERAL_CHAT;
+    TaskStatus taskStatus = TaskStatus.NONE;
     String hospitalId;
     String hospital;
     String departmentId;
@@ -45,6 +50,13 @@ final class ConversationState {
     String interruptedPendingAppointmentId;
     String sideTask;
     String returnPolicy;
+    /** 医院/科室口语只命中一个近似候选时，先保存候选并等待用户确认。 */
+    String pendingEntityType;
+    String pendingEntityId;
+    String pendingEntityName;
+    String pendingEntityRaw;
+    /** 地图候选支线选中的方向：true=院内指引，false=院外路线。与取消支线互不共用。 */
+    boolean travelInside;
     String confirmationId;
     String originalAppointmentId;
     boolean materialReminderDone;

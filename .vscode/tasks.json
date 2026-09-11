@@ -4,21 +4,21 @@
     {
       "label": "Dev Container: 后端服务",
       "type": "shell",
-      "command": "test -f /.dockerenv && mvn spring-boot:run",
+      "command": "test -f /.dockerenv && set -a && if [ -f \"${workspaceFolder}/.devcontainer/.env\" ]; then . \"${workspaceFolder}/.devcontainer/.env\"; fi && set +a && mvn spring-boot:run",
       "options": { "cwd": "${workspaceFolder}/backend" },
       "problemMatcher": []
     },
     {
       "label": "Dev Container: 前端服务",
       "type": "shell",
-      "command": "test -f /.dockerenv && npm run dev",
+      "command": "test -f /.dockerenv && set -a && if [ -f \"${workspaceFolder}/.devcontainer/.env\" ]; then . \"${workspaceFolder}/.devcontainer/.env\"; fi && set +a && npm run dev",
       "options": { "cwd": "${workspaceFolder}/frontend" },
       "problemMatcher": []
     },
     {
       "label": "Dev Container: 验证项目",
       "type": "shell",
-      "command": "test -f /.dockerenv && mvn -B -f backend/pom.xml test -Dagent.llm.enabled=false && cd frontend && npx tsc --noEmit && npm run build",
+      "command": "test -f /.dockerenv && mvn -B -f backend/pom.xml test -Dagent.model.enabled=false && cd frontend && npx tsc --noEmit && npm run build",
       "options": { "cwd": "${workspaceFolder}" },
       "group": "test",
       "problemMatcher": []

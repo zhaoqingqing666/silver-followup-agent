@@ -5,9 +5,12 @@ import { CalendarCheck2, ChevronRight, ClipboardCheck, Headphones, HeartHandshak
 import { getAppointments, getUserProfile } from '@/lib/appointment-api';
 import type { AppointmentSummary, TabId } from '@/types/domain';
 
-interface HomeViewProps { onNavigate: (tab: TabId) => void }
+interface HomeViewProps {
+  onNavigate: (tab: TabId) => void;
+  onOpenTravel: (appointmentId?: string) => void;
+}
 
-export function HomeView({ onNavigate }: HomeViewProps) {
+export function HomeView({ onNavigate, onOpenTravel }: HomeViewProps) {
   const [appointment, setAppointment] = useState<AppointmentSummary | null>(null);
   const [userName, setUserName] = useState('您好');
 
@@ -62,7 +65,7 @@ export function HomeView({ onNavigate }: HomeViewProps) {
         <h2 className="mb-3 text-xl font-bold">常用服务</h2>
         <div className="grid grid-cols-2 gap-3">
           <button onClick={() => onNavigate(appointment ? 'tasks' : 'assistant')} className="rounded-3xl border bg-card p-4 text-left shadow-sm"><ClipboardCheck className="mb-3 size-8 text-primary" /><strong className="block text-lg">检查材料</strong><span className="mt-1 block text-sm text-muted-foreground">{appointment ? '查看材料清单' : '预约后生成清单'}</span></button>
-          <button onClick={() => onNavigate(appointment ? 'tasks' : 'assistant')} className="rounded-3xl border bg-card p-4 text-left shadow-sm"><Route className="mb-3 size-8 text-primary" /><strong className="block text-lg">出行安排</strong><span className="mt-1 block text-sm text-muted-foreground">{appointment ? '查看出发时间' : '预约后生成建议'}</span></button>
+          <button onClick={() => appointment ? onOpenTravel(appointment.appointmentId) : onNavigate('assistant')} className="rounded-3xl border bg-card p-4 text-left shadow-sm"><Route className="mb-3 size-8 text-primary" /><strong className="block text-lg">出行安排</strong><span className="mt-1 block text-sm text-muted-foreground">{appointment ? '地图、路线和诊室' : '预约后生成建议'}</span></button>
         </div>
       </section>
       <p className="flex items-center justify-center gap-2 text-sm text-muted-foreground"><CalendarCheck2 className="size-4" />当前内容均为比赛演示数据</p>

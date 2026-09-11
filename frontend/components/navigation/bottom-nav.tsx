@@ -1,3 +1,4 @@
+import { Fragment } from 'react';
 import { CalendarDays, Home, MessageCircleHeart, UserRound } from 'lucide-react';
 
 import type { TabId } from '@/types/domain';
@@ -17,9 +18,10 @@ export function BottomNav({ activeTab, onChange }: { activeTab: TabId; onChange:
     >
       {navItems.map(({ id, label, icon: Icon }) => {
         const active = id === activeTab;
-        return (
+        return <Fragment key={id}>
+          {/* 中间给悬浮麦克风让出位置：全局麦克风正好落在“事项”和“助手”之间。 */}
+          {id === 'assistant' && <span className="w-16 shrink-0" aria-hidden="true" />}
           <button
-            key={id}
             type="button"
             className={`flex min-h-16 min-w-16 flex-col items-center justify-center gap-1 rounded-2xl px-3 text-[14px] font-medium transition active:scale-95 ${active ? 'text-primary' : 'text-muted-foreground'}`}
             aria-current={active ? 'page' : undefined}
@@ -28,7 +30,7 @@ export function BottomNav({ activeTab, onChange }: { activeTab: TabId; onChange:
             <Icon className="size-6" aria-hidden="true" />
             {label}
           </button>
-        );
+        </Fragment>;
       })}
     </nav>
   );

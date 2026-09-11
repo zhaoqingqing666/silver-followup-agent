@@ -1,13 +1,21 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { BellRing, CalendarPlus, Clock3, History, LoaderCircle, MapPin, Navigation, RefreshCw, UsersRound } from 'lucide-react';
+import { useCallback, useEffect, useState } from 'react';
+import { BellRing, CalendarPlus, ChevronRight, Clock3, History, LoaderCircle, MapPin, Navigation, RefreshCw, Route, UsersRound } from 'lucide-react';
 import { PageHeader } from '@/components/common/page-header';
 import { MaterialChecklist } from '@/features/materials/material-checklist';
+import { matchPageVoiceCommand } from '@/features/voice/voice-commands';
 import { getAppointments } from '@/lib/appointment-api';
-import type { AppointmentSummary, TabId } from '@/types/domain';
+import { speakText } from '@/lib/speech-service';
+import type { AppointmentSummary, TabId, VoicePreference } from '@/types/domain';
 
-export function TasksView({ onNavigate }: { onNavigate: (tab: TabId) => void }) {
+export function TasksView({ onNavigate, onOpenTravel, voicePreference, onRegisterVoice }: {
+  onNavigate: (tab: TabId) => void;
+  onOpenTravel: (appointmentId?: string) => void;
+  voicePreference?: VoicePreference;
+  /** 注册本页的只读语音口令（返回、再念一遍）；返回 false 表示交给助手处理。 */
+  onRegisterVoice?: (handler: ((text: string) => boolean) | null) => void;
+}) {
   const [appointments, setAppointments] = useState<AppointmentSummary[]>([]);
   const [selectedId, setSelectedId] = useState('');
   const [loading, setLoading] = useState(true);
@@ -28,13 +36,36 @@ export function TasksView({ onNavigate }: { onNavigate: (tab: TabId) => void }) 
     }
   };
 
-  useEffect(() => { void load(); }, []);
+  useEffect(() => {
+    void load();
+    // 助手在别的页面确认或取消预约后，这里要重新读取，否则还显示旧数据。
+    const refresh = () => void load();
+    window.addEventListener('silver-agent-appointments-updated', refresh);
+    return () => window.removeEventListener('silver-agent-appointments-updated', refresh);
+  }, []);
 
   const appointment = appointments.find(item => item.appointmentId === selectedId) ?? appointments[0];
 
   const selectAppointment = (row: AppointmentSummary) => {
     setSelectedId(row.appointmentId);
   };
+
+  /** 页面只读语音口令：说话是明确要求，所以不受“自动朗读”开关限制。 */
+  const handleVoiceCommand = useCallback((text: string) => {
+    const command = matchPageVoiceCommand(text);
+    if (command === 'BACK') { onNavigate('home'); return true; }
+    if (command !== 'REPEAT') return false;
+    const options = { rate: voicePreference?.speechRate, volume: voicePreference?.speechVolume };
+    if (!appointment) { speakText('现在还没有复诊事项可以念。', 'tasks-empty', options); return true; }
+    speakText(appointmentNarration(appointment, appointments), `appointment-${appointment.appointmentId}`, options);
+    return true;
+  }, [appointment, appointments, onNavigate, voicePreference?.speechRate, voicePreference?.speechVolume]);
+
+  useEffect(() => {
+    if (!onRegisterVoice) return;
+    onRegisterVoice(handleVoiceCommand);
+    return () => onRegisterVoice(null);
+  }, [onRegisterVoice, handleVoiceCommand]);
 
   return (
     <main className="space-y-5 px-5 pb-8 pt-5">
@@ -90,6 +121,12 @@ export function TasksView({ onNavigate }: { onNavigate: (tab: TabId) => void }) 
               <p className="flex items-center gap-2"><MapPin className="size-5 text-primary" />{appointment.hospital} · {appointment.department}</p>
               <p className="flex items-center gap-2"><Navigation className="size-5 text-primary" />{appointment.departureAt ? `建议 ${formatDateTime(appointment.departureAt)} 出发` : '未设置出行提醒'}</p>
             </div>
+            <button onClick={() => onOpenTravel(appointment.appointmentId)}
+              className="mt-5 flex min-h-14 w-full items-center justify-between rounded-2xl bg-primary px-4 text-left text-white shadow-sm disabled:opacity-50"
+              disabled={appointment.status !== 'CONFIRMED'}>
+              <span className="flex items-center gap-3"><Route className="size-6" /><span><strong className="block text-lg">查看地图与院内指引</strong><span className="text-sm text-white/80">路线、楼层和诊室位置</span></span></span>
+              <ChevronRight className="size-6" />
+            </button>
           </section>
 
           <MaterialChecklist appointmentId={appointment.appointmentId} disabled={appointment.status !== 'CONFIRMED'} />
@@ -102,6 +139,26 @@ export function TasksView({ onNavigate }: { onNavigate: (tab: TabId) => void }) 
       )}
     </main>
   );
+}
+
+/** 只用列表接口返回的真实字段拼接，不虚构任何内容。 */
+function appointmentNarration(row: AppointmentSummary, all: AppointmentSummary[]) {
+  const others = all.length > 1 ? `您一共有${all.length}条复诊记录。` : '';
+  return [
+    `您${formatDate(row.date)}${spokenClock(row.time)}在${row.hospital}${row.department}复诊，状态是${row.status === 'CONFIRMED' ? '已预约' : '已取消'}。`,
+    row.departureAt ? `建议${formatTime(row.departureAt)}出发。` : '还没有设置出发提醒。',
+    row.reminderStatus ? `提醒：${row.reminderStatus}。` : '',
+    row.familyStatus ? `家属通知：${row.familyStatus}。` : '',
+    others,
+    row.status === 'CONFIRMED' ? '想看路线的话，可以说“打开地图”。' : '',
+  ].filter(Boolean).join('');
+}
+
+function spokenClock(value: string) {
+  const [hourText, minuteText] = formatTime(value).split(':');
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  return `${hour < 12 ? '上午' : '下午'}${hour > 12 ? hour - 12 : hour}点${minute === 0 ? '' : `${minute}分`}`;
 }
 
 function formatDate(value: string) {

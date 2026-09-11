@@ -1,4 +1,4 @@
-export type TabId = 'home' | 'tasks' | 'assistant' | 'profile';
+export type TabId = 'home' | 'tasks' | 'assistant' | 'profile' | 'travel';
 
 export type PlanStepStatus = 'done' | 'active' | 'pending';
 
@@ -96,6 +96,17 @@ export interface AgentResultCard {
   familyStatus: string;
 }
 
+/** 后端封闭枚举；前端遇到未知 type 必须安全忽略，不跳空白页。 */
+export type AgentUiDirectiveType =
+  | 'NONE' | 'OPEN_ASSISTANT' | 'OPEN_TASKS' | 'OPEN_MATERIALS' | 'OPEN_TRAVEL'
+  | 'SHOW_OUTSIDE_ROUTE' | 'SHOW_INSIDE_GUIDE' | 'FOCUS_CONFIRMATION';
+
+export interface AgentUiDirective {
+  type: AgentUiDirectiveType;
+  appointmentId: string | null;
+  focus: string | null;
+}
+
 export interface AgentTurnResponse {
   conversationId: string;
   stage: string;
@@ -105,6 +116,61 @@ export interface AgentTurnResponse {
   confirmation: AgentConfirmationCard | null;
   result: AgentResultCard | null;
   toolTraces: ToolTrace[];
+  task: AgentTaskProgress | null;
+  /** 本轮需要朗读的权威文本；为空时退回 reply。 */
+  speechText?: string | null;
+  uiDirective?: AgentUiDirective | null;
+}
+
+export type TravelFocus = 'outside' | 'inside';
+
+export interface AgentTaskProgress {
+  active: boolean;
+  status: 'NONE' | 'ACTIVE' | 'PAUSED' | 'AWAITING_CONFIRMATION' | 'COMPLETED' | 'CANCELLED';
+  currentStage: string;
+  summary: string;
+  missingField: string | null;
+}
+
+export interface GeoPoint {
+  longitude: number;
+  latitude: number;
+}
+
+export interface RouteGuide {
+  transport: string;
+  durationMinutes: number;
+  distanceMeters: number;
+  departureAt: string;
+  origin: GeoPoint;
+  destination: GeoPoint;
+  polyline: GeoPoint[];
+  steps: string[];
+  source: string;
+}
+
+export interface FacilityGuide {
+  hospitalId: string;
+  departmentId: string;
+  building: string;
+  entrance: string;
+  floor: string;
+  room: string;
+  checkInPoint: string;
+  landmark: string | null;
+  accessibleRouteHint: string;
+  helpDesk: string | null;
+  verifiedAt: string;
+}
+
+export interface AppointmentTravelGuide {
+  appointmentId: string;
+  hospital: string;
+  department: string;
+  appointmentAt: string;
+  route: RouteGuide;
+  facility: FacilityGuide;
+  simulated: boolean;
 }
 
 export interface ConversationHistoryResponse {

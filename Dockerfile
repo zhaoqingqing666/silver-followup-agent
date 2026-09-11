@@ -34,7 +34,11 @@ FROM node:22-alpine AS silver-web
 WORKDIR /app
 # 浏览器访问后端的地址在构建期就写入 JS 产物；部署到别的机器用 build-arg 覆盖
 ARG NEXT_PUBLIC_API_BASE_URL=http://localhost:8080
+ARG NEXT_PUBLIC_AMAP_JS_KEY=
+ARG NEXT_PUBLIC_AMAP_SECURITY_CODE=
 ENV NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL}
+ENV NEXT_PUBLIC_AMAP_JS_KEY=${NEXT_PUBLIC_AMAP_JS_KEY}
+ENV NEXT_PUBLIC_AMAP_SECURITY_CODE=${NEXT_PUBLIC_AMAP_SECURITY_CODE}
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
 COPY frontend ./
