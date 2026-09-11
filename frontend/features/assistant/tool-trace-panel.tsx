@@ -2,7 +2,8 @@ import { ChevronDown, Wrench } from 'lucide-react';
 import type { ToolTrace } from '@/types/domain';
 
 export function ToolTracePanel({ traces }: { traces: ToolTrace[] }) {
-  if (!traces.length) return null;
+  // 老会话快照里可能没有这个字段，按空处理而不是直接读 length。
+  if (!traces?.length) return null;
   return <details className="rounded-2xl border bg-white/80 px-4 py-3">
     <summary className="flex cursor-pointer list-none items-center gap-2 font-semibold text-[#6d432c]">
       <Wrench className="size-5" /> 查看办理过程

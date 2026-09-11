@@ -8,6 +8,7 @@ import { speakText, stopSpeech } from '@/lib/speech-service';
 import type { AgentPlanCard, AgentTurnResponse, ChatMessage, TabId, VoicePreference } from '@/types/domain';
 import { BoundaryAlert, ConfirmationCardView, PlanCard, ResultCardView } from './assistant-cards';
 import { ChatBubble } from './chat-bubble';
+import { ToolTracePanel } from './tool-trace-panel';
 
 interface SpeechRecognitionLike {
   lang: string;
@@ -124,9 +125,8 @@ export function AssistantView({ active, onNavigate, voicePreference }: {
     setMessages(items => [...items, { id: crypto.randomUUID(), role: 'user', text: approved ? '我确认执行这些操作' : '暂不执行' }]);
     setBusy(true);
     try {
-      const response = await confirmAgentActions(conversationId, approved, turn.confirmation.confirmationId);
-      addAssistant(response);
-      if (response.result) window.dispatchEvent(new Event('silver-agent-appointments-updated'));
+      // 预约结果会写进数据库；事项页每次切换标签都会重新挂载并重新拉取，不需要额外广播。
+      addAssistant(await confirmAgentActions(conversationId, approved, turn.confirmation.confirmationId));
     }
     catch { setMessages(items => [...items, { id: crypto.randomUUID(), role: 'assistant', text: '暂时未收到办理结果，请重新连接查看当前进度。' }]); }
     finally { setBusy(false); }
@@ -179,6 +179,8 @@ export function AssistantView({ active, onNavigate, voicePreference }: {
       {turn?.notice && <BoundaryAlert notice={turn.notice} />}
       {turn?.confirmation && <ConfirmationCardView card={turn.confirmation} busy={busy} onConfirm={() => void confirm(true)} onCancel={() => void confirm(false)} />}
       {turn?.result && <ResultCardView result={turn.result} partial={turn.stage === 'PARTIAL'} />}
+      {/* 工具调用轨迹：让评审能看到参数和结果都来自后端记录，而不是页面写死。 */}
+      {turn && <ToolTracePanel traces={turn.toolTraces} />}
       {/* 医院询问返回空 quickReplies，继续使用下方语音或文字输入。 */}
       {!!turn?.quickReplies.length && !turn.confirmation && <section aria-label="快捷回答" className="flex flex-wrap gap-2">
         {turn.quickReplies.slice(choicePage * 3, choicePage * 3 + 3).map(choice => <button key={choice.label + choice.action + choice.value} disabled={busy} onClick={() => void sendAction(choice.action, choice.value, choice.label)} className="min-h-12 rounded-2xl border border-[#dfb98f] bg-white px-4 text-base font-semibold text-[#6c3d24] shadow-sm disabled:opacity-50">{choice.label}</button>)}
