@@ -96,6 +96,12 @@ backend/src/main/java/com/team/silveragent/
 
 ## 四、核心领域对象
 
+> **注意**：本节（含上面的目录树）是最初的设计稿，实际实现没有照搬：
+> `FollowUpContext` / `FollowUpPlan` / `PlanStep` / `dto/` / `repository/` 这些文件并不存在。
+> 当前实现里，一次办理的上下文是 `ConversationState`，展示用的计划是
+> `AgentTurnResponse.PlanCard`，接口出入参是各自的 `*Request` / `*Response` record。
+> 以 `backend/src/main/java` 下的实际文件为准。
+
 ### `FollowUpContext`
 
 一次办理任务的完整上下文，包含用户输入字段、当前状态、计划、已选时段和确认信息。

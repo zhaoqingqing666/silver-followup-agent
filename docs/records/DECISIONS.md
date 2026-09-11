@@ -119,3 +119,14 @@
 - 决定：连同快照槽位一起删除，而不是在文档里保留“以后可能用到”的说明。
 - 原因：状态快照里的无效字段会让后续维护者误以为它们参与路由。
 - 影响：旧会话快照反序列化时未知属性被 Spring Boot 的 `ObjectMapper` 忽略，最坏结果是该会话需要重新开始，不影响业务数据。
+
+## 2026-09-11 清理死代码、占位实现与魔法数字
+
+- 背景：一轮静态审阅后发现若干没有调用方的声明、一处占位类、以及散落的字面量（REVIEW_FINDINGS 之外的独立清理）。
+- 删除的无引用代码：`MockCareTools`（占位类）、`FollowupPlan`（死 record）、`ConversationState(String)`（单参构造器）、`RuleFactExtractor` 中不可达的取消分支、`act` 中不可达的 `NEW_BOOKING` case、前端 `getConversationHistory` 与其响应类型、前端 `PlanStep` / `PlanStepStatus`。
+- 删除的“文档里写了但没人调用”的工具：`catalog.searchDepartments`（接口 + Mock + 仓储），同步删除 `05-api-contracts.md` 中的一行；按科室选择走 `queryDepartments`，按科室筛医院走 `recommendHospitals`。
+- 接线的死组件：`ToolTracePanel` 挂在助手页，`toolTraces` 从此有渲染出口，满足 `Design.md` 4.3 的“工具调用记录展示”。同时补上 `ToolTracePanel` 对空 `traces` 的守卫。
+- 修掉的陈旧数据缺陷：`silver-agent-materials-updated` 原先只有派发没有监听。助手页常驻不卸载，事项页每次切换标签重新挂载，两边会同时存在同一个 appointmentId 的清单；现在监听方在 appointmentId 匹配且不是自己派发时重新拉取。`silver-agent-appointments-updated` 则直接删除——事项页与首页都会重新挂载并重新拉取，广播是多余的。
+- 删除的占位控件：我的页面里“隐私与安全 / 查看数据使用说明”是一个没有 onClick 的按钮，且内容已被页面底部的模拟数据说明覆盖，整行删除。
+- 抽取的常量：可预约窗口 `BookingWindow`（号源生成与日期校验共用，原先各写 `.plusMonths(1)`）、时段码 `Periods`、模拟标记 `SimulatedData`、提醒提前量与标题、各类列表上限、SQL 窗口（`RECENT_MESSAGE_LIMIT` / `TOOL_TRACE_LIMIT`）、MockTravelTool 的取号缓冲、LLM 的 temperature 与 max_tokens。前端对应抽出 `app-config.ts`（API 地址、演示用户、语音默认值、分页大小、演示提示语）、`datetime.ts`（日期时间截断）、`MATERIAL_STATUS` / `APPOINTMENT_STATUS`。
+- 影响：行为不变。唯一的可见变化是“我的”页面少了一行无功能按钮，助手页多了一块可折叠的工具调用轨迹。
