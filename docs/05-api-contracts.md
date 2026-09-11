@@ -1,12 +1,20 @@
 # 前后端 API 契约
 
+> 文档版本：v0.2　更新日期：2026年9月11日
+
 服务地址：http://localhost:8080
 
 ## 创建会话
 
-POST /api/agent/conversations?userId=user-001，无请求体。
+POST /api/agent/conversations?userId=user-001&actorId=family-001，无请求体。
 
-userId 可省略；省略时读取 DEMO_USER_ID，默认 user-001。
+这段会话身份拆成两个轴：`userId` 是数据轴（这次会话服务谁），`actorId` 是能力轴（谁在操作）。两者都可省略。
+
+- 不传 `actorId` = 本人自办，行为与改造前完全一致。
+- 传了 `actorId` 且与 `userId` 不同 = 代他人办理。后端按 `care_relations` 表校验绑定关系，关系不存在或角色不是家属/志愿者时返回 400「没有权限查看这位就诊人的信息」。
+- 两个参数只用于关系校验与话术，**不注入任何工具参数**。身份固化保存进 `ConversationState`，因为确认接口 `POST /api/agent/confirmations` 只带 `conversationId`。
+
+`userId` 省略时读取 DEMO_USER_ID，默认 user-001。
 
 新会话的 `task.status` 为 `NONE`，助手不立即创建预约草稿。用户点击“开始复诊办理”或明确表达预约目标后，状态变为 `ACTIVE`。普通交流可使任务变为 `PAUSED`，但 `currentStage` 和已收集字段保留。
 
@@ -137,3 +145,46 @@ quickReplies：[{"label":"市第一医院","action":"SET_HOSPITAL","value":"h001
 - CHANGE_DEPARTMENT、CHANGE_TIME：清理受影响的下游选择，再进入对应节点。
 - 自由语言 CONFIRM_ACTION、DENY_ACTION 只有在 AWAITING_CONFIRMATION 状态下有效。
 - “取消当前办理”与“取消已确认预约”是不同路由；后者必须调用个人预约查询工具并经过确认端点。
+
+## 角色、工具白名单与路由（2026-09-11）
+
+- `AgentRole` 枚举取值为 `ELDER` / `FAMILY` / `VOLUNTEER`；`isCaregiver()` 即“非 ELDER”。
+- `ToolRegistry` 共注册 **16 个只读工具**：14 个两端通用，另 2 个仅家属/志愿者可见（`care.timeline`、`care.notifications`）。模型可见的工具由 `plannerTools(role)` 按角色过滤，但**过滤不等于安全**：`ToolPolicy` 在执行时再校验一次角色与风险等级。
+- 写操作（预约/取消/提醒/通知）不进入模型可自动执行的工具表，必须过确认门禁。
+- `domain/tool/` 下共 **14 个领域工具接口**，本次新增 `HealthRecordTool`、`MemoTool`。
+- `AgentOrchestrator.Route` 共 **38 个值**。新增路由：`MANAGE_MEMO`、`RECORD_HEALTH_VALUE`、`SEND_HEALTH_REPORT`、`QUERY_CARE_TIMELINE`、`QUERY_CARE_NOTIFICATIONS`、`REMIND_ELDER`。其中 `REMIND_ELDER`（给长辈留提醒）与 `MANAGE_MEMO`（本人记账）是不同意图。
+
+## 健康记录与健康备忘（2026-09-11）
+
+健康记录是老人上报的实测数值（血压/血糖/心率等），写入只来自助手对话，页面侧只读：
+
+- `GET /api/users/{userId}/health-records?limit=&offset=`：按测量时间倒序取记录，`limit` 缺省 3 条。
+- `GET /api/users/{userId}/health-records/count`：总条数，供首页按钮显示“共N条”。
+- 数值异常时助手先反问，而不是直接落库。
+
+健康备忘是老人要做的事，支持重复规则（`DAILY`/`WEEKLY`/`MONTHLY`，`null` 表示只提醒一次）：
+
+- `GET /api/users/{userId}/memos?kind=&limit=&offset=`：进行中的备忘列表，`kind` 取 `standing`（长期）/`timed`（到点提醒），缺省全都要。
+- `GET /api/users/{userId}/memos/count`：两类各有几条进行中的备忘。
+- `PUT /api/users/{userId}/memos/{memoId}`：改内容、改提醒时间或重复规则；`remindAt` 传 null 表示转成长期备忘。
+- `POST /api/users/{userId}/memos/{memoId}/done`：标记完成。
+- `DELETE /api/users/{userId}/memos/{memoId}`：删除。
+
+健康记录汇总下发（页面入口与助手里“把这个月的血压发给女儿”、每周自动小结是同一条路）：
+
+- `GET /api/users/{userId}/family-contact`：主联系人，供页面显示“发给女儿 小丽”；未配家属时 `contact` 为 null，电话为脱敏掩码。
+- `POST /api/users/{userId}/health-report?range=week|month&item=`：把健康记录汇总后发给家属，`range` 缺省 `week`，`item` 可选只发某个项目。
+
+## 协同照护端（2026-09-11）
+
+家属/志愿者端助手接的是**同一个智能体、同一套工具和确认门禁**（同样走 `/api/agent/*`），不是另一套。只读接口：
+
+- `GET /api/caregivers/{cid}/elders`：当前照护者协同的就诊人列表。
+- `GET /api/caregivers/{cid}/elders/{uid}/timeline`：某位长辈的复诊动态时间线。
+- `GET /api/caregivers/{cid}/notifications`：发给当前照护者的协同通知。
+
+代长辈预约复诊由 `POST /api/caregivers/{cid}/elders/{uid}/book` 写入（另有 `/hospitals`、`/departments`、`/windows` 查询和 `/modify`、`/accompany`、`/cancel` 辅助子路径）。写入模型为 `CareBookingService.book(actor, subject, request)`，`appointments.arranged_by` 记为操作者。要点：
+
+- 代他人办理时**不问“通知哪位家属”**：操作者本人就是被通知方，代约本身会通知其他照护者。
+- 长辈名下已有进行中的预约时先拦下，并给出“先取消已有预约”的路。
+- 确认卡列出“服务对象”与“代约归属”两项。

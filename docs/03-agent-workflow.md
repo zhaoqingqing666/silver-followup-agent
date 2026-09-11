@@ -1,5 +1,7 @@
 # Agent 工作流
 
+> 文档版本：v0.2　更新日期：2026年9月11日
+
 > 当前实际流程及兼容状态字段见 [Design.md](../Design.md)。2026-09-10 已改为单一主模型驱动的工具智能体：模型负责理解、预约草稿补全、追问顺序、异常恢复和工具选择；Java Stage 只用于旧前端进度展示，不再覆盖成功的模型意图。
 
 ## 一轮处理
@@ -47,7 +49,8 @@
 
 ## 关键文件
 
-- ConversationState.java：当前流程字段。
+- ConversationState.java：当前流程字段；并用 `actorUserId` / `actorRole` / `relationLabel` 保存会话身份。
+- AgentRole.java：`ELDER` / `FAMILY` / `VOLUNTEER` 身份枚举，`isCaregiver()` 即非 `ELDER`。
 - ConversationStore.java：会话状态和对话持久化。
 - LlmConversationPlanner.java：通过可替换模型网关提出结构化动作、只读工具和自然回答。
 - AgentRuntime.java：协调首轮模型建议、工具结果续跑、权限审核和工作流路由。
@@ -60,6 +63,8 @@
 - AgentOrchestrator.java：仅保留规则降级与兼容动作映射；模型成功时不参与自然语言二次裁决。
 - FollowupAgentService.java：API 协调、现有业务状态机和确认执行；后续继续拆薄。
 - MyAppointmentTool.java / H2MyAppointmentTool.java：查询数据库中的个人已确认预约。
+- HealthRecordTool.java / MemoTool.java：健康记录与健康备忘的领域工具，写入只来自助手对话。
+- CareService.java / CareBookingService.java：协同照护端的只读查询与代约写入（`appointments.arranged_by` 记操作者）。
 
 ## 日期后的时段选择细化（2026-09-03）
 
@@ -75,3 +80,34 @@
 - 在一次网页运行中切换页面，助手保持挂载，聊天不丢失。
 - 刷新或重新打开网页会创建新的前端会话，不自动恢复并展示很长的历史聊天。
 - 后端数据库保留历史会话和工具轨迹，便于调试、审计和录屏证明真实调用。
+
+## 会话身份：数据轴与能力轴（2026-09-11）
+
+- 建会话 `POST /api/agent/conversations?userId=<服务对象>&actorId=<操作者，可选>`。`userId` 是数据轴（这次会话服务谁），`actorId` 是能力轴（谁在操作）。
+- 不传 `actorId` = 本人自办，行为与改造前完全一致；传了且与 `userId` 不同 = 代他人办理，后端按 `care_relations` 校验，未绑定返回 400「没有权限查看这位就诊人的信息」。
+- 身份由 `AgentRole`（`ELDER` / `FAMILY` / `VOLUNTEER`，`isCaregiver()` 即非 `ELDER`）表示，固化进 `ConversationState`，因为确认接口 `POST /api/agent/confirmations` 只带 `conversationId`。
+- `actorId` 只用于关系校验与话术，**不注入任何工具参数**：服务对象始终是 `userId`。
+
+## 工具可见性与模型工具循环（2026-09-11）
+
+- `ToolRegistry` 共注册 16 个只读工具：14 个两端通用，另 2 个仅家属/志愿者可见（`care.timeline`、`care.notifications`）。
+- 模型可见工具由 `plannerTools(role)` 按角色过滤；过滤不等于安全，`ToolPolicy` 在执行时再按角色与风险等级校验一次。
+- 单个用户轮次内，模型可依据只读工具结果继续选下一项工具，最多 `MAX_MODEL_TOOL_ROUNDS = 3` 轮；相同工具与参数禁止重复。
+- 写操作（预约/取消/提醒/通知）不进入模型可自动执行的工具表，必须过确认门禁。
+- `domain/tool/` 下共 14 个领域工具接口，本次新增 `HealthRecordTool`、`MemoTool`。
+
+## 健康记录与健康备忘（2026-09-11）
+
+- `HealthRecordTool`：老人实测数值（血压/血糖/心率等）的读写，写入只来自助手对话；数值异常时先反问，不直接落库。
+- `MemoTool`：备忘支持 `DAILY`/`WEEKLY`/`MONTHLY` 重复规则，传 null 表示只提醒一次；可查、改时间、删。
+- 新增路由：`MANAGE_MEMO`、`RECORD_HEALTH_VALUE`、`SEND_HEALTH_REPORT`。
+- 接口：`/api/users/{userId}/health-records`、`/api/users/{userId}/memos`，健康汇总下发为 `/api/users/{userId}/health-report`。
+
+## 协同照护端（2026-09-11）
+
+- 家属/志愿者端助手接的是**同一个智能体、同一套工具和确认门禁**，不是另一套。
+- 可做三类事：查询长辈的复诊安排/材料/就诊动态；代长辈预约复诊（走确认卡）；给长辈留一条提醒（落进长辈自己的备忘并标明是谁留的）。
+- 代约由 `CareBookingService.book(actor, subject, request)` 写入，`appointments.arranged_by` 记为操作者；确认卡列出「服务对象」与「代约归属」。
+- 代他人办理时**不问“通知哪位家属”**：操作者本人就是被通知方，代约本身会通知其他照护者。
+- 长辈名下已有进行中的预约时会先拦下，并给出「先取消已有预约」的路。
+- 新增路由：`QUERY_CARE_TIMELINE`、`QUERY_CARE_NOTIFICATIONS`（对应仅照护端可见的两条工具）、`REMIND_ELDER`（给长辈留提醒，区别于本人记账的 `MANAGE_MEMO`）。

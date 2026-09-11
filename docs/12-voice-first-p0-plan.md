@@ -2,6 +2,29 @@
 
 > 面向实施者（含 AI 助手）的 P0 范围任务说明。**本文件只描述 P0，不包含 P1/P2。**
 
+## 状态说明（2026年9月11日补记）
+
+**本文件不是比赛正文，是当时下达的实施任务书**，保留用于追溯改造范围与验收口径。按 `参赛文档维护说明.md`，比赛正文只有 `报名解决方案.md` 与 `设计思路报告.md` 两份，本文件不属于其中。
+
+P0 范围**已全部实施完成**，P1 的主要项也已落地：
+
+| 计划项 | 现状 | 代码依据 |
+| --- | --- | --- |
+| `speechText` / `uiDirective` 响应字段 | 已实现，含 8 参兼容构造 | `backend/.../domain/model/AgentTurnResponse.java` |
+| `UiDirective` 封闭枚举（含预留的 `OPEN_MATERIALS`） | 已实现，8 个值与计划一致 | 同上 |
+| 前端安全忽略未知指令、按指令跳页 | 已实现 | `frontend/app/page.tsx`、`assistant-view.tsx` |
+| 预约完成完整播报 | 已实现，硬编码完成回复已移除 | `FollowupAgentService.java`（`authoritativeSpeech`） |
+| P1：语音抽到 `frontend/features/voice/` | 已实现 | `speech-recognition.ts`、`use-voice-input.ts`、`voice-commands.ts`、`voice-mic-button.tsx` |
+| P1：全局麦克风入口（悬浮、非路由） | 已实现 | `frontend/app/page.tsx` |
+| P1：本地口令不经大模型 | 已实现 | `frontend/features/voice/voice-commands.ts` |
+
+**正文的「已核实的代码事实」表是下达任务时的快照，已发生漂移，实施前不要照抄**，主要两处：
+
+- `new AgentTurnResponse(...)` 调用点从 11 处增至 **16 处**（`FollowupAgentService` 15 处 + record 内 1 处），兼容构造函数仍必须保留。
+- 「办理完成，请查看复诊事项卡。」的硬编码回复**已不存在**，完成口径改由 `authoritativeSpeech` 统一给出 `reply` 与 `speechText`。
+
+以下正文按原文保留，不做改写。
+
 ## 0. 范围与红线（必须先看）
 
 **本阶段只做 P0，且必须遵守：**

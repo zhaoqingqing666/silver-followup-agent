@@ -1,11 +1,15 @@
 # 小白实施指南：按依赖关系搭建
 
+> **文档版本：** v0.2 **更新日期：** 2026年9月11日
+>
+> 本指南按依赖关系从零搭建项目骨架，覆盖到 v0.1 的能力范围。v0.2 新增的协同照护端、双轴会话身份、健康记录与健康备忘请以 `11-agent-architecture-and-controlled-tool-calling.md`、`03-agent-workflow.md` 和 `05-api-contracts.md` 为准，本指南不重复展开。
+
 这不是日程表，而是正确的搭建依赖。后面的步骤依赖前面的结果，不建议跳过。
 
 ## 第一步：建立项目根目录
 
 ```text
-D:\Work\guochuangsai\silver-followup-agent
+<你的工作目录>/silver-followup-agent
 ```
 
 把当前文档包放入该目录，然后初始化 Git：
@@ -21,7 +25,7 @@ silver-followup-agent/
 在 IDEA 中创建 Spring Boot 项目：
 
 - Name：`backend`
-- Location：`D:\Work\guochuangsai\silver-followup-agent\backend`
+- Location：`<你的工作目录>\silver-followup-agent\backend`
 - Java：17
 - Build：Maven
 - 依赖：Spring Web、Validation
