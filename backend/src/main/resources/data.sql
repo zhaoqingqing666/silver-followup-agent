@@ -4,6 +4,10 @@
 MERGE INTO users KEY(id) VALUES
 ('user-001','王阿姨','幸福小区（模拟）','家属开车');
 
+INSERT INTO user_preferences(user_id,auto_speak_enabled,speech_rate,speech_volume,updated_at)
+SELECT 'user-001',FALSE,0.9,1.0,CURRENT_TIMESTAMP
+WHERE NOT EXISTS (SELECT 1 FROM user_preferences WHERE user_id='user-001');
+
 MERGE INTO hospitals (id,name,address,hospital_level,description,specialty_tags,elderly_services,enabled) KEY(id) VALUES
 ('h001','市第一医院（模拟）','健康路1号（模拟）','三级甲等','以心血管、神经系统疾病和老年慢病复诊服务为特色。','心血管,神经内科,老年慢病管理','老年服务窗口,轮椅通道,志愿者引导',TRUE),
 ('h002','市人民医院（模拟）','人民路88号（模拟）','三级甲等','提供内分泌、骨科和常见慢性病复诊服务。','内分泌,骨科,慢性病随访','无障碍电梯,人工挂号窗口,家属等候区',TRUE);

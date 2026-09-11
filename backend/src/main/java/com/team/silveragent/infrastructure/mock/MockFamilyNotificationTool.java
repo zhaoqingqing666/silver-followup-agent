@@ -32,12 +32,10 @@ public class MockFamilyNotificationTool implements FamilyNotificationTool {
     }
 
     @Override
-    @org.springframework.transaction.annotation.Transactional
     public String notify(String conversationId, String contactId, String message) {
-        String id = "NT-" + UUID.nameUUIDFromBytes((conversationId + contactId + message).getBytes(java.nio.charset.StandardCharsets.UTF_8));
-        if (!jdbc.query("SELECT id FROM family_notifications WHERE id=?", (rs, row) -> rs.getString(1), id).isEmpty()) return id;
-        jdbc.update("INSERT INTO family_notifications(id,contact_id,content,status,created_at,conversation_id) VALUES (?,?,?,?,?,?)",
-                id, contactId, message, "SENT", Timestamp.valueOf(LocalDateTime.now()), conversationId);
+        String id = "NT-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
+        jdbc.update("INSERT INTO family_notifications(id,contact_id,content,status,created_at) VALUES (?,?,?,?,?)",
+                id, contactId, message, "SENT", Timestamp.valueOf(LocalDateTime.now()));
         traces.record(conversationId, "family.notify",
                 Map.of("contactId", contactId, "message", message),
                 Map.of("notificationId", id, "status", "SENT"), true);

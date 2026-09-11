@@ -1,15 +1,15 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { BellRing, CalendarPlus, Check, Circle, Clock3, History, LoaderCircle, MapPin, Navigation, RefreshCw, UsersRound } from 'lucide-react';
+import { BellRing, CalendarPlus, Clock3, History, LoaderCircle, MapPin, Navigation, RefreshCw, Trash2, UsersRound } from 'lucide-react';
 import { PageHeader } from '@/components/common/page-header';
-import { getAppointments } from '@/lib/appointment-api';
-import type { AppointmentSummary, MaterialItem, TabId } from '@/types/domain';
+import { cancelAppointment, getAppointments } from '@/lib/appointment-api';
+import type { AppointmentSummary, TabId } from '@/types/domain';
+import { MaterialChecklist } from '@/features/materials/material-checklist';
 
 export function TasksView({ onNavigate }: { onNavigate: (tab: TabId) => void }) {
   const [appointments, setAppointments] = useState<AppointmentSummary[]>([]);
   const [selectedId, setSelectedId] = useState('');
-  const [materials, setMaterials] = useState<MaterialItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -21,13 +21,6 @@ export function TasksView({ onNavigate }: { onNavigate: (tab: TabId) => void }) 
       setAppointments(rows);
       const preferred = rows.find(row => row.status === 'CONFIRMED') ?? rows[0];
       setSelectedId(preferred?.appointmentId ?? '');
-      const names = preferred?.materials ?? [];
-      setMaterials(names.map((label, index) => ({
-        id: 'material-' + (preferred?.appointmentId ?? 'none') + '-' + index,
-        label,
-        prepared: false,
-        required: preferred?.requiredMaterials.includes(label) ?? false,
-      })));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '无法读取复诊事项');
     } finally {
@@ -37,17 +30,27 @@ export function TasksView({ onNavigate }: { onNavigate: (tab: TabId) => void }) 
 
   useEffect(() => { void load(); }, []);
 
-  const toggle = (id: string) => {
-    setMaterials(items => items.map(item => item.id === id ? { ...item, prepared: !item.prepared } : item));
-  };
-  const done = materials.filter(item => item.prepared).length;
   const appointment = appointments.find(item => item.appointmentId === selectedId) ?? appointments[0];
 
   const selectAppointment = (row: AppointmentSummary) => {
     setSelectedId(row.appointmentId);
-    setMaterials(row.materials.map((label, index) => ({
-      id: 'material-' + row.appointmentId + '-' + index, label, prepared: false, required: row.requiredMaterials.includes(label),
-    })));
+  };
+
+  const handleCancel = async (appointmentId: string) => {
+    if (!confirm('确定要取消这次复诊预约吗？取消后不可恢复。')) return;
+    try {
+      await cancelAppointment(appointmentId);
+      // 从列表里移除已取消的
+      const remaining = appointments.filter(a => a.appointmentId !== appointmentId);
+      setAppointments(remaining);
+      // 如果取消的是当前选中的，自动选中下一个
+      if (selectedId === appointmentId) {
+        const next = remaining[0];
+        setSelectedId(next?.appointmentId ?? '');
+      }
+    } catch (e) {
+      alert('取消失败：' + (e instanceof Error ? e.message : '未知错误'));
+    }
   };
 
   return (
@@ -82,12 +85,19 @@ export function TasksView({ onNavigate }: { onNavigate: (tab: TabId) => void }) 
             <div className="mb-3 flex items-center gap-2"><History className="size-6 text-primary" /><h2 className="text-xl font-bold">我的复诊预约记录</h2></div>
             <div className="grid gap-3">
               {appointments.map(row => (
-                <button key={row.appointmentId} onClick={() => selectAppointment(row)} className={'rounded-2xl border p-4 text-left ' + (selectedId === row.appointmentId ? 'border-primary bg-[#fff3e4] ring-1 ring-primary/20' : 'bg-white')}>
-                  <div className="flex items-start justify-between gap-3">
-                    <div><strong className="text-lg">{formatDate(row.date)} {formatTime(row.time)}</strong><p className="mt-1 text-base">{row.hospital} · {row.department}</p></div>
-                    <span className={'shrink-0 rounded-full px-3 py-1 text-sm font-bold ' + (row.status === 'CONFIRMED' ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-600')}>{row.status === 'CONFIRMED' ? '已预约' : '已取消'}</span>
-                  </div>
-                </button>
+                <div key={row.appointmentId} className="flex items-stretch gap-2">
+                  <button onClick={() => selectAppointment(row)} className={'flex-1 rounded-2xl border p-4 text-left ' + (selectedId === row.appointmentId ? 'border-primary bg-[#fff3e4] ring-1 ring-primary/20' : 'bg-white')}>
+                    <div className="flex items-start justify-between gap-3">
+                      <div><strong className="text-lg">{formatDate(row.date)} {formatTime(row.time)}</strong><p className="mt-1 text-base">{row.hospital} · {row.department}</p></div>
+                      <span className={'shrink-0 rounded-full px-3 py-1 text-sm font-bold ' + (row.status === 'CONFIRMED' ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-600')}>{row.status === 'CONFIRMED' ? '已预约' : '已取消'}</span>
+                    </div>
+                  </button>
+                  {row.status === 'CONFIRMED' && (
+                    <button onClick={() => void handleCancel(row.appointmentId)} aria-label="取消预约" className="grid shrink-0 place-items-center rounded-2xl border border-red-300 bg-red-50 px-3 text-red-600 hover:bg-red-100">
+                      <Trash2 className="size-5" />
+                    </button>
+                  )}
+                </div>
               ))}
             </div>
           </section>
@@ -106,24 +116,7 @@ export function TasksView({ onNavigate }: { onNavigate: (tab: TabId) => void }) 
             </div>
           </section>
 
-          <section className="rounded-3xl border bg-card p-5 shadow-sm">
-            <div className="flex items-center justify-between gap-3">
-              <h2 className="text-xl font-bold">材料清单</h2>
-              <span className="rounded-full bg-secondary px-3 py-1 text-sm font-semibold">已准备 {done}/{materials.length}</span>
-            </div>
-            <p className="mt-1 text-base text-muted-foreground">点一下可标记为已准备</p>
-            <div className="mt-4 divide-y">
-              {materials.map(item => (
-                <button key={item.id} onClick={() => toggle(item.id)} className="flex min-h-14 w-full items-center gap-3 py-3 text-left">
-                  <span className={`grid size-7 shrink-0 place-items-center rounded-full border-2 ${item.prepared ? 'border-primary bg-primary text-white' : 'border-muted-foreground/50'}`}>
-                    {item.prepared ? <Check className="size-4" /> : <Circle className="size-3 opacity-0" />}
-                  </span>
-                  <span className={`text-lg ${item.prepared ? 'text-muted-foreground line-through' : 'font-semibold'}`}>{item.label}</span>
-                  {item.required && <span className="ml-auto text-sm text-primary">必带</span>}
-                </button>
-              ))}
-            </div>
-          </section>
+          <MaterialChecklist appointmentId={appointment.appointmentId} disabled={appointment.status !== 'CONFIRMED'} />
 
           <section className="grid gap-3">
             <div className="flex items-center gap-4 rounded-3xl border bg-card p-4"><BellRing className="size-7 text-primary" /><div><strong className="text-lg">{appointment.reminderStatus ?? '未创建提醒'}</strong><p className="text-sm text-muted-foreground">以数据库中的执行结果为准</p></div></div>

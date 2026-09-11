@@ -3,11 +3,7 @@ import vinext from 'vinext';
 import { defineConfig } from 'vite';
 
 export default defineConfig({
+  server: { host: '0.0.0.0', port: 3000 },
   css: { postcss: { plugins: [tailwindcss()] } },
   plugins: [vinext()],
-  server: {
-    // 容器内开发/真机联调：监听所有网卡，而不只是 localhost
-    host: true,
-    port: 3000,
-  },
 });

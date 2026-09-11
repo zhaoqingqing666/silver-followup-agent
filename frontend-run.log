@@ -1,0 +1,15 @@
+
+> silver-followup-web@0.1.0 dev
+> vinext dev -H 0.0.0.0
+
+
+  vinext dev  (Vite 8.2.2)
+
+  ➜  Local:   http://localhost:3000/
+  ➜  Network: http://172.17.0.2:3000/  eth0
+5:36:43 AM [vite] (client) [optimizer] bundling dependencies...
+5:37:30 AM [vite] (rsc) connected.
+5:37:32 AM [vite] (ssr) connected.
+ GET / 200 in 3.9s (compile: 2.3s, render: 1.5s)
+ GET / 200 in 34ms (compile: 6ms, render: 25ms)
+ GET / 200 in 43ms (compile: 5ms, render: 35ms)

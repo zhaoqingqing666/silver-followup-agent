@@ -3,7 +3,7 @@
   "build": { "dockerfile": "Dockerfile" },
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
   "workspaceFolder": "/workspace",
-  // 后端、前端都在容器内运行，与宿主机无关，保证三台电脑结果一致
+  // 后端、前端都在容器内运行，与宿主机无关，保证每台电脑结果一致
   "runArgs": [
     "--name", "silver-followup-dev",
     "--add-host", "host.docker.internal:host-gateway"
@@ -12,11 +12,12 @@
   "containerEnv": {
     // 前端开发时默认访问宿主映射到 8080 的后端
     "NEXT_PUBLIC_API_BASE_URL": "http://localhost:8080",
+    // false = 纯本地规则模式（默认不开模型，避免误扣费/污染）；需要时在容器终端 export 后重启
     "AGENT_LLM_ENABLED": "false",
     "SPRING_DATASOURCE_URL": "jdbc:h2:file:/workspace/backend/data/silver-agent"
   },
   "mounts": [
-    // H2 数据放具名卷，不写进 bind mount 的仓库目录（避免本地 .gitignore 落空）
+    // H2 数据放具名卷，不写进 bind mount 的仓库目录（避免污染仓库）
     "source=silver-backend-data,target=/workspace/backend/data,type=volume",
     "source=silver-frontend-dependencies,target=/workspace/frontend/node_modules,type=volume",
     "source=silver-backend-target,target=/workspace/backend/target,type=volume",

@@ -14,9 +14,15 @@ services:
       SPRING_DATASOURCE_URL: jdbc:h2:file:/app/data/silver-agent
       # false = 纯本地规则；true = 让模型理解自然语言（失败自动回退）
       AGENT_LLM_ENABLED: ${AGENT_LLM_ENABLED:-false}
-      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
-      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-flash}
-      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      # ===== 阿里云百炼 DashScope（Agent + ASR/TTS/VL 同一把 key）=====
+      DASHSCOPE_BASE_URL: ${DASHSCOPE_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      DASHSCOPE_MODEL: ${DASHSCOPE_MODEL:-qwen3.6-flash}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      DASHSCOPE_ASR_MODEL: ${DASHSCOPE_ASR_MODEL:-qwen3-asr-flash}
+      DASHSCOPE_TTS_MODEL: ${DASHSCOPE_TTS_MODEL:-qwen3-tts-flash}
+      DASHSCOPE_TTS_VOICE: ${DASHSCOPE_TTS_VOICE:-Cherry}
+      DASHSCOPE_TTS_SPEED: ${DASHSCOPE_TTS_SPEED:-1.0}
+      DASHSCOPE_VL_MODEL: ${DASHSCOPE_VL_MODEL:-qwen3-vl-plus}
       # CORS 白名单：允许浏览器里的前端页面跨域调用
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
     ports:
@@ -24,7 +30,7 @@ services:
     volumes:
       - h2-data:/app/data
     healthcheck:
-      test: ["CMD", "sh", "-c", "curl -fsS http://localhost:8080/api/demo/health || exit 1"]
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080; printf 'GET /api/demo/health HTTP/1.0\\r\\n\\r\\n' >&3; grep -q '200' <&3"]
       interval: 30s
       timeout: 5s
       start_period: 40s
@@ -45,7 +51,8 @@ services:
       backend:
         condition: service_healthy
     ports:
-      - "3000:3000"
+      # 默认仍访问 localhost:3000；若本机 3000 已被占用，可临时设置 FRONTEND_PORT=3001
+      - "${FRONTEND_PORT:-3000}:3000"
 
 volumes:
   h2-data:

@@ -1,7 +1,5 @@
 # 大框架与模块边界
 
-> 本文中的分包、类名和对象字段是早期推荐架构，不能直接当作源码目录。实际后端为 `api/`、`agent/`、`application/`、`domain/model/`、`domain/tool/`、`infrastructure/mock/`、`config/`，编排类是 `FollowupAgentService`。实际架构图、模块职责及待补齐设计见 [Design.md](../Design.md)；目前没有独立 `workflow/`、`ConfirmationGate` 或 Tool Registry 实现。
-
 ## 一、推荐形态：模块化单体
 
 三个初学者不适合一开始使用微服务。本仓库采用一个 Spring Boot 后端，在代码包层面隔离模块；一个 React/TypeScript 前端，在功能组件层面隔离页面。

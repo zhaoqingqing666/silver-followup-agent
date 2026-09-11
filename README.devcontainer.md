@@ -1,85 +1,125 @@
-# 用 VS Code 开发容器（Docker）开发
+# 用 Docker / Dev Container 打开本仓库（隔离环境，不污染你的电脑）
 
-团队统一用 **Docker 容器**做开发环境，前端、后端、JDK、Node 全在容器里，
-不依赖成员宿主机装了什么东西，保证三台电脑结果一致。
+本仓库 = **后端 Spring Boot（Java 17）** + **前端 vinext/React**。Java、Node、H2、Maven 全部在容器里跑，**你的电脑不会被装任何依赖**——这正是老师说的「隔离、不污染环境」的用意。
 
-构建、安装依赖和测试均在 VS Code Dev Container 的终端内执行，不在 Windows 宿主机执行 Maven/npm。工作目录固定为 `/workspace`；`frontend/node_modules` 和 `backend/target` 使用容器卷，避免混入宿主机平台文件。更新 `.devcontainer` 配置后需在 VS Code 执行 **Dev Containers: Rebuild Container**。
+两种用法任选其一：
 
-容器内验证：`mvn -f backend/pom.xml test -Dagent.llm.enabled=false`，然后在 `frontend` 目录执行 `npx tsc --noEmit` 和 `npm run build`。
+| 用法 | 适合 | 命令 / 操作 |
+|---|---|---|
+| **A. VS Code「在容器中重新打开」** | 团队日常**开发**（推荐，见下） | 安装 Dev Containers 扩展 → `Ctrl+Shift+P` → `Dev Containers: Reopen in Container` |
+| **B. `docker compose up`** | **演示 / 交付**成品 | `docker compose up --build`，然后浏览器开 `http://localhost:3000` |
 
-也可选择 **Terminal → Run Task**，运行“Dev Container: 后端服务”“Dev Container: 前端服务”或“Dev Container: 验证项目”。这些任务仅用于容器内终端。
+需要先装好：**Docker Desktop（开 WSL2 后端）**；用法 A 还需 **VS Code + Dev Containers 扩展**。
 
-> 需要本机已装 Docker Desktop（Windows）并开启 WSL2，VS Code 装
-> “Dev Containers”扩展（`ms-vscode-remote.remote-containers`）。
+> 模型接口默认**关闭**（`AGENT_LLM_ENABLED=false`）。纯本地规则能跑通全部功能；要开千问对话，见文末「接阿里云百炼 DashScope」。
 
-## 一、第一次打开
+---
 
-1. 用 VS Code 打开仓库根目录 `silver-followup-agent`。
-2. `Ctrl+Shift+P` → 输入并选择：**Dev Containers: Reopen in Container**。
-3. 第一次会拉取基础镜像并构建（几分钟），之后秒开。
-4. 构建完成后，VS Code 会在容器内自动执行 `npm ci` 与 Maven 依赖预拉取。
+## 用法 A：VS Code 开发容器（日常开发推荐）
 
-容器配置在 `.devcontainer/`：`devcontainer.json` 声明端口与 VS Code 插件，
-`Dockerfile` 安装 JDK 17、Maven 与 Node 22；`setup.sh` 自动安装锁定的前端依赖并缓存 Maven 依赖。
+1. 用 VS Code 打开**仓库根目录**（含 `.devcontainer/`、`backend/`、`frontend/` 的那一层）。
+2. 安装微软官方扩展 **Dev Containers**（`ms-vscode-remote.remote-containers`）。
+3. `Ctrl+Shift+P` → 输入并选择 **`Dev Containers: Reopen in Container`**。
+4. 首次会自动构建镜像（JDK 17 + Node 22 + Maven），并跑 `setup.sh` 装好前后端依赖；**耗时几分钟，只此一次**。
 
-## 二、日常启动
+进去之后左下角显示 `>< 开发容器: silver-followup-dev`。装好的东西都在**具名卷**里：
+H2 数据库 `silver-backend-data`、前端依赖 `silver-frontend-dependencies`、后端构建 `silver-backend-target`、Maven 缓存 `silver-maven-cache`、npm 缓存 `silver-npm-cache`——**不会写进仓库、不会污染宿主机**。
 
-在容器内开 VS Code 集成终端（三个终端各跑一个）：
+### 在容器里开三个终端跑
+
+**终端 1 — 后端（8080）：**
+```bash
+cd backend && mvn spring-boot:run
+```
+看到 `Started ...` 即成功，健康检查：<http://localhost:8080/api/demo/health>（返回 `{"status":"ok"}`）。
+
+**终端 2 — 前端（3000）：**
+```bash
+cd frontend && npm run dev
+```
+浏览器开 <http://localhost:3000>。
+
+**终端 3（可选）— H2 控制台 / 调试：**
+- H2 控制台：浏览器开 <http://localhost:8080/h2-console>，JDBC URL 填 `jdbc:h2:file:/workspace/backend/data/silver-agent`（用户名 `sa`，密码留空）。页面与数据库在同一个容器里，登录不会跨域。
+- 后端远程调试（5005 已预留）：IDE 里配 Remote JVM Debug 连 `localhost:5005` 即可，无需改代码。
+
+### 验证是否成功
+在容器里执行 `docker ps`，能看到 `silver-followup-dev`；三个端口 3000/8080/5005 已自动转发。
+
+### 重置数据（可选）
+数据都存 H2 文件卷里，想从零开始：
+```bash
+docker volume rm silver-backend-data
+```
+（先 `docker compose down` 或 VS Code 里 `Dev Containers: Rebuild Container`，让容器停掉再删。）
+
+---
+
+## 用法 B：一键容器演示 / 交付（`docker compose up`）
+
+在**装了 Docker 的机器**上，仓库根目录执行：
 
 ```bash
-# 终端 1：后端（Spring Boot，端口 8080）
-cd backend
-mvn spring-boot:run
-
-# 终端 2：前端（vite 开发服务器，端口 3000）
-cd frontend
-npm run dev
-
-# 终端 3（可选）：需要热重载 + 远程调试时，用下面参数重启后端
-cd backend
-mvn spring-boot:run -Dspring-boot.run.jvmArguments="-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005"
+# 生产构建：后端打 jar、前端 npm ci + build 后由 vinext 生产服务器提供
+docker compose up --build
 ```
 
-浏览器访问：
+启动顺序已编排好：**先起后端并等健康检查通过（GET /api/demo/health 返回 200），再起前端**。全部就绪后：
 
-| 地址 | 用途 |
+- 前端：<http://localhost:3000>
+- 后端健康：<http://localhost:8080/api/demo/health>
+- H2 控制台：<http://localhost:8080/h2-console>，JDBC URL 填 `jdbc:h2:file:/app/data/silver-agent`
+
+停止：`Ctrl+C`；彻底移除容器（保留数据卷）：`docker compose down`；连数据卷一起删：`docker compose down -v`。
+
+> `docker compose up` 生成的 `silver-api:dev` / `silver-web:dev` 是**演示镜像**（生产模式、代码已构建进镜像）。想边改边看、断点调试，用用法 A 的开发容器。
+
+---
+
+## 配置文件速查
+
+| 文件 | 作用 |
 |---|---|
-| http://localhost:3000 | 手机端页面 |
-| http://localhost:8080/api/demo/health | 后端健康检查 |
-| http://localhost:8080/h2-console | H2 数据库控制台 |
+| `.devcontainer/devcontainer.json` | 开发容器定义：卷、端口转发、容器环境变量、启动后自动跑 `setup.sh` |
+| `.devcontainer/Dockerfile` | 开发镜像：Ubuntu 22.04 + JDK 17 + Maven + Node 22（含阿里云镜像加速） |
+| `.devcontainer/setup.sh` | 容器首次启动：装前端依赖 + 预拉 Maven 依赖 + 修数据卷权限 |
+| `Dockerfile` | 演示/交付镜像：多阶段（`silver-api` 后端 jar、`silver-web` 前端生产服务） |
+| `compose.yml` | 一键编排：后端+前端+服务健康检查+H2 数据卷，环境变量默认值全在此 |
+| `.dockerignore` | 构建上下文排除：node_modules/target/数据/密钥一律不进镜像 |
 
-`vite` 的 `dev` 配置允许在容器内监听，改前端代码自动热更新；
-后端 `mvn spring-boot:run` 默认不自动重启，改完 Java 代码后
-`Ctrl+C` 再运行一次即可（本仓库未启用 devtools，保持一致、行为可预期）。
+环境变量都带默认值（见 `compose.yml`），不设也能跑纯本地规则模式；写进容器的是**运行时**变量，改 `compose.yml`/`.env` 后 `docker compose up` 会重新拉起。
 
-## 三、VS Code 直接点按钮（可选）
+---
 
-安装容器内的扩展后：
+## 接阿里云百炼 DashScope（可选：开模型对话 / 语音）
 
-- 左侧 **Spring Boot Dashboard** 面板 → 选中 `silver-agent-api` → ▶ 运行（Debug 就是带断点的调试）。
-- 前端直接 `npm run dev` 即可，无需额外配置。
+本仓库模型走 **DashScope（千问 Qwen）**，一把 key 覆盖 Agent 对话 + ASR + TTS + VL。纯本地规则模式**不需要 key**；要开 AI 能力，在宿主仓库根目录建 `.env`：
 
-## 四、数据与调试端口
+```bash
+AGENT_LLM_ENABLED=true
 
-- H2 数据保存在具名卷 `silver-backend-data`，不会写进仓库，删除容器后仍在；
-  重置演示数据：清空卷再重启（`docker volume rm silver-backend-data`）。
-- 5005 是后端远程调试端口（JDWP），在 VS Code 里加一个 Java 调试配置即可断点调试，
-  与 IDEA 的体验一致。
+# 阿里云百炼 API Key（https://bailian.console.aliyun.com/）
+DASHSCOPE_API_KEY=sk-你的key
 
-## 五、跟宿主机 / 局域网真机联调
+# 以下都可省略，走默认值：
+# DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+# DASHSCOPE_MODEL=qwen3.6-flash
+# DASHSCOPE_ASR_MODEL=qwen3-asr-flash
+# DASHSCOPE_TTS_MODEL=qwen3-tts-flash
+# DASHSCOPE_TTS_VOICE=Cherry
+# DASHSCOPE_TTS_SPEED=1.0
+# DASHSCOPE_VL_MODEL=qwen3-vl-plus
+```
 
-页面要调用后端时，前后端都在本容器内开发，直接 `http://localhost:8080` 即可。
-需要把页面给手机真机/其他人演示时，把后端与前端临时都放到宿主映射端口：
-在浏览器地址里把 `localhost` 换成电脑局域网 IP 即可（端口仍是 3000 / 8080）。
+`docker compose` 自动读取根目录 `.env` 注入容器（`compose.yml` 里 `${DASHSCOPE_API_KEY:-}` 等占位）。**`.dockerignore` 已排除 `.env`，key 不会被打进交付镜像**。
 
-## 六、换机器、换成员
+开发容器里同理：在容器终端 `export DASHSCOPE_API_KEY=sk-xxx AGENT_LLM_ENABLED=true` 后重启后端即可（或用根目录 `.env` + 重建容器）。`DASHSCOPE_API_KEY` 只在后端容器环境里存在，不入代码。
 
-- 提交 `package-lock.json` 与 `pom.xml`，其他人“在容器中重新打开”后依赖自动一致。
-- 容器配置改动要进仓库：在 VS Code 执行 **Dev Containers: Rebuild Container**；这里的开发容器不由根目录的部署 compose 管理。
-- 具体启动步骤、跨域、密钥配置与 IDEA 方式对比，见根目录 `README.md`。
+---
 
 ## 常见问题
 
-- **端口被占**：关掉宿主机上占 8080/3000 的进程，或在 `devcontainer.json` 里改端口映射。
-- **改 pom/package.json 后不生效**：重启对应进程；改了 Dockerfile/依赖版本才需要重建容器。
-- **Windows 防火墙弹窗**：首次转发端口放行即可。
+- **首次构建很慢 / 网络超时**：镜像已配置阿里云 Ubuntu 源与下载重试；Maven/npm 依赖只在首启拉一次。
+- **3000 被占**：改宿主映射 `FRONTEND_PORT=3001 docker compose up`（仅用法 B）；用法 A 直接在容器里换端口跑。
+- **想彻底重来**：`docker compose down -v && docker volume rm silver-backend-data silver-frontend-dependencies silver-backend-target silver-maven-cache silver-npm-cache`（删具名卷，用法 A/B 各自的前缀卷一并清掉后 Rebuild Container）。
+- **没装 Docker**：无法用容器。退路是照 README.md 在本机装 Java 17 + Node 22 直接跑（会改到你本机环境）。

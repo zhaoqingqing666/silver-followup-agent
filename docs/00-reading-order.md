@@ -2,8 +2,6 @@
 
 这些文档不是要求一次读完。按当前问题选择：
 
-先读 [原始需求](../Requirement.md) 与 [当前设计及需求对齐](../Design.md)。后者明确区分源码事实与待实现设计，是 2026-09-07 的审阅基线；下列早期方案不能作为已完成验收的证明。
-
 1. 想知道比赛到底要求什么：看 `01-requirement-mapping.md`。
 2. 想知道至少做哪些页面：看 `02-pages-and-interactions.md`。
 3. 想理解 Agent 为什么不止一条线：看 `03-agent-workflow.md`。

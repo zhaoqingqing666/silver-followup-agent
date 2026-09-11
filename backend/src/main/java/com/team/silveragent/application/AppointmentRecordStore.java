@@ -23,32 +23,36 @@ public class AppointmentRecordStore {
     }
 
     public List<AppointmentView> allFor(String userId) {
-        List<AppointmentView> rows = jdbc.query("""
+        return jdbc.query("""
                 SELECT a.id,s.hospital_name,s.department,s.appointment_date,s.appointment_time,
                        a.departure_time,a.transport,a.reminder_status,a.family_status,a.materials,
                        a.status,a.created_at
                 FROM appointments a JOIN appointment_slots s ON s.id=a.slot_id
-                WHERE a.user_id=?
+                WHERE a.user_id=? AND a.status != 'CANCELLED'
                 ORDER BY a.created_at DESC
                 """, (rs, row) -> new AppointmentView(
                 rs.getString(1), rs.getString(2), rs.getString(3),
                 rs.getDate(4).toLocalDate(), rs.getTime(5).toLocalTime(),
                 rs.getTimestamp(6) == null ? null : rs.getTimestamp(6).toLocalDateTime(),
                 rs.getString(7), rs.getString(8), rs.getString(9),
-                splitMaterials(rs.getString(10)), List.of(), rs.getString(11),
+                splitMaterials(rs.getString(10)), rs.getString(11),
                 rs.getTimestamp(12).toLocalDateTime()), userId);
-        return rows.stream().map(row -> new AppointmentView(
-                row.appointmentId(), row.hospital(), row.department(), row.date(), row.time(),
-                row.departureAt(), row.transport(), row.reminderStatus(), row.familyStatus(),
-                row.materials(), requiredMaterials(row.department()), row.status(), row.createdAt())).toList();
     }
 
-    private List<String> requiredMaterials(String department) {
-        return jdbc.query("""
-                SELECT material_name FROM material_templates
-                WHERE (department='通用' OR department=?) AND required=TRUE
-                ORDER BY sort_order
-                """, (rs, row) -> rs.getString(1), department);
+    /** 取消预约：更新状态为 CANCELLED，并释放对应的模拟号源 */
+    @org.springframework.transaction.annotation.Transactional
+    public boolean cancel(String appointmentId, String userId) {
+        int rows = jdbc.update("UPDATE appointments SET status='CANCELLED' WHERE id=? AND user_id=? AND status='CONFIRMED'",
+                appointmentId, userId);
+        if (rows == 0) return false;
+        // 释放对应号源，与 MockAppointmentTool.cancel 行为对齐
+        String slotId = jdbc.queryForObject(
+                "SELECT slot_id FROM appointments WHERE id=? AND user_id=?",
+                String.class, appointmentId, userId);
+        if (slotId != null) {
+            jdbc.update("UPDATE appointment_slots SET available=TRUE WHERE id=?", slotId);
+        }
+        return true;
     }
 
     private List<String> splitMaterials(String value) {
@@ -60,6 +64,6 @@ public class AppointmentRecordStore {
             java.time.LocalDate date, java.time.LocalTime time,
             LocalDateTime departureAt, String transport,
             String reminderStatus, String familyStatus, List<String> materials,
-            List<String> requiredMaterials, String status, LocalDateTime createdAt
+            String status, LocalDateTime createdAt
     ) { }
 }

@@ -1,6 +1,12 @@
 spring:
   application:
     name: silver-agent-api
+  # 自动读取仓库根目录的 .env（不存在也不报错），这样 AGENT_LLM_ENABLED / DASHSCOPE_API_KEY
+  # 不必再手填到 IDEA 运行配置里。真实环境变量优先级更高，部署时照旧用环境变量覆盖。
+  config:
+    import:
+      - optional:file:./.env[.properties]
+      - optional:file:../.env[.properties]
   datasource:
     url: jdbc:h2:file:./data/silver-agent
     driver-class-name: org.h2.Driver
@@ -22,9 +28,43 @@ server:
 agent:
   llm:
     enabled: ${AGENT_LLM_ENABLED:false}
-    base-url: ${DEEPSEEK_BASE_URL:https://api.deepseek.com}
-    model: ${DEEPSEEK_MODEL:deepseek-v4-flash}
-    api-key: ${DEEPSEEK_API_KEY:}
+    base-url: ${DASHSCOPE_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode/v1}
+    model: ${DASHSCOPE_MODEL:qwen3.6-flash}
+    api-key: ${DASHSCOPE_API_KEY:}
+  asr:
+    enabled: ${AGENT_ASR_ENABLED:${AGENT_LLM_ENABLED:false}}
+    base-url: ${DASHSCOPE_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode/v1}
+    model: ${DASHSCOPE_ASR_MODEL:qwen3-asr-flash}
+    api-key: ${DASHSCOPE_API_KEY:}
+  tts:
+    enabled: ${AGENT_TTS_ENABLED:${AGENT_LLM_ENABLED:false}}
+    base-url: ${DASHSCOPE_BASE_URL:https://dashscope.aliyuncs.com}
+    model: ${DASHSCOPE_TTS_MODEL:qwen3-tts-flash}
+    voice: ${DASHSCOPE_TTS_VOICE:Cherry}
+    speed: ${DASHSCOPE_TTS_SPEED:1.0}
+    api-key: ${DASHSCOPE_API_KEY:}
+  vl:
+    enabled: ${AGENT_VL_ENABLED:${AGENT_LLM_ENABLED:false}}
+    base-url: ${DASHSCOPE_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode/v1}
+    model: ${DASHSCOPE_VL_MODEL:qwen3-vl-plus}
+    api-key: ${DASHSCOPE_API_KEY:}
+    # 视觉请求超时与重试：没有超时的话对端卡住会一直挂着，老人只能干等。
+    # 读取超时留得比较宽，是因为一张药品说明书的完整 OCR 本来就要十几秒。
+    connect-timeout-ms: ${AGENT_VL_CONNECT_TIMEOUT_MS:5000}
+    read-timeout-ms: ${AGENT_VL_READ_TIMEOUT_MS:60000}
+    # 仅对限流(429)、服务端错误(5xx)、网络/超时做退避重试，最多这么多次
+    max-retries: ${AGENT_VL_MAX_RETRIES:2}
+  # 会话生命周期阈值。演示时可直接调小，例如：
+  #   idle-timeout-seconds: 30 / warn-turns: 2 / max-turns: 3
+  conversation:
+    idle-timeout-seconds: ${AGENT_CONV_IDLE_SECONDS:600}
+    warn-turns: ${AGENT_CONV_WARN_TURNS:20}
+    max-turns: ${AGENT_CONV_MAX_TURNS:30}
+    warn-tokens: ${AGENT_CONV_WARN_TOKENS:5000}
+    max-tokens: ${AGENT_CONV_MAX_TOKENS:6000}
+    recent-messages: ${AGENT_CONV_RECENT_MESSAGES:8}
+    recent-images: ${AGENT_CONV_RECENT_IMAGES:3}
+    max-image-bytes: ${AGENT_CONV_MAX_IMAGE_BYTES:10485760}
 management:
   endpoints:
     web:
