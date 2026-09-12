@@ -1,6 +1,5 @@
 package com.team.silveragent.application;
 
-import com.team.silveragent.domain.model.SimulatedData;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
@@ -74,7 +73,8 @@ public class CareCatalogRepository {
         return jdbc.query("""
                 SELECT DISTINCT appointment_date FROM appointment_slots
                 WHERE hospital_id=? AND department=? AND appointment_date>=? AND available=TRUE
-                  AND (appointment_date > CURRENT_DATE OR appointment_time > CURRENT_TIME)
+                  AND (appointment_date > CURRENT_DATE
+                       OR (appointment_date = CURRENT_DATE AND appointment_time > CURRENT_TIME))
                 ORDER BY appointment_date LIMIT ?
                 """, (rs, row) -> rs.getDate(1).toLocalDate(),
                 hospitalId, department, java.sql.Date.valueOf(from), limit);
@@ -110,7 +110,7 @@ public class CareCatalogRepository {
     }
 
     private String clean(String value) {
-        return SimulatedData.stripMarker(value);
+        return value == null ? "" : value.replace("（模拟）", "").replace("(模拟)", "").trim();
     }
 
     private Department department(java.sql.ResultSet rs) throws java.sql.SQLException {

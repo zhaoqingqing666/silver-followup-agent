@@ -1,6 +1,5 @@
 package com.team.silveragent.infrastructure.persistence;
 
-import com.team.silveragent.domain.model.BookingWindow;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -11,12 +10,7 @@ import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 
-/**
- * Keeps the demo catalogue useful: every department has slots from today to one month later.
- *
- * <p>号源不由 data.sql 写死，而是每次启动（以及每次场景重置）按“今天”重新生成，
- * 这样演示脚本里的日期永远不会过期。
- */
+/** Keeps the demo catalogue useful: every department has slots from today to one month later. */
 @Component
 public class RollingAppointmentSlotInitializer implements ApplicationRunner {
 
@@ -31,17 +25,19 @@ public class RollingAppointmentSlotInitializer implements ApplicationRunner {
         this.jdbc = jdbc;
     }
 
-    @Override
-    public void run(ApplicationArguments args) { seed(); }
+    /** 号源 id 的拼法只此一处：回滚重放、场景重置和回归用例都按这个规则找号源。 */
+    public static String slotId(String departmentId, LocalDate date, LocalTime time) {
+        return "r-" + departmentId + "-" + date.format(ID_DATE) + "-"
+                + String.format("%02d%02d", time.getHour(), time.getMinute());
+    }
 
-    /** 可重复调用：周末号源会被清掉，工作日号源按需补齐。 */
+    @Override
+    public void run(ApplicationArguments args) {
+        seed();
+    }
+
+    /** 幂等：已经在的号源不会重复插入，场景重置可以直接再调一次。 */
     public void seed() {
-        // 号源只由本类生成。清掉历史 data.sql 留下的写死号源，避免同一档位出现两份数据。
-        jdbc.update("""
-                DELETE FROM appointment_slots
-                WHERE id NOT LIKE 'r-%'
-                  AND NOT EXISTS (SELECT 1 FROM appointments a WHERE a.slot_id = appointment_slots.id)
-                """);
         // Weekend gaps are deliberate so the Demo can still demonstrate the
         // required "requested date has no slots" recovery path.
         List<String> generatedWeekendSlots = jdbc.query("""
@@ -61,8 +57,7 @@ public class RollingAppointmentSlotInitializer implements ApplicationRunner {
                 rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4)));
 
         LocalDate start = LocalDate.now();
-        // 与日期校验共用同一个可预约窗口，避免“能选到却没有号源”。
-        LocalDate end = BookingWindow.lastBookableDate(start);
+        LocalDate end = start.plusMonths(1);
         for (DepartmentSeed department : departments) {
             for (LocalDate date = start; !date.isAfter(end); date = date.plusDays(1)) {
                 if (date.getDayOfWeek().getValue() >= 6) {
@@ -76,8 +71,7 @@ public class RollingAppointmentSlotInitializer implements ApplicationRunner {
     }
 
     private void insertIfMissing(DepartmentSeed department, LocalDate date, LocalTime time) {
-        String id = "r-" + department.id() + "-" + date.format(ID_DATE)
-                + "-" + String.format("%02d%02d", time.getHour(), time.getMinute());
+        String id = slotId(department.id(), date, time);
         jdbc.update("""
                 INSERT INTO appointment_slots
                     (id, hospital_id, hospital_name, department, appointment_date, appointment_time, available)

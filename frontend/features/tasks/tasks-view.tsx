@@ -1,15 +1,26 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { BellRing, CalendarPlus, Clock3, History, LoaderCircle, MapPin, Navigation, RefreshCw, UsersRound } from 'lucide-react';
+import { useCallback, useEffect, useState } from 'react';
+import { BellRing, CalendarPlus, CalendarX, ChevronRight, Clock3, History, LoaderCircle, MapPin, Navigation, RefreshCw, Route, UsersRound } from 'lucide-react';
 import { PageHeader } from '@/components/common/page-header';
 import { MaterialChecklist } from '@/features/materials/material-checklist';
+import { matchPageVoiceCommand } from '@/features/voice/voice-commands';
 import { getAppointments } from '@/lib/appointment-api';
-import { formatDate, formatTime } from '@/lib/datetime';
-import { APPOINTMENT_STATUS } from '@/types/domain';
-import type { AppointmentSummary, TabId } from '@/types/domain';
+import { speakText } from '@/lib/tts-player';
+import type { AppointmentSummary, TabId, VoicePreference } from '@/types/domain';
 
-export function TasksView({ onNavigate }: { onNavigate: (tab: TabId) => void }) {
+export function TasksView({ onNavigate, onOpenTravel, voicePreference, onRegisterVoice, onAskAssistant }: {
+  onNavigate: (tab: TabId) => void;
+  onOpenTravel: (appointmentId?: string) => void;
+  voicePreference?: VoicePreference;
+  /** 注册本页的只读语音口令（返回、再念一遍）；返回 false 表示交给助手处理。 */
+  onRegisterVoice?: (handler: ((text: string) => boolean) | null) => void;
+  /**
+   * 把一句话交给助手去办（切到助手页并替他发出去）。
+   * 本页不直接调取消接口：写操作必须经过确认门禁，这条规矩不能因为换了个入口就破例。
+   */
+  onAskAssistant?: (text: string) => void;
+}) {
   const [appointments, setAppointments] = useState<AppointmentSummary[]>([]);
   const [selectedId, setSelectedId] = useState('');
   const [loading, setLoading] = useState(true);
@@ -21,7 +32,7 @@ export function TasksView({ onNavigate }: { onNavigate: (tab: TabId) => void }) 
     try {
       const rows = await getAppointments();
       setAppointments(rows);
-      const preferred = rows.find(row => row.status === APPOINTMENT_STATUS.CONFIRMED) ?? rows[0];
+      const preferred = rows.find(row => row.status === 'CONFIRMED') ?? rows[0];
       setSelectedId(preferred?.appointmentId ?? '');
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '无法读取复诊事项');
@@ -30,13 +41,38 @@ export function TasksView({ onNavigate }: { onNavigate: (tab: TabId) => void }) 
     }
   };
 
-  useEffect(() => { void load(); }, []);
+  useEffect(() => {
+    void load();
+    // 助手在别的页面确认或取消预约后，这里要重新读取，否则还显示旧数据。
+    const refresh = () => void load();
+    window.addEventListener('silver-agent-appointments-updated', refresh);
+    return () => window.removeEventListener('silver-agent-appointments-updated', refresh);
+  }, []);
 
   const appointment = appointments.find(item => item.appointmentId === selectedId) ?? appointments[0];
 
   const selectAppointment = (row: AppointmentSummary) => {
     setSelectedId(row.appointmentId);
   };
+
+  /** 页面只读语音口令：说话是明确要求，所以不受“自动朗读”开关限制。 */
+  const handleVoiceCommand = useCallback((text: string) => {
+    const command = matchPageVoiceCommand(text);
+    if (command === 'BACK') { onNavigate('home'); return true; }
+    if (command !== 'REPEAT') return false;
+    const options = { rate: voicePreference?.speechRate, volume: voicePreference?.speechVolume };
+    // 「念一遍」是单向按钮：每次念都换一个 key，否则同一句话再点会变成「停」而不是重新念。
+    if (!appointment) { void speakText(`tasks-empty-${Date.now()}`, '现在还没有复诊事项可以念。', options); return true; }
+    void speakText(`appointment-${appointment.appointmentId}-${Date.now()}`,
+      appointmentNarration(appointment, appointments), options);
+    return true;
+  }, [appointment, appointments, onNavigate, voicePreference?.speechRate, voicePreference?.speechVolume]);
+
+  useEffect(() => {
+    if (!onRegisterVoice) return;
+    onRegisterVoice(handleVoiceCommand);
+    return () => onRegisterVoice(null);
+  }, [onRegisterVoice, handleVoiceCommand]);
 
   return (
     <main className="space-y-5 px-5 pb-8 pt-5">
@@ -73,7 +109,7 @@ export function TasksView({ onNavigate }: { onNavigate: (tab: TabId) => void }) 
                 <button key={row.appointmentId} onClick={() => selectAppointment(row)} className={'rounded-2xl border p-4 text-left ' + (selectedId === row.appointmentId ? 'border-primary bg-[#fff3e4] ring-1 ring-primary/20' : 'bg-white')}>
                   <div className="flex items-start justify-between gap-3">
                     <div><strong className="text-lg">{formatDate(row.date)} {formatTime(row.time)}</strong><p className="mt-1 text-base">{row.hospital} · {row.department}</p></div>
-                    <span className={'shrink-0 rounded-full px-3 py-1 text-sm font-bold ' + (row.status === APPOINTMENT_STATUS.CONFIRMED ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-600')}>{row.status === APPOINTMENT_STATUS.CONFIRMED ? '已预约' : '已取消'}</span>
+                    <span className={'shrink-0 rounded-full px-3 py-1 text-sm font-bold ' + (row.status === 'CONFIRMED' ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-600')}>{row.status === 'CONFIRMED' ? '已预约' : '已取消'}</span>
                   </div>
                 </button>
               ))}
@@ -84,17 +120,33 @@ export function TasksView({ onNavigate }: { onNavigate: (tab: TabId) => void }) 
             <div className="flex items-center gap-3">
               <div className="grid size-12 place-items-center rounded-2xl bg-primary text-white"><Clock3 /></div>
               <div>
-                <p className="text-base text-muted-foreground">{appointment.status === APPOINTMENT_STATUS.CONFIRMED ? '当前选择的复诊预约' : '已取消的预约记录'}</p>
+                <p className="text-base text-muted-foreground">{appointment.status === 'CONFIRMED' ? '当前选择的复诊预约' : '已取消的预约记录'}</p>
                 <h2 className="text-xl font-bold">{formatDate(appointment.date)} {formatTime(appointment.time)}</h2>
               </div>
             </div>
             <div className="mt-4 space-y-2 text-base">
               <p className="flex items-center gap-2"><MapPin className="size-5 text-primary" />{appointment.hospital} · {appointment.department}</p>
-              <p className="flex items-center gap-2"><Navigation className="size-5 text-primary" />{appointment.departureAt ? `建议 ${formatTime(appointment.departureAt)} 出发` : '未设置出行提醒'}</p>
+              <p className="flex items-center gap-2"><Navigation className="size-5 text-primary" />{appointment.departureAt ? `建议 ${formatDateTime(appointment.departureAt)} 出发` : '未设置出行提醒'}</p>
             </div>
+            <button onClick={() => onOpenTravel(appointment.appointmentId)}
+              className="mt-5 flex min-h-14 w-full items-center justify-between rounded-2xl bg-primary px-4 text-left text-white shadow-sm disabled:opacity-50"
+              disabled={appointment.status !== 'CONFIRMED'}>
+              <span className="flex items-center gap-3"><Route className="size-6" /><span><strong className="block text-lg">查看地图与院内指引</strong><span className="text-sm text-white/80">路线、楼层和诊室位置</span></span></span>
+              <ChevronRight className="size-6" />
+            </button>
+
+            {/* 取消不在这里直接调接口，而是交给助手走它那套确认流程：
+                先核对清楚，老人点过「确认」才会真的取消并释放号源。
+                一个按钮直接删数据，快是快，但老人按错一次就没有回头路了。 */}
+            {appointment.status === 'CONFIRMED' && onAskAssistant && (
+              <button onClick={() => onAskAssistant('我想取消这次复诊预约')}
+                className="mt-3 flex min-h-14 w-full items-center justify-center gap-3 rounded-2xl border-2 border-[#c2564a] bg-white text-lg font-bold text-[#a8402f]">
+                <CalendarX className="size-6" />取消这次复诊
+              </button>
+            )}
           </section>
 
-          <MaterialChecklist appointmentId={appointment.appointmentId} disabled={appointment.status !== APPOINTMENT_STATUS.CONFIRMED} />
+          <MaterialChecklist appointmentId={appointment.appointmentId} disabled={appointment.status !== 'CONFIRMED'} />
 
           <section className="grid gap-3">
             <div className="flex items-center gap-4 rounded-3xl border bg-card p-4"><BellRing className="size-7 text-primary" /><div><strong className="text-lg">{appointment.reminderStatus ?? '未创建提醒'}</strong><p className="text-sm text-muted-foreground">以数据库中的执行结果为准</p></div></div>
@@ -106,3 +158,35 @@ export function TasksView({ onNavigate }: { onNavigate: (tab: TabId) => void }) 
   );
 }
 
+/** 只用列表接口返回的真实字段拼接，不虚构任何内容。 */
+function appointmentNarration(row: AppointmentSummary, all: AppointmentSummary[]) {
+  const others = all.length > 1 ? `您一共有${all.length}条复诊记录。` : '';
+  return [
+    `您${formatDate(row.date)}${spokenClock(row.time)}在${row.hospital}${row.department}复诊，状态是${row.status === 'CONFIRMED' ? '已预约' : '已取消'}。`,
+    row.departureAt ? `建议${formatTime(row.departureAt)}出发。` : '还没有设置出发提醒。',
+    row.reminderStatus ? `提醒：${row.reminderStatus}。` : '',
+    row.familyStatus ? `家属通知：${row.familyStatus}。` : '',
+    others,
+    row.status === 'CONFIRMED' ? '想看路线的话，可以说“打开地图”。' : '',
+  ].filter(Boolean).join('');
+}
+
+function spokenClock(value: string) {
+  const [hourText, minuteText] = formatTime(value).split(':');
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  return `${hour < 12 ? '上午' : '下午'}${hour > 12 ? hour - 12 : hour}点${minute === 0 ? '' : `${minute}分`}`;
+}
+
+function formatDate(value: string) {
+  const [, month, day] = value.split('-');
+  return `${Number(month)}月${Number(day)}日`;
+}
+
+function formatTime(value: string) {
+  return value.slice(0, 5);
+}
+
+function formatDateTime(value: string) {
+  return value.includes('T') ? value.split('T')[1].slice(0, 5) : value.slice(11, 16);
+}

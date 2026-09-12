@@ -26,6 +26,12 @@ frontend/.npm-cache/
 
 # Dev container 本机私有配置（不进仓库）
 .devcontainer/.env
+!.devcontainer/.env.example
+
+# 内部开发笔记：实测踩坑与易错点，只供团队内部参考，不进仓库
+docs/13-agent-pitfalls.md
+# 内部架构自评：含具体批评与待修项，不进公开仓库
+docs/14-architecture-review.md
 
 # Local secrets and OS files
 .DS_Store

@@ -1,23 +1,58 @@
 # 接口变更记录
 
-## 2026-09-11 轮次响应新增 notice 与演示场景重置接口
-
-- `/api/agent/**` 轮次响应新增可选字段 `notice`（可为 `null`）：`{"type","title","message"}`。医疗越界时返回 `type=MEDICAL_BOUNDARY`，前端用 `BoundaryAlert` 独立渲染。不改变 `stage`，也不使已生成的 `confirmationId` 失效。
-- 新增 `POST /api/demo/scenarios/{scenarioId}`，`scenarioId` 取 `normal`/`no-slot`/`conflict`/`boundary`，返回 `scenarioId`、`title`、`steps`、`availableScenarios`、`turn`。未知取值返回 400。
-- 破坏性变更（数据层面）：该接口会清空预约、提醒、家属通知、工具调用记录和全部会话，并按“今天”重新生成号源与用户已有日程。
-- 新增意图 `START_EXECUTION`（“开始办理”“下一步”），中控路由到 `START_PLAN`；`advance()` 在 READY_TO_PLAN 时不再把同一句“请检查当前计划”重复问一遍。
-- 冲突分支的快捷候选由 2 个当日号源改为 1 个，保证「重新选择日期」和「仍保留这个时间」都落在前端第一页（每页 3 个）。
-- 前端 `AgentTurnResponse` 类型新增 `notice: AgentNotice | null`，并新增 `BoundaryAlert` 组件。
-- 容器内验证：待执行 `mvn -B -f backend/pom.xml test -Dagent.llm.enabled=false` 与前端 `npx tsc --noEmit`。
-
-## 2026-09-10 就诊医院改为直接回答
-
-- 询问就诊医院时 `quickReplies` 返回空数组，取消医院和“我还没想好”快捷按钮；主动查询/推荐医院仍保留候选项。
-- 接口字段及请求不变；前端沿用空数组隐藏快捷回答、语音/文字发送消息的逻辑，并同步类型和渲染注释。
-- 医院提取和目录匹配逻辑不变，未匹配时不保存医院，继续询问。
-- 容器内验证：`mvn -B -f backend/pom.xml test -Dagent.llm.enabled=false` 通过（17 项测试）；前端 `npx tsc --noEmit` 和 `npm run build` 通过。
-
 任何前后端共享字段、接口路径、枚举或日期格式变化都记录在这里。
+
+## 2026-09-11 越界提示块与演示场景重置
+
+- `AgentTurnResponse` 新增可选分量 `notice`（第 12 个，`{type, title, message}`），旧的 11 / 9 / 8 参构造原样保留，前端可忽略。当前只有 `type=MEDICAL_BOUNDARY` 一种取值，未知 `type` 前端**不渲染**（不是渲染成空白卡）。`notice` 只影响展示：不切 `stage`、不改 `confirmationId`、不新增待办、不落库；越界那一轮仍把原来的确认卡连同同一个 `confirmationId` 带回，前端按老逻辑照常确认。
+- 新增 `POST /api/demo/scenarios/{scenarioId}`（编号 `normal` / `no-slot` / `conflict` / `boundary`）：**破坏性**，清空可变业务数据、放开被占用的号源、按「今天」重排号源与日程，开一段新会话，返回 `DemoScenarioResponse{scenarioId, title, steps[], availableScenarios[], turn}`；未知编号返回 400 `{"message": …}` 并列出可选值。旧会话 id 在重置后不再可用（400「会话不存在或已过期」）。仅追加，正常业务接口未变动。
+- 工具追踪里不再出现 `catalog.searchDepartments`：该方法（含 `DepartmentCatalogTool.searchDepartments`、`CareCatalogRepository.searchDepartments`）从未被调用，`ToolRegistry` 里也没有对应工具，已一并删除。`ToolRegistry` 的工具清单不变，仍是 17 个只读工具。`tool_call_logs` 里的历史记录不受影响。
+- 前端：`VoiceMicButton` 去掉 `variant` 入参（只剩悬浮这一种形态），`LevelMeter` 的根数/粗细/间距/高度入参收成组件内常量——**纯前端改动，后端与共享字段不变**。接口无变化，旧前端不受影响。
+
+## 2026-09-11 多模态：识图、药品知识、语音输入输出、材料拍照确认
+
+- 新增 `POST /api/agent/images`，请求体 `{conversationId, imageDataUrls[], hint}`，最多取 3 张。响应仍是标准 `AgentTurnResponse`，**未新增任何字段**：图片本体由前端自己持有并渲染，`reply` 装识别结论，`toolTraces` 里多一条 `vision.recognize`。
+- 视觉模型未启用时该接口第一步就返回友好提示，不调用任何模型；图片本体落 `conversation_attachments`，识别结论落 `vision_results`（只存文字）。对话历史里图片只留纯文本。
+- 新增只读工具 `drug.queryKnowledge`（`drugName`、`specification`），自由语言意图新增 `QUERY_DRUG`，路线新增 `QUERY_DRUG_KNOWLEDGE`。药名、规格、用途、提醒全部来自 `drug-knowledge.json`，查不到如实说没有。
+- 新增 `GET /api/vl/status`、`POST /api/asr/transcribe`、`POST /api/tts/synthesize`、`GET /api/tts/voices`、`GET /api/demo/channels?probe=true`。未配置 key 时 `enabled=false`，前端退回浏览器原生识别与浏览器语音合成。
+- `PATCH /api/users/{userId}/appointments/{appointmentId}/materials/{materialId}` 的 `photoUrl` 现在允许直接传压缩后的 data URL：后端把图片本体存进 `conversation_attachments`（`kind='MATERIAL_PHOTO'`），`photo_url` 只写短引用 `attachment:<id>`（该列是 `VARCHAR(500)`，直接写 base64 会截断）。`confirmSource` 归一为 `USER`/`PHOTO`，非法状态 / 非图片 / 超限照片返回 400 `{"message": …}`（本次为该控制器新增了 `IllegalArgumentException` → 400 的处理器，此前会变成 500）。
+- 表结构：新增 `conversation_attachments`、`vision_results`；`conversation_messages` 增加 `message_type`、`attachment_id`。全部为追加，旧数据与旧接口字段不变。
+- 前端共享类型：`ChatMessage` 追加全部可选字段 `imageDataUrls`、`isVoice`、`audioUrl`、`audioDuration`、`voiceState`——后端不下发这些，纯前端态。
+- 前端删除了 `lib/speech-service.ts` 与 `features/voice/use-voice-input.ts`，由 `lib/tts-player.ts` + `lib/local-speech.ts` + `features/voice/use-press-to-talk.ts` 取代；`speakText(key, text, options?)` 是按 key 切换，与旧的 `speakText(text, key, options?)` 参数顺序相反。
+- 新增 `GET /api/users/{userId}/appointments/{appointmentId}/materials/{materialId}/photo`：取回这项材料拍过的照片，`{"dataUrl": "…"}`；没拍过返回 404（是「还没有照片」，不是出错）。归属校验在工具里：先确认预约属于这位用户，再只认这条材料自己记下的附件引用。**路径里不接受附件编号**，否则就成了「按编号取任意附件」的读取器；`PATCH` 回传 `attachment:<id>` 引用的那条路同样核对归属，否则改个编号就能把别人的照片挂到自己材料上。
+- 已知限制：一次图片轮会占用该会话锁，说明书 OCR 可能十几秒到一分钟。
+
+## 2026-09-11 同轮只读工具续跑（内部接口）
+
+- `ConversationPlanner` 新增 `continueAfterTools(originalMessage, context, allowedTools, toolResults)`，用于把只读工具证据返回同一主模型继续决策。
+- `/api/agent/messages` 的外部请求与 `AgentTurnResponse` 结构不变，前端无需同步修改。
+- 查询轮次可能在一次 HTTP 请求内发生多次模型调用；上限为 3 轮工具续跑，并拦截同名同参重复调用。
+- 模型续写失败时返回现有 Java 业务处理产生的权威结果；确认与写操作接口没有变化。
+
+## 2026-09-09 对话任务状态与地图指引
+
+- `AgentTurnResponse` 新增 `task`，包含 `active/status/currentStage/summary/missingField`；前端已同步。
+- 新建会话默认 `task.status=NONE`；`CONTINUE` 可创建新任务，`RETURN_TO_FLOW` 恢复暂停任务。
+- 新增 `GET /api/users/{userId}/appointments/{appointmentId}/travel-guide`。
+- 新增只读工具 `travel.routePlan`、`hospital.locationGuide` 和前端动作 `OPEN_TRAVEL`。
+- 新增 `clinic_locations`，`appointment_slots` 增加 `clinic_location_id`；医院和用户增加模拟坐标，路线增加距离、步骤和折线。
+- 兼容性：响应仅追加字段；旧前端可忽略。新前端依赖 `task` 展示后台任务状态。
+
+## 2026-09-09 受控规划器状态字段
+
+- `GET /api/agent/model-status` 新增 `planningMode` 与 `architecture`；模型启用时架构值为 `MODEL_ORCHESTRATED_TOOL_AGENT`。
+- `GET /api/agent/model-status` 新增 `promptMode=SINGLE_MAIN_AGENT_PROMPT`，用于 Demo 证明规划和工具结果回答复用同一主提示词。
+- `understandingMode` 保留为规划模式的兼容别名，现值可为 `MODEL_PLANNER_WITH_RULE_FALLBACK` 或 `RULE_PLANNER_FALLBACK`。
+- `AgentTurnResponse`、页面动作和确认接口没有变化，现有前端无需同步修改。
+- `/api/agent/messages` 内部改为“模型提出动作 → Java 权限审核 → 只读工具/工作流 → 回答模型”；写工具仍只能由确认接口触发。
+
+## 2026-09-08 模型状态与支持性对话
+
+- `GET /api/agent/model-status` 返回字段由 `mode/model/secretStored` 调整为 `understandingMode/answerMode/provider/model/secretStored`；当前前端未消费该接口。
+- 新增快捷动作 `RETURN_TO_FLOW`，用于支持性交流后返回保留的业务节点；不产生业务写入。
+- `/api/agent/messages` 在模型启用时可发生理解和回答两次模型调用；`/actions` 与 `/confirmations` 跳过理解节点，但可调用回答节点。
+- 模型环境变量统一改为 `AGENT_MODEL_*`；旧 `AGENT_LLM_*` 和厂商专用变量不再读取。
+- 兼容性：AgentTurnResponse 结构未变化；模型状态接口字段与环境变量属于破坏性配置变更。
 
 ## 2026-09-07 用户资料返回家属联系人
 
@@ -123,3 +158,12 @@
 - 新增后端内部工具 appointment.queryMine，可按 userId、date、hospital、department 查询已确认预约。
 - AgentTurnResponse 未新增或删除字段；查询到单条预约时复用 result 卡，多条时返回摘要和预约ID绑定的快捷操作。
 - 兼容性：仅增加动作与意图，原前端字段结构不变。
+
+## 2026-09-11 照护端助手会话身份与角色限定工具
+
+- `POST /api/agent/conversations` 新增可选参数 `actorId`：不传即本人自办（老人端行为不变），传入则按 `care_relations` 校验操作者与就诊人的绑定关系，未绑定一律 400「没有权限查看这位就诊人的信息」。
+- `userId` 语义明确为「本次会话服务的就诊人」；`actorId` 只用于关系校验与话术，不会被注入任何工具参数。
+- 工具目录新增两个只读工具，仅家属/志愿者可见：`care.timeline`、`care.notifications`。
+- 自由语言意图新增 `REMIND_ELDER`（给长辈留提醒，区别于本人记账的 `MANAGE_MEMO`）。
+- 结构化动作新增 `QUERY_CARE_TIMELINE`、`QUERY_CARE_NOTIFICATIONS`；代约确认后返回 `result` 卡（归属与陪同人取自代约记录）。
+- 兼容性：未传 `actorId` 的旧请求字段与行为完全不变。

@@ -4,21 +4,24 @@
     {
       "label": "Dev Container: 后端服务",
       "type": "shell",
-      "command": "test -f /.dockerenv && mvn spring-boot:run",
+      // spring-boot:run 会 fork 子进程，任务停止后旧进程可能仍占着 8080 与 H2 文件锁，
+      // 再启动会报 "The file is locked / Address already in use"。启动前先清掉 8080 上的残留进程。
+      // .devcontainer/.env 必须先加载：模型网关的 API key 只能从这里来，缺了会静默退回规则模式。
+      "command": "test -f /.dockerenv && set -a && if [ -f \"${workspaceFolder}/.devcontainer/.env\" ]; then . \"${workspaceFolder}/.devcontainer/.env\"; fi && set +a && { fuser -k 8080/tcp 2>/dev/null || true; sleep 1; } && mvn spring-boot:run",
       "options": { "cwd": "${workspaceFolder}/backend" },
       "problemMatcher": []
     },
     {
       "label": "Dev Container: 前端服务",
       "type": "shell",
-      "command": "test -f /.dockerenv && npm run dev",
+      "command": "test -f /.dockerenv && set -a && if [ -f \"${workspaceFolder}/.devcontainer/.env\" ]; then . \"${workspaceFolder}/.devcontainer/.env\"; fi && set +a && npm run dev",
       "options": { "cwd": "${workspaceFolder}/frontend" },
       "problemMatcher": []
     },
     {
       "label": "Dev Container: 验证项目",
       "type": "shell",
-      "command": "test -f /.dockerenv && mvn -B -f backend/pom.xml test -Dagent.llm.enabled=false && cd frontend && npx tsc --noEmit && npm run build",
+      "command": "test -f /.dockerenv && mvn -B -f backend/pom.xml test -Dagent.model.enabled=false && cd frontend && npx tsc --noEmit && npm run build",
       "options": { "cwd": "${workspaceFolder}" },
       "group": "test",
       "problemMatcher": []

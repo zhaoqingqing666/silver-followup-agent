@@ -16,10 +16,13 @@ public record ExtractedFacts(
         LocalTime selectedTime,
         String timePreference,
         Boolean acceptRecommendedTime,
-        String acknowledgement
+        String acknowledgement,
+        String emotion,
+        String concern,
+        String familyContact
 ) {
     public static ExtractedFacts empty() {
         return new ExtractedFacts("UNKNOWN", null, null, null, null, null, null, null,
-                null, null, null, null, null);
+                null, null, null, null, null, null, null, null);
     }
 }

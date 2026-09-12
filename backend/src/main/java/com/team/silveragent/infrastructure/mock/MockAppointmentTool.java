@@ -16,9 +16,6 @@ import java.util.UUID;
 
 @Component
 public class MockAppointmentTool implements AppointmentTool {
-    /** 「附近日期」向前找的天数，从指定日期的次日起算。 */
-    private static final int ALTERNATIVE_WINDOW_DAYS = 3;
-
     private final JdbcTemplate jdbc;
     private final ToolTraceStore traces;
 
@@ -35,7 +32,8 @@ public class MockAppointmentTool implements AppointmentTool {
                 FROM appointment_slots
                 WHERE hospital_id=? AND department=?
                   AND appointment_date=? AND available=TRUE
-                  AND (appointment_date > CURRENT_DATE OR appointment_time > CURRENT_TIME)
+                  AND (appointment_date > CURRENT_DATE
+                        OR (appointment_date = CURRENT_DATE AND appointment_time > CURRENT_TIME))
                 ORDER BY appointment_time
                 """, slotMapper(), hospitalId, department, Date.valueOf(date));
         traces.record(conversationId, "appointment.querySlots", input, result, true);
@@ -52,31 +50,30 @@ public class MockAppointmentTool implements AppointmentTool {
                 FROM appointment_slots
                 WHERE hospital_id=? AND department=?
                   AND appointment_date BETWEEN ? AND ? AND available=TRUE
-                  AND (appointment_date > CURRENT_DATE OR appointment_time > CURRENT_TIME)
+                  AND (appointment_date > CURRENT_DATE
+                        OR (appointment_date = CURRENT_DATE AND appointment_time > CURRENT_TIME))
                 ORDER BY appointment_date,appointment_time
                 """, slotMapper(), hospitalId, department, Date.valueOf(from), Date.valueOf(to));
         traces.record(conversationId, "appointment.queryUpcomingSlots", input, result, true);
         return result;
     }
 
-    /**
-     * “附近日期”只返回严格晚于指定日期的号源：指定日期本身的其它时段由
-     * {@code queryAvailableSlots} 负责，混在一起会让“换日期”的文案与内容不符。
-     */
     @Override
     public List<Slot> queryAlternatives(String conversationId, String hospitalId, String department, LocalDate date) {
-        LocalDate from = date.plusDays(1);
-        LocalDate to = date.plusDays(ALTERNATIVE_WINDOW_DAYS);
+        // 只往后看：往前找会捞出已经过去的时段，把当天其它时段也算进“附近日期”还会
+        // 跟上一句“这一天暂无号源”自相矛盾。当天之内换时段由 SELECT_PERIOD 那条路负责。
         Map<String, Object> input = Map.of("hospitalId", hospitalId, "department", department,
-                "from", from, "to", to);
+                "from", date.plusDays(1), "to", date.plusDays(3));
         List<Slot> result = jdbc.query("""
                 SELECT id,hospital_id,hospital_name,department,appointment_date,appointment_time
                 FROM appointment_slots
                 WHERE hospital_id=? AND department=?
                   AND appointment_date BETWEEN ? AND ? AND available=TRUE
-                  AND (appointment_date > CURRENT_DATE OR appointment_time > CURRENT_TIME)
+                  AND (appointment_date > CURRENT_DATE
+                        OR (appointment_date = CURRENT_DATE AND appointment_time > CURRENT_TIME))
                 ORDER BY appointment_date,appointment_time
-                """, slotMapper(), hospitalId, department, Date.valueOf(from), Date.valueOf(to));
+                """, slotMapper(), hospitalId, department,
+                Date.valueOf(date.plusDays(1)), Date.valueOf(date.plusDays(3)));
         traces.record(conversationId, "appointment.queryAlternatives", input, result, true);
         return result;
     }

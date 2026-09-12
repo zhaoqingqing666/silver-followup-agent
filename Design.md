@@ -2,7 +2,11 @@
 
 审阅日期：2026-09-07。需求基线：[Requirement.md](Requirement.md)。
 
+> **2026-09-11 补记**：下面「实现更新」停在 2026-09-09，本文其余部分更是 09-07 的审阅口径，两处提到的测试数都已过时。此后实现补上了文中列为缺口的多数项——紧急暂停、确认凭据的生成/失效/消费、部分完成的保存与补办、计划持续可查看、语音与多模态入口、双轴会话身份与协同照护端、会话生命周期与长期记忆；后端自动测试现为 **317 项**（0 失败 0 错误）。逐条的当前状态以 [docs/records/PROGRESS.md](docs/records/PROGRESS.md) 与 [docs/报名解决方案.md](docs/报名解决方案.md) 为准。**本文不随实现回改**，保留为审阅基线，不要把其中的「待实现」当作今天的结论。
+
 ## 实现更新（2026-09-07，后续修订优先于下文初次审阅）
+
+2026-09-09：自然语言入口已从“模型提取单一 intent”升级为受控混合规划。`LlmConversationPlanner` 可提出直接回答、补问、白名单只读工具或工作流动作，`AgentRuntime`、`ToolRegistry`、`ToolPolicy` 与 `ActionValidator` 负责审核；写操作仍由原 Java 状态机和确认凭据控制。已补齐“心口疼、胸口疼、胸闷”等安全前置表达，并在 Dev Container 中通过 26 项后端测试和真实模型联调。连续只读工具循环及进一步拆薄 `FollowupAgentService` 仍是后续工作。
 
 已修改代码：紧急/取消终态守卫；确认凭据生成、失效和消费；实际操作确认清单；预约及提醒/通知幂等处理；部分完成保存与补办；预约原地变更事务及关联提醒停用；明确选择家属；替代日期偏好；出发建议与出发提醒分离；相对日期规则；可持续查看计划及步骤状态、选项分页和取消入口。
 
@@ -18,13 +22,16 @@
 
 项目采用模块化单体：React 19 + TypeScript + vinext 手机界面，Java 17 + Spring Boot 后端，H2 模拟数据库。无需训练模型或连接真实医院、地图、短信平台。
 
-核心分工是“模型理解语言，Java 决定流程，工具读写模拟数据”。`DeepSeekFactExtractor` 使用当前日期、当前阶段、已知字段和最近八条消息提取意图及偏好；未启用模型或调用失败时退回 `RuleFactExtractor`。模型不能直接提交预约。
+核心分工是“模型理解并表达，Java 决定流程，工具读写模拟数据”。`LlmFactExtractor` 使用当前日期、当前阶段、已知字段和最近八条消息提取意图、偏好与情绪；`LlmAnswerGenerator` 在业务处理后依据权威事实生成自然回复。未启用模型或调用失败时分别退回规则与模板。模型不能直接提交预约，也不能改变工具结果。
 
 ```mermaid
 flowchart LR
     UI[首页 / 助手 / 事项 / 设置] --> API[AgentController]
     API --> S[FollowupAgentService]
-    S --> F[DeepSeekFactExtractor / RuleFactExtractor]
+    S --> F[LlmFactExtractor / RuleFactExtractor]
+    S --> G[LlmAnswerGenerator / TemplateAnswerGenerator]
+    F --> M[ModelGateway]
+    G --> M
     S --> C[ConversationState / ConversationStore]
     S --> T[七个领域工具接口及模拟实现]
     T --> DB[(H2 模拟目录与业务记录)]
@@ -170,6 +177,6 @@ P0 是本项目内部排期建议，不是新增比赛评分项。
 
 已静态核对前端业务页面、API/DTO、编排状态、两种提取器、核心模拟工具、H2 脚本及现有测试。现有 `SilverAgentApplicationTests` 正常流程未选择具体时段、交通方式或触发 `START_PLAN`，还断言旧工具名 `family.sendNotification`（当前为 `family.notify`），需要与现流程同步。
 
-已执行 `mvn.cmd -B test '-Dagent.llm.enabled=false'`：3 项测试，1 项通过、2 项断言失败、0 项错误。正常/无号测试实际停在 `ASK_HOSPITAL`，与规则提取器使用完整目录名称、测试只传“市第一医院”的不匹配一致；医疗边界测试通过。即使补齐医院识别，前述时段选择与旧工具名断言仍需同步，不能只修改预期值掩盖流程问题。
+历史审阅曾在关闭模型的规则模式下执行测试：3 项测试中 1 项通过、2 项断言失败、0 项错误。正常/无号测试实际停在 `ASK_HOSPITAL`，与规则提取器使用完整目录名称、测试只传“市第一医院”的不匹配一致；医疗边界测试通过。即使补齐医院识别，前述时段选择与旧工具名断言仍需同步，不能只修改预期值掩盖流程问题。
 
 本次文档不宣称完整功能验收通过。页面高对比、语音体验和录屏需后续实际交互验证。自动朗读、打印、材料照片检查、真实平台接入不属于本次最低需求补齐范围。

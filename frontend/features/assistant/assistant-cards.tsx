@@ -1,6 +1,29 @@
-import { CalendarCheck2, Check, ClipboardList, Clock3, MapPin, ShieldAlert, UsersRound } from 'lucide-react';
+import { CalendarCheck2, Check, ChevronRight, ClipboardList, Clock3, MapPin, Route, ShieldAlert, UsersRound } from 'lucide-react';
+import { MEDICAL_BOUNDARY_NOTICE } from '@/types/domain';
 import type { AgentConfirmationCard, AgentNotice, AgentPlanCard, AgentResultCard } from '@/types/domain';
 import { MaterialChecklist } from '@/features/materials/material-checklist';
+
+/**
+ * 医疗越界的专属提示块。
+ *
+ * 越界回复本身照常留在对话记录里（后端把它存进 conversation_messages），
+ * 这张卡只是另外把「为什么这条不一样」说出来，所以卡里不再重复一遍回复正文。
+ * 未知 type 一律不渲染——后端加新提示类型时，旧版前端不会因此显示一块空白。
+ *
+ * 不在卡里放任何按钮：越界不改变办理流程，确认卡里那个待确认的操作依旧有效，
+ * 老人要是想接着办，页面上原有的按钮就够了。
+ */
+export function BoundaryAlert({ notice }: { notice: AgentNotice }) {
+  if (notice.type !== MEDICAL_BOUNDARY_NOTICE) return null;
+  return <section role="alert" aria-label={notice.title}
+    className="rounded-3xl border-2 border-[#e0a24a] bg-[#fff3e0] p-4 shadow-sm">
+    <div className="flex items-center gap-3">
+      <span className="grid size-11 shrink-0 place-items-center rounded-full bg-[#c8862f] text-white"><ShieldAlert className="size-6" /></span>
+      <p className="text-lg font-bold text-[#8a5410]">{notice.title}</p>
+    </div>
+    <p className="mt-2 text-base leading-7 text-[#6c3d24]">{notice.message}</p>
+  </section>;
+}
 
 export function PlanCard({ plan }: { plan: AgentPlanCard }) {
   return <section className="rounded-3xl border border-[#e8c7a4] bg-[#fff8ed] p-5 shadow-sm">
@@ -26,21 +49,6 @@ export function PlanCard({ plan }: { plan: AgentPlanCard }) {
   </section>;
 }
 
-/**
- * 医疗越界与其它需要强提示的场景。用独立的边框、图标和 role="alert"
- * 与普通聊天气泡区分，让老年用户一眼看出这条消息比平时重要。
- */
-export function BoundaryAlert({ notice }: { notice: AgentNotice }) {
-  return <section role="alert" className="rounded-3xl border-2 border-[#d97706] bg-[#fff7ed] p-5 shadow-sm">
-    <div className="flex items-center gap-3">
-      <span className="grid size-12 shrink-0 place-items-center rounded-full bg-[#d97706] text-white"><ShieldAlert /></span>
-      <div><p className="text-sm font-semibold text-[#b45309]">服务范围提示</p><h2 className="text-xl font-bold">{notice.title}</h2></div>
-    </div>
-    <p className="mt-3 text-base leading-7">{notice.message}</p>
-    <p className="mt-3 rounded-2xl bg-white/75 p-3 text-sm leading-6 text-muted-foreground">这条提示不影响您当前的办理进度，原来的内容仍然保留。</p>
-  </section>;
-}
-
 export function ConfirmationCardView({ card, busy, onConfirm, onCancel }: {
   card: AgentConfirmationCard; busy: boolean; onConfirm: () => void; onCancel: () => void;
 }) {
@@ -56,7 +64,11 @@ export function ConfirmationCardView({ card, busy, onConfirm, onCancel }: {
   </section>;
 }
 
-export function ResultCardView({ result, partial = false }: { result: AgentResultCard; partial?: boolean }) {
+export function ResultCardView({ result, partial = false, onOpenTravel }: {
+  result: AgentResultCard;
+  partial?: boolean;
+  onOpenTravel?: (appointmentId: string) => void;
+}) {
   return <section className="rounded-3xl border border-[#b7d6b0] bg-[#edf8e9] p-5 shadow-sm">
     <div className="flex items-center gap-3"><span className="grid size-12 place-items-center rounded-full bg-[#4f8548] text-white"><Check /></span><div><p className="text-sm font-semibold text-green-800">{partial ? '预约已保留，部分事项待补办' : '办理完成'}</p><h2 className="text-xl font-bold">复诊事项卡</h2></div></div>
     <div className="mt-4 space-y-3 text-[17px] leading-7">
@@ -65,6 +77,11 @@ export function ResultCardView({ result, partial = false }: { result: AgentResul
       <p className="flex gap-3"><UsersRound className="mt-1 size-5 shrink-0 text-green-800" /><span>{result.familyStatus}</span></p>
       <p className="flex gap-3 text-sm text-muted-foreground"><MapPin className="mt-1 size-4 shrink-0" />模拟预约编号：{result.appointmentId}</p>
     </div>
+    {onOpenTravel && <button onClick={() => onOpenTravel(result.appointmentId)}
+      className="mt-4 flex min-h-14 w-full items-center justify-between rounded-2xl bg-[#4f8548] px-4 text-left text-white">
+      <span className="flex items-center gap-3"><Route className="size-6" /><span><strong className="block text-lg">查看出行路线</strong><span className="text-sm text-white/80">包含楼层和诊室指引</span></span></span>
+      <ChevronRight className="size-6" />
+    </button>}
     <MaterialChecklist appointmentId={result.appointmentId} compact />
   </section>;
 }

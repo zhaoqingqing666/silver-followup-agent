@@ -1,6 +1,17 @@
 spring:
   application:
     name: silver-agent-api
+  config:
+    # 开发机把密钥放在 .devcontainer/.env（该文件已 gitignore，不会进仓库）。
+    # 用 Spring 原生导入而不是自写 EnvironmentPostProcessor：自写的版本会把自己插到最前面，
+    # 结果是 .env 反过来盖掉真实部署环境变量；原生导入的优先级是
+    # 操作系统环境变量 > .env > application.yml，这才是想要的方向。
+    # optional: 前缀保证这几个文件不存在时也能正常启动。
+    import:
+      - optional:file:./.devcontainer/.env[.properties]
+      - optional:file:../.devcontainer/.env[.properties]
+      - optional:file:./.env[.properties]
+      - optional:file:../.env[.properties]
   datasource:
     url: jdbc:h2:file:./data/silver-agent
     driver-class-name: org.h2.Driver
@@ -20,11 +31,63 @@ server:
     # 逗号分隔的前端来源白名单；用 CORS_ALLOWED_ORIGINS 环境变量覆盖
     allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:3000,http://127.0.0.1:3000}
 agent:
-  llm:
-    enabled: ${AGENT_LLM_ENABLED:false}
-    base-url: ${DEEPSEEK_BASE_URL:https://api.deepseek.com}
-    model: ${DEEPSEEK_MODEL:deepseek-v4-flash}
-    api-key: ${DEEPSEEK_API_KEY:}
+  model:
+    enabled: ${AGENT_MODEL_ENABLED:false}
+    provider: ${AGENT_MODEL_PROVIDER:openai-compatible}
+    base-url: ${AGENT_MODEL_BASE_URL:}
+    model: ${AGENT_MODEL_NAME:}
+    api-key: ${AGENT_MODEL_API_KEY:}
+    api-key-required: ${AGENT_MODEL_API_KEY_REQUIRED:true}
+    # deepseek-v4-flash 开 json_object 模式会把回答吐成纯空格，默认关闭，靠提示词约束输出格式
+    json-mode-supported: ${AGENT_MODEL_JSON_MODE_SUPPORTED:false}
+    connect-timeout-ms: ${AGENT_MODEL_CONNECT_TIMEOUT_MS:2500}
+    read-timeout-ms: ${AGENT_MODEL_READ_TIMEOUT_MS:12000}
+    # 传给规划/回答模型的最近消息条数；用户和助手各一条约等于半轮，默认16条约8轮
+    history-limit: ${AGENT_MODEL_HISTORY_LIMIT:16}
+  # ---- 以下三段是阿里云百炼（DashScope）的视觉 / 语音通道，与上面 agent.model.* 互不影响 ----
+  # 三者的 api-key 只认 DASHSCOPE_API_KEY，不回落 AGENT_MODEL_API_KEY：
+  # 主模型可能配的是别家厂商的 key，拿它去打百炼只会得到 401，
+  # 而「配置看起来是开的、真调用才失败」比「明确显示未开启」难排查得多。
+  # enabled 回落 AGENT_MODEL_ENABLED（默认 false），再叠加 key 是否存在，
+  # 所以没有百炼 key 时三个模态一律显示未开启，前端各自走浏览器原生降级路径。
+  vl:
+    enabled: ${AGENT_VL_ENABLED:${AGENT_MODEL_ENABLED:false}}
+    base-url: ${DASHSCOPE_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode/v1}
+    model: ${DASHSCOPE_VL_MODEL:qwen3-vl-plus}
+    api-key: ${DASHSCOPE_API_KEY:}
+    connect-timeout-ms: ${AGENT_VL_CONNECT_TIMEOUT_MS:5000}
+    # 一张说明书 OCR 可能要十几秒，读取超时给足 60s
+    read-timeout-ms: ${AGENT_VL_READ_TIMEOUT_MS:60000}
+    max-retries: ${AGENT_VL_MAX_RETRIES:2}
+  asr:
+    enabled: ${AGENT_ASR_ENABLED:${AGENT_MODEL_ENABLED:false}}
+    base-url: ${DASHSCOPE_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode/v1}
+    model: ${DASHSCOPE_ASR_MODEL:qwen3-asr-flash}
+    api-key: ${DASHSCOPE_API_KEY:}
+    connect-timeout-ms: ${AGENT_ASR_CONNECT_TIMEOUT_MS:5000}
+    read-timeout-ms: ${AGENT_ASR_READ_TIMEOUT_MS:30000}
+    max-retries: ${AGENT_ASR_MAX_RETRIES:1}
+  tts:
+    enabled: ${AGENT_TTS_ENABLED:${AGENT_MODEL_ENABLED:false}}
+    # TTS 走百炼原生端点，和另外两个不是同一个 API 前缀，所以 base-url 单独给
+    base-url: ${DASHSCOPE_TTS_BASE_URL:https://dashscope.aliyuncs.com}
+    model: ${DASHSCOPE_TTS_MODEL:qwen3-tts-flash}
+    voice: ${DASHSCOPE_TTS_VOICE:Cherry}
+    speed: ${DASHSCOPE_TTS_SPEED:1.0}
+    api-key: ${DASHSCOPE_API_KEY:}
+    connect-timeout-ms: ${AGENT_TTS_CONNECT_TIMEOUT_MS:5000}
+    read-timeout-ms: ${AGENT_TTS_READ_TIMEOUT_MS:30000}
+    max-retries: ${AGENT_TTS_MAX_RETRIES:1}
+  conversation:
+    # 带进后续追问上下文的历史识图条数（最近的在最前）
+    recent-images: ${AGENT_RECENT_IMAGES:3}
+logging:
+  charset:
+    # 容器里 locale 是 POSIX，JVM 默认按 ASCII 写控制台，中文日志会全变成“?”。
+    # 日志本身是中文的（周报发没发就靠它看），所以显式指定 UTF-8。
+    console: UTF-8
+
+
 management:
   endpoints:
     web:
@@ -33,3 +96,11 @@ management:
 
 demo:
   user-id: ${DEMO_USER_ID:user-001}
+
+health-report:
+  weekly:
+    # 每周一早上八点发一份健康小结给家属。后端每次启动还会补发一次（同一周只发一条），
+    # 所以周一那一刻没开机也不会漏。
+    enabled: ${HEALTH_REPORT_WEEKLY_ENABLED:true}
+    cron: ${HEALTH_REPORT_WEEKLY_CRON:0 0 8 * * MON}
+    zone: ${HEALTH_REPORT_WEEKLY_ZONE:Asia/Shanghai}

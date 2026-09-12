@@ -8,28 +8,30 @@ import org.springframework.stereotype.Component;
 import java.sql.Timestamp;
 import java.time.DayOfWeek;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.temporal.TemporalAdjusters;
 
 /**
- * 用户已有日程的滚动种子。
+ * 演示用的“既有日程”跟着今天走。
  *
- * <p>场景三（时间冲突）依赖一条与号源重叠的日程。如果把它写死在 data.sql 里，
- * 演示寿命就截止到那个日期；这里按“今天”计算，保证任何时候启动都能复现冲突。
- * 时间取 10:00-11:00，与号源档位 10:30 必然重叠（见 {@link RollingAppointmentSlotInitializer}）。
+ * 写死某一天的话，那天一过，「时间冲突」就再也造不出来——冲突检查查的是**预约当天**
+ * 有没有别的安排，一条落在过去的日程永远不会命中，界面上看起来就像这位老人从来没有别的事。
+ *
+ * 体检排在「下周三」10:00-11:00：RollingAppointmentSlotInitializer 会给每个工作日生成
+ * 10:30 的号源，两者必然重叠，所以演示话术「下周三去市第一医院心内科复诊」不管哪天演示
+ * 都能撞上冲突。第二条排在「下周六」12:00-13:30（周六没有号源），用来验证冲突检查不会误报。
  */
 @Component
 public class RollingUserScheduleInitializer implements ApplicationRunner {
 
-    /** 冲突日程的固定主键，便于测试与场景重置定位。 */
-    public static final String CONFLICT_SCHEDULE_ID = "schedule-001";
-    private static final String OTHER_SCHEDULE_ID = "schedule-002";
-    private static final String DEMO_USER_ID = "user-001";
-
-    private static final LocalTime CHECKUP_START = LocalTime.of(10, 0);
-    private static final LocalTime CHECKUP_END = LocalTime.of(11, 0);
-    private static final LocalTime FAMILY_MEAL_START = LocalTime.of(12, 0);
-    private static final LocalTime FAMILY_MEAL_END = LocalTime.of(13, 30);
+    /** 冲突场景里的那条既有日程；回归用例按 id 引用它。 */
+    public static final String CHECKUP_ID = "schedule-001";
+    /** 不参与冲突的反例日程。 */
+    public static final String DINNER_ID = "schedule-002";
+    private static final String ELDER_ID = "user-001";
+    private static final String CHECKUP_TITLE = "社区体检";
+    private static final String DINNER_TITLE = "和家人吃饭";
 
     private final JdbcTemplate jdbc;
 
@@ -38,25 +40,40 @@ public class RollingUserScheduleInitializer implements ApplicationRunner {
     }
 
     @Override
-    public void run(ApplicationArguments args) { seed(); }
+    public void run(ApplicationArguments args) {
+        seed();
+    }
 
-    /** 可重复调用；场景重置时也走这里，保证日程与重新生成的号源对齐。 */
+    /** 幂等：重复调用只会把两条日程挪到最新的「下周三 / 下周六」。 */
     public void seed() {
-        LocalDate checkup = nextCommunityCheckupDate();
-        upsert(CONFLICT_SCHEDULE_ID, "社区体检", checkup.atTime(CHECKUP_START), checkup.atTime(CHECKUP_END));
-        // 一条不与任何工作日号源重叠的日程，用来验证冲突检查不会误报。
-        LocalDate weekend = LocalDate.now().with(TemporalAdjusters.next(DayOfWeek.SATURDAY));
-        upsert(OTHER_SCHEDULE_ID, "和家人吃饭", weekend.atTime(FAMILY_MEAL_START), weekend.atTime(FAMILY_MEAL_END));
+        upsert(CHECKUP_ID, CHECKUP_TITLE, checkupDate(), LocalTime.of(10, 0), LocalTime.of(11, 0));
+        upsert(DINNER_ID, DINNER_TITLE, dinnerDate(), LocalTime.of(12, 0), LocalTime.of(13, 30));
     }
 
-    /** 下周三：当天一定有工作日号源档位，10:30 那一档与社区体检时间重叠。 */
-    public LocalDate nextCommunityCheckupDate() {
-        return LocalDate.now().with(TemporalAdjusters.next(DayOfWeek.WEDNESDAY));
+    /**
+     * 演示话术「下周三」指的那一天，与 RuleFactExtractor 的口语解析一致：本周三再往后推一周。
+     * 今天就是周三时同样指七天后的那个周三——两处必须一起理解，否则演示话术会落到没有日程的日期上。
+     */
+    public static LocalDate checkupDate() {
+        return nextWeek(DayOfWeek.WEDNESDAY);
     }
 
-    private void upsert(String id, String title, java.time.LocalDateTime start, java.time.LocalDateTime end) {
+    /** 「下周六」：不参与冲突场景，只用来验证周末的日程不会被误报成冲突。 */
+    public static LocalDate dinnerDate() {
+        return nextWeek(DayOfWeek.SATURDAY);
+    }
+
+    private static LocalDate nextWeek(DayOfWeek day) {
+        return LocalDate.now()
+                .with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY))
+                .plusWeeks(1)
+                .plusDays(day.getValue() - 1L);
+    }
+
+    private void upsert(String id, String title, LocalDate day, LocalTime start, LocalTime end) {
         jdbc.update("""
                 MERGE INTO user_schedules(id,user_id,title,start_at,end_at) KEY(id) VALUES (?,?,?,?,?)
-                """, id, DEMO_USER_ID, title, Timestamp.valueOf(start), Timestamp.valueOf(end));
+                """, id, ELDER_ID, title,
+                Timestamp.valueOf(LocalDateTime.of(day, start)), Timestamp.valueOf(LocalDateTime.of(day, end)));
     }
 }

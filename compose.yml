@@ -12,11 +12,25 @@ services:
     environment:
       # H2 文件库与数据库控制台保持可用
       SPRING_DATASOURCE_URL: jdbc:h2:file:/app/data/silver-agent
-      # false = 纯本地规则；true = 让模型理解自然语言（失败自动回退）
-      AGENT_LLM_ENABLED: ${AGENT_LLM_ENABLED:-false}
-      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
-      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-flash}
-      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      # 模型同时负责自然语言理解与回答；业务状态和工具执行仍由 Java 控制
+      AGENT_MODEL_ENABLED: ${AGENT_MODEL_ENABLED:-false}
+      AGENT_MODEL_PROVIDER: ${AGENT_MODEL_PROVIDER:-openai-compatible}
+      AGENT_MODEL_BASE_URL: ${AGENT_MODEL_BASE_URL:-}
+      AGENT_MODEL_NAME: ${AGENT_MODEL_NAME:-}
+      AGENT_MODEL_API_KEY: ${AGENT_MODEL_API_KEY:-}
+      AGENT_MODEL_API_KEY_REQUIRED: ${AGENT_MODEL_API_KEY_REQUIRED:-true}
+      AGENT_MODEL_JSON_MODE_SUPPORTED: ${AGENT_MODEL_JSON_MODE_SUPPORTED:-true}
+      AGENT_MODEL_CONNECT_TIMEOUT_MS: ${AGENT_MODEL_CONNECT_TIMEOUT_MS:-2500}
+      AGENT_MODEL_READ_TIMEOUT_MS: ${AGENT_MODEL_READ_TIMEOUT_MS:-12000}
+      # 阿里云百炼：拍照识图 / 语音识别 / 语音合成；留空则三个能力显示未开启，
+      # 前端自动回落浏览器原生朗读与识别（只有拍照识图没有本地替代）
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      DASHSCOPE_BASE_URL: ${DASHSCOPE_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      DASHSCOPE_TTS_BASE_URL: ${DASHSCOPE_TTS_BASE_URL:-https://dashscope.aliyuncs.com}
+      DASHSCOPE_VL_MODEL: ${DASHSCOPE_VL_MODEL:-qwen3-vl-plus}
+      DASHSCOPE_ASR_MODEL: ${DASHSCOPE_ASR_MODEL:-qwen3-asr-flash}
+      DASHSCOPE_TTS_MODEL: ${DASHSCOPE_TTS_MODEL:-qwen3-tts-flash}
+      DASHSCOPE_TTS_VOICE: ${DASHSCOPE_TTS_VOICE:-Cherry}
       # CORS 白名单：允许浏览器里的前端页面跨域调用
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
     ports:
@@ -38,6 +52,8 @@ services:
       args:
         # 浏览器访问后端的地址在构建期烧进 JS；换机器演示时改根目录 .env 再重build
         NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8080}
+        NEXT_PUBLIC_AMAP_JS_KEY: ${NEXT_PUBLIC_AMAP_JS_KEY:-}
+        NEXT_PUBLIC_AMAP_SECURITY_CODE: ${NEXT_PUBLIC_AMAP_SECURITY_CODE:-}
     image: silver-web:dev
     container_name: silver-frontend
     restart: unless-stopped
