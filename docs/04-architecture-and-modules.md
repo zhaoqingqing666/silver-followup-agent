@@ -41,6 +41,8 @@ flowchart LR
 
 ## 二、后端 IDEA 分包
 
+> **下面这棵树是早期推荐形态，与源码不符，别当成现状。** `controller/`、`workflow/`、`model/`、`dto/`、`repository/` 这些包，以及 `FollowUpOrchestrator`、`MissingFieldChecker`、`ConfirmationGate`、`IntentRecognizer` 等类**都不存在**，是设计初期的设想。真实布局见本节末尾的「当前实际分包」。
+
 ```text
 backend/src/main/java/com/team/silveragent/
 ├─ SilverAgentApplication.java
