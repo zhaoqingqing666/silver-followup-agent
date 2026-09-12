@@ -555,6 +555,8 @@ application/
 
 这是一份职责设计，不要求一次性搬完所有类。应在保持现有测试可运行的前提下逐步提取。
 
+> **注意：实际落地时没有照这份切。** 上面是按**技术分层**（`runtime/ policy/ workflow/ tool/ response/`）设想的；2026-09-12 真正做的切包按**业务域**分：`care/ health/ memo/ longterm/ preference/ travel/ demo/`，而编排簇（`FollowupAgentService`、`ConversationState`、`AgentRuntime`、`ToolRegistry`、`ToolPolicy`、`ActionValidator`、`SafetyGuard`、`ConversationStore/Lifecycle`、`AppointmentRecordStore`、`TurnProgress`）留在 `application/` 根包。上面树里的 `AgentTurnCoordinator`、`FollowupWorkflow`、`MissingFieldChecker`、`PlanService`、`ConfirmationService`、`ToolExecutor`、`ToolResult`、`ResponseComposer` 目前**都不存在**，是这一节的设想，不是现状。真实布局见 `04-architecture-and-modules.md` 的「当前实际分包」，取舍理由见 DEC-018。
+
 ### 8.2 各核心模块职责
 
 | 模块 | 负责 | 不负责 |

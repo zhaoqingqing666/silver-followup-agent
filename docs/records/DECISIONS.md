@@ -222,3 +222,16 @@
 - 连带收口：`LevelMeter` 的根数、粗细、间距、高度区间改成组件内常量，不再作为入参（唯一还需要按状态变的是颜色）。尺寸只有一处定义，就不存在「某个调用点传漏一个参数」这种错法。
 - 代价：`VoiceMicButton` 的 `variant="inline"` 一并删除——没有任何地方渲染它（`app/page.tsx` 写明助手输入框不再重复放第二个麦克风），且它的默认尺寸同样对不上容器（`h-6` 盒子 + 36px 上限）。组件从此只有悬浮这一种形态；将来真要在别处放第二条音量条，得先想清楚它和浮层那条的关系，而不是再传一套尺寸进去。
 - 当日修正（同一天实机发现的浮层错位）：上面那条浮层第一版写成 `fixed` + `w-[calc(100%-40px)]`，而 `app/page.tsx` 给麦克风居中用的祖先 `div` 带 `-translate-x-1/2`（transform）。祖先一旦有 transform，后代 `fixed` 的包含块就从视口变成那个 64×64 的盒子，宽度算成 24px，汉字一个字一行，浮层被拉成一条竖条。改法：居中改用不产生 transform 的 `-ml-8`，宽度改成按视口的 `w-[calc(100vw-40px)]`。**结论：浮层的定位不要建立在「包含块是视口」这个假设上，居中也不要顺手用 transform**——这条约束现在写在 `app/page.tsx` 与浮层自己的注释里。详见 PITFALLS 同日条目。
+
+## DEC-018 分包按业务域切，编排簇留在根包
+
+- 日期：2026-09-12。
+- 背景：`application/` 下 30 个类平铺在一个包里。要拆，先得定两件事：按什么切、切到哪一层。
+- 决定一：**按业务域切**（`care/ health/ memo/ longterm/ preference/ travel/ demo/`），不按技术分层切（如 `runtime/ policy/ workflow/ tool/ response/`）。
+- 理由一：这一层的类本来就一个业务一件事——`CareBookingService`、`HealthRecordStore`、`MemoStore`。按域分，找「代约」直接进 `care/`，不需要先判断它算 workflow 还是 service。技术分层在「30 个类、单一业务场景」的规模下不划算：同一件事的代码会被拆到三四个包里，改一处要跨包跳。`11-agent-architecture...` 第八节那份按技术分层的方案属早期设想，落地的形态以本节为准。
+- 决定二：**编排簇 15 个类留在 `application/` 根包，不跟着拆**（`FollowupAgentService`、`AgentOrchestrator`、`AgentRuntime`、`ToolRegistry`、`ToolPolicy`、`ActionValidator`、`SafetyGuard`、`ConversationState`、`ConversationStore`、`ConversationLifecycle`、`AppointmentRecordStore`、`CatalogEntityResolver`、`DialogueService`、`ReplyContextBuilder`、`TurnProgress`）。
+- 理由二：`ConversationState` 的 ~35 个字段与四个嵌套枚举、外加 `ToolPolicy`/`AgentRuntime`/`SafetyGuard`/`ActionValidator` 等 11 个类都是**包级私有**，它们与 `ConversationState` 互相引用（一个字段的类型、一个枚举的取值都在里面）。拆开就得把这些字段和类逐个提成 `public`。那样拆出来的不是「更清晰的边界」，而是**更松的封装**——为了让目录好看而把内部状态对外敞开，方向反了。
+- 决定三：本次**只搬家、不切类**。
+- 理由三：切包的行为变更风险接近零（只改 `package` 与 `import`，diff 里没有别的行），可以独立验收、独立回滚。切类要动状态流转，风险是另一个量级；而且切类的边界到底怎么划，取决于前端需要什么形状的接口，而前端那波大改还没定。先切包、后切类，等于先用几乎零代价把「找文件」的问题解决掉。
+- 代价：`FollowupAgentService` 仍是 4883 行、占这一层 9408 行的 52%；根包仍然混着编排、门禁、状态、进度四类东西。**分包没有解决这个问题**，只是把周围的邻居归了位——不要把它当成「结构问题已解决」。真要动它，等前端接口定形后按业务切。
+- 代价二：子包之间目前只剩一条真实依赖（`HealthReportService` → `MemoParser` 的演示时区时钟）。那个时钟本来就该独立出来，因为它被塞在 `MemoParser` 里，健康报告才「依赖」备忘。这属于切类范畴，本次不动，只记在这里。

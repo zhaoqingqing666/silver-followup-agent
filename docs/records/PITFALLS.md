@@ -139,3 +139,19 @@
 - 解决办法：`page.tsx` 的居中改用 `-ml-8`（按钮 `size-16` 的一半，不产生 transform），浮层宽度从百分比改成按视口的 `w-[calc(100vw-40px)]`，两处都写了注释说明为什么不能用 `-translate-x-1/2`。顺手全仓核对了一遍其余 `fixed` 元素，暂无第二个同款组合。
 - 无效尝试：只调 `max-w`、只加 `whitespace-nowrap`——都在改「多宽」这个结果，而真正错的是「以谁为基准算宽度」。
 - 结论：`fixed` 不等于「相对视口」，它相对的是**最近的、带 transform / filter / will-change / contain 的祖先**（构建工具、动画库、居中小技巧都可能顺手加上）。要断言「相对视口」，就别让祖先带这些属性；宽度也别只写百分比——同一个表达式在两种包含块下算出来的数字能差十倍，而 `tsc`、`oxlint`、构建检查一样都不会报警，只能起来看。
+
+## 2026-09-12 批量改 import 的脚本把注释里的类名当成真引用
+
+- 现象：切包后编译报 `SafetyGuard is not public in com.team.silveragent.application; cannot be accessed from outside package`。报错的两个文件（`agent/MedicalBoundaryRules.java`、`agent/RuleFactExtractor.java`）正文里一次都没用过 `SafetyGuard`，只在**注释**里提到它。
+- 根因：迁移脚本判断「这个文件要用哪些类」用的是 `grep -E "\b类名\b"`，注释里的提及和真调用一视同仁，于是给两个文件补了 import。`SafetyGuard` 是包级私有，从别的包 import 它直接编译不过——这次是编译器替我们发现了。
+- 更隐蔽的是同一次脚本的另一半：它还给 `health/` 下三个文件补了 `import ...memo.MemoParser` / `MemoStore`，同样只服务注释里的 `{@link}`。这三个**编译得过**，于是悄无声息地让子包依赖图多出三条根本不存在的边（`health → memo`）。下一个做结构分析的人（包括写这段脚本的人）会照着这张假图去理解代码。
+- 解决办法：注释里的跨包引用改用全限定名 `{@link com.team.silveragent.application.memo.MemoParser}`，不再需要 import；三条假边删掉。真调用的那一条（`HealthReportService` 里的 `MemoParser.nowInDemoZone()`）保留。
+- 结论：**「文本上出现了」和「真的引用了」是两回事**，批量改写 import 的脚本必须把注释排除在外（先剥注释，或只匹配 `类名.` / `new 类名` 这类用法形态）。另外这一轮的运气不错——批量改写如果**编译不过**，那反而是好事；真正要怕的是它编译得过。
+
+## 2026-09-12 移了源码却没清 `target/`，Spring 报 bean 重名
+
+- 现象：把 `MemoryStore` 从 `application/memory/` 移到 `application/longterm/` 后跑测试，**317 项里 207 个错误**，报 `ConflictingBeanDefinitionException: bean name 'memoryStore' for [com.team.silveragent.application.memory.MemoryStore] conflicts with existing, non-compatible bean definition of same name and class [com.team.silveragent.application.longterm.MemoryStore]`。看着像代码改错了。
+- 根因：`git mv` 只动源码，`target/classes/` 里旧的 `application/memory/MemoryStore.class` 还在。Spring 扫的是**编译输出目录**，两个 simpleName 相同的类都在 → 默认 bean 名（`memoryStore`）撞车。整个过程**编译完全通过**，所以上一步的「编译过了」并不能说明运行时状态是一致的。
+- 附带的坑：`mvn clean` 删不掉 `target/`，报 `Device or resource busy`——占用它的不是 maven，是 **VS Code 的 Java 语言服务器**（`redhat.java`）在盯着这个目录。不用去杀 IDE：`clean` 失败之前已经把内容删空了，接着跑 `mvn test` 就是全新构建。
+- 解决办法：清空 `target/` 后重跑，317 项全绿。
+- 结论：**改包名或类名之后，唯一算数的验证是「清空 `target/` 再构建」**；增量编译的绿只证明源码能编译，不证明运行时加载到的类是对的。还有一个现成的判据：Spring 应用里同一个 simpleName 的类若同时存在于两个包，bean 名必然冲突、启动必然炸——**没炸就说明没有重复**，可以用它反过来确认历史那几次验证是干净的。
