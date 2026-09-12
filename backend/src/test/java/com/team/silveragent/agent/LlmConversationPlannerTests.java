@@ -37,6 +37,25 @@ class LlmConversationPlannerTests {
     }
 
     @Test
+    void modelCanCallTheStructuredConfirmationTool() {
+        LlmConversationPlanner planner = planner("""
+                {"actionType":"CALL_CONFIRMATION_TOOL","intent":"CANCEL_APPOINTMENT",
+                 "toolName":"interaction.requestConfirmation",
+                 "arguments":{"scope":"DATE_RANGE","date":"2026-09-12","direction":"BEFORE"},
+                 "replyDraft":"我按新的范围重新确认。","dialogueMode":"FOLLOWUP_FLOW","facts":{}}
+                """);
+
+        var decision = planner.plan("还是只取消12号之前的预约", context(), List.of(
+                new PlannerTool("interaction.requestConfirmation", "申请取消确认", "CONFIRMATION_ONLY",
+                        List.of("scope", "date", "direction"))));
+
+        assertThat(decision.actionType()).isEqualTo(PlannerActionType.CALL_CONFIRMATION_TOOL);
+        assertThat(decision.toolName()).isEqualTo("interaction.requestConfirmation");
+        assertThat(decision.arguments()).containsEntry("scope", "DATE_RANGE")
+                .containsEntry("direction", "BEFORE");
+    }
+
+    @Test
     void modelCanAnswerSupportivelyWithoutForcingTheWorkflow() {
         LlmConversationPlanner planner = planner("""
                 {"actionType":"ANSWER","intent":"EMOTIONAL_SUPPORT","toolName":null,"arguments":{},

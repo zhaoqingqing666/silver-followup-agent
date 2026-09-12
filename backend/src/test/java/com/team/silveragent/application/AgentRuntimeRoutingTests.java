@@ -3,6 +3,7 @@ package com.team.silveragent.application;
 import com.team.silveragent.application.care.CareCatalogRepository;
 
 import com.team.silveragent.agent.AgentContext;
+import com.team.silveragent.agent.AgentRole;
 import com.team.silveragent.agent.ExtractedFacts;
 import com.team.silveragent.agent.RuleFactExtractor;
 import com.team.silveragent.agent.planning.ConversationPlanner;
@@ -88,6 +89,134 @@ class AgentRuntimeRoutingTests {
 
         assertThat(outcome.route()).isEqualTo(AgentOrchestrator.Route.RESOLVE_HOSPITAL);
         assertThat(outcome.proposedTool()).isEqualTo("hospital.search");
+    }
+
+    @Test
+    void confirmationOnlyToolMistakenForAReadCallStillEntersTheConfirmationWorkflow() {
+        ConversationPlanner planner = mock(ConversationPlanner.class);
+        when(planner.mode()).thenReturn("MODEL_PLANNER_WITH_RULE_FALLBACK");
+        when(planner.plan(any(), any(), any())).thenReturn(new PlannerDecision(
+                PlannerActionType.CALL_READ_TOOL, "CANCEL_APPOINTMENT", "interaction.requestConfirmation",
+                Map.of(), "请确认是否取消这次预约？", "FOLLOWUP_FLOW",
+                facts("CANCEL_APPOINTMENT"), "MODEL_PLANNER"));
+
+        AgentRuntime.Outcome outcome = runtime(planner).plan("取消这次预约", context(),
+                new ConversationState("conversation", "user-001"));
+
+        assertThat(outcome.route()).isEqualTo(AgentOrchestrator.Route.CANCEL_EXISTING_APPOINTMENT);
+        assertThat(outcome.route()).isNotEqualTo(AgentOrchestrator.Route.DIRECT_ANSWER);
+        assertThat(outcome.proposedTool()).isEqualTo("interaction.requestConfirmation");
+        assertThat(outcome.proposedTools()).isEmpty();
+    }
+
+    @Test
+    void modelCallsTheStructuredCancellationConfirmationTool() {
+        ConversationPlanner planner = mock(ConversationPlanner.class);
+        when(planner.mode()).thenReturn("MODEL_PLANNER_WITH_RULE_FALLBACK");
+        when(planner.plan(any(), any(), any())).thenReturn(new PlannerDecision(
+                PlannerActionType.CALL_CONFIRMATION_TOOL, "CANCEL_APPOINTMENT",
+                "interaction.requestConfirmation",
+                Map.of("scope", "DATE_RANGE", "date", "2026-09-12", "direction", "BEFORE"),
+                "我按您刚说的范围重新确认。", "FOLLOWUP_FLOW",
+                facts("CANCEL_APPOINTMENT"), "MODEL_PLANNER"));
+
+        ConversationState state = new ConversationState("conversation", "user-001");
+        state.stage = ConversationState.Stage.AWAITING_CONFIRMATION;
+        state.pendingAction = "CANCEL_EXISTING";
+        AgentRuntime.Outcome outcome = runtime(planner).plan("还是只取消12号之前的", context(), state);
+
+        assertThat(outcome.route()).isEqualTo(AgentOrchestrator.Route.CANCEL_EXISTING_APPOINTMENT);
+        assertThat(outcome.proposedTools()).singleElement().satisfies(call -> {
+            assertThat(call.toolName()).isEqualTo("interaction.requestConfirmation");
+            assertThat(call.arguments()).containsEntry("scope", "DATE_RANGE")
+                    .containsEntry("direction", "BEFORE");
+        });
+    }
+
+    @Test
+    void modelConfirmationResponseUsesTheCurrentCardWithoutSupplyingItsId() {
+        ConversationPlanner planner = mock(ConversationPlanner.class);
+        when(planner.mode()).thenReturn("MODEL_PLANNER_WITH_RULE_FALLBACK");
+        when(planner.plan(any(), any(), any())).thenReturn(new PlannerDecision(
+                PlannerActionType.CALL_CONFIRMATION_TOOL, "CONFIRM_ACTION",
+                "interaction.respondConfirmation", Map.of("decision", "CONFIRM"),
+                null, "FOLLOWUP_FLOW", facts("CONFIRM_ACTION"), "MODEL_PLANNER"));
+
+        ConversationState state = new ConversationState("conversation", "user-001");
+        state.stage = ConversationState.Stage.AWAITING_CONFIRMATION;
+        state.confirmationId = "java-owned-id";
+        AgentRuntime.Outcome outcome = runtime(planner).plan("确认", context(), state);
+
+        assertThat(outcome.route()).isEqualTo(AgentOrchestrator.Route.CONFIRM_PENDING);
+        assertThat(outcome.proposedTools().get(0).arguments()).doesNotContainKey("confirmationId");
+    }
+
+    /**
+     * 模型编了一个根本没注册的写工具，但 intent 是我们支持的写业务：工具绝不能被执行，
+     * 也绝不能静默变成一句没有卡片的回答。忽略工具名，按 intent 回到既有 Java 工作流——
+     * 取消在那里仍要被翻译成确认卡，而不是在这里被直接执行。
+     */
+    @Test
+    void fabricatedWriteToolWithARealWriteIntentFallsBackToTheJavaWorkflow() {
+        ConversationPlanner planner = mock(ConversationPlanner.class);
+        when(planner.mode()).thenReturn("MODEL_PLANNER_WITH_RULE_FALLBACK");
+        when(planner.plan(any(), any(), any())).thenReturn(new PlannerDecision(
+                PlannerActionType.CALL_READ_TOOL, "CANCEL_APPOINTMENT", "appointment.cancelDirectly",
+                Map.of("appointmentId", "a-001"), "已经帮您取消了。", "FOLLOWUP_FLOW",
+                facts("CANCEL_APPOINTMENT"), "MODEL_PLANNER"));
+
+        AgentRuntime.Outcome outcome = runtime(planner).plan("把之前那个取消掉", context(),
+                new ConversationState("conversation", "user-001"));
+
+        assertThat(outcome.route()).isEqualTo(AgentOrchestrator.Route.CANCEL_EXISTING_APPOINTMENT);
+        assertThat(outcome.route()).isNotEqualTo(AgentOrchestrator.Route.DIRECT_ANSWER);
+        assertThat(outcome.proposedTool()).isNull();
+        assertThat(outcome.proposedTools()).isEmpty();
+    }
+
+    /**
+     * 模型编的工具执行不了，它给的 intent 也归不到任何业务链路（UNKNOWN）：由 Java 明确回绝。
+     * 关键是既不能执行那个工具，也不能掉进 DIRECT_ANSWER——那条路会 pauseActiveTask，
+     * 把正在办理的预约流程停掉。这里只表示“这条工具我不认”，任务状态原地不动。
+     */
+    @Test
+    void fabricatedToolWithAnUnmappableIntentIsRefusedInsteadOfAnsweredSilently() {
+        ConversationPlanner planner = mock(ConversationPlanner.class);
+        when(planner.mode()).thenReturn("MODEL_PLANNER_WITH_RULE_FALLBACK");
+        when(planner.plan(any(), any(), any())).thenReturn(new PlannerDecision(
+                PlannerActionType.CALL_READ_TOOL, "UNKNOWN", "appointment.cancelDirectly",
+                Map.of("appointmentId", "a-001"), "已经帮您取消了。", "FOLLOWUP_FLOW",
+                facts("UNKNOWN"), "MODEL_PLANNER"));
+
+        AgentRuntime.Outcome outcome = runtime(planner).plan("随便弄一下那个东西", context(),
+                new ConversationState("conversation", "user-001"));
+
+        assertThat(outcome.route()).isEqualTo(AgentOrchestrator.Route.REFUSE_UNSUPPORTED_TOOL);
+        assertThat(outcome.route()).isNotEqualTo(AgentOrchestrator.Route.DIRECT_ANSWER);
+        assertThat(outcome.proposedTool()).isNull();
+        assertThat(outcome.proposedTools()).isEmpty();
+    }
+
+    /**
+     * 工具真实存在，但当前角色没权限用它（老人端没有 care.timeline）。同样不执行、不静默，
+     * 按 intent 回到老人自己的只读查询——权限判定不能被“回退到工作流”绕过。
+     */
+    @Test
+    void toolOutsideTheActorRoleNeverReachesTheExecutionList() {
+        ConversationPlanner planner = mock(ConversationPlanner.class);
+        when(planner.mode()).thenReturn("MODEL_PLANNER_WITH_RULE_FALLBACK");
+        when(planner.plan(any(), any(), any())).thenReturn(new PlannerDecision(
+                PlannerActionType.CALL_READ_TOOL, "QUERY_APPOINTMENTS", "care.timeline",
+                Map.of(), null, "FOLLOWUP_FLOW", facts("QUERY_APPOINTMENTS"), "MODEL_PLANNER"));
+
+        ConversationState state = new ConversationState("conversation", "user-001");
+        state.actorRole = AgentRole.ELDER;
+
+        AgentRuntime.Outcome outcome = runtime(planner).plan("看看最近的动态", context(), state);
+
+        assertThat(outcome.route()).isEqualTo(AgentOrchestrator.Route.QUERY_MY_APPOINTMENTS);
+        assertThat(outcome.proposedTool()).isNull();
+        assertThat(outcome.proposedTools()).isEmpty();
     }
 
     /**

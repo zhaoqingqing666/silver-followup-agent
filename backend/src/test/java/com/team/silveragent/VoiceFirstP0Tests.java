@@ -12,6 +12,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 
+import java.time.LocalDate;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -196,6 +197,117 @@ class VoiceFirstP0Tests {
         service.chat(done.conversationId(), "好的");
         service.chat(done.conversationId(), "继续");
         assertThat(confirmedAppointments()).isEqualTo(1);
+    }
+
+    @Test void explicitSpeechConfirmsTheCurrentCancellationCard() {
+        AgentTurnResponse done = book(MORNING_SLOT);
+        AgentTurnResponse card = action(done.conversationId(), "CANCEL_APPOINTMENT", "");
+
+        assertThat(card.stage()).isEqualTo("AWAITING_CONFIRMATION");
+        assertThat(card.reply()).contains("红色", "确认取消", "绿色", "保留预约", "直接说");
+        assertThat(card.speechText()).isEqualTo(card.reply());
+        assertThat(confirmedAppointments()).isEqualTo(1);
+
+        AgentTurnResponse cancelled = service.chat(done.conversationId(), "确认取消预约");
+        assertThat(cancelled.reply()).contains("已经取消");
+        assertThat(confirmedAppointments()).isZero();
+    }
+
+    @Test void contextualNaturalSpeechIsNotGuessedByJavaWhenTheModelIsUnavailable() {
+        AgentTurnResponse done = book(MORNING_SLOT);
+        action(done.conversationId(), "CANCEL_APPOINTMENT", "");
+
+        AgentTurnResponse unchanged = service.chat(done.conversationId(), "是的，就取消这条");
+
+        assertThat(unchanged.stage()).isEqualTo("AWAITING_CONFIRMATION");
+        assertThat(confirmedAppointments()).isEqualTo(1);
+    }
+
+    @Test void cancellationBeforeADateBuildsOneBatchConfirmationAndExecutesOnlyAfterApproval() {
+        book(MORNING_SLOT);
+        AgentTurnResponse second = book(service.start().conversationId(), AFTERNOON_SLOT);
+        java.time.LocalDate boundary = DemoSeed.checkupDay().plusDays(1);
+        String spokenBoundary = boundary.getMonthValue() + "." + boundary.getDayOfMonth() + "号";
+
+        AgentTurnResponse card = service.chat(second.conversationId(),
+                "取消" + spokenBoundary + "前的预约");
+
+        assertThat(card.stage()).isEqualTo("AWAITING_CONFIRMATION");
+        assertThat(card.confirmation().title()).contains("2条");
+        assertThat(card.confirmation().operations()).filteredOn(line -> line.startsWith("取消预约：")).hasSize(2);
+        assertThat(card.confirmation().confirmText()).isEqualTo("确认全部取消");
+        assertThat(confirmedAppointments()).isEqualTo(2);
+
+        AgentTurnResponse cancelled = service.chat(second.conversationId(), "确认全部取消");
+        assertThat(cancelled.reply()).contains("2条");
+        assertThat(confirmedAppointments()).isZero();
+    }
+
+    @Test void allCancellationCanContinueFromThePreviousCandidateList() {
+        book(MORNING_SLOT);
+        AgentTurnResponse second = book(service.start().conversationId(), AFTERNOON_SLOT);
+
+        AgentTurnResponse list = service.chat(second.conversationId(), "我想取消预约");
+        assertThat(list.quickReplies()).extracting(QuickReply::action).contains("SELECT_APPOINTMENT_TO_CANCEL");
+
+        AgentTurnResponse card = service.chat(second.conversationId(), "都取消");
+        assertThat(card.stage()).isEqualTo("AWAITING_CONFIRMATION");
+        assertThat(card.confirmation().title()).contains("2条");
+        assertThat(confirmedAppointments()).isEqualTo(2);
+
+        AgentTurnResponse cancelled = service.chat(second.conversationId(), "确认全部取消");
+        assertThat(cancelled.reply()).contains("2条");
+        assertThat(confirmedAppointments()).isZero();
+    }
+
+    @Test void vaguePreviousReferenceNeverTurnsIntoBatchCancellation() {
+        book(MORNING_SLOT);
+        AgentTurnResponse second = book(service.start().conversationId(), AFTERNOON_SLOT);
+        service.chat(second.conversationId(), "我想取消预约");
+
+        AgentTurnResponse clarified = service.chat(second.conversationId(), "之前那个");
+
+        assertThat(clarified.stage()).isNotEqualTo("AWAITING_CONFIRMATION");
+        assertThat(clarified.confirmation()).isNull();
+        assertThat(clarified.quickReplies()).extracting(QuickReply::action)
+                .contains("SELECT_APPOINTMENT_TO_CANCEL");
+        assertThat(confirmedAppointments()).isEqualTo(2);
+    }
+
+    @Test void spokenRejectionKeepsEveryAppointmentOnTheCurrentCard() {
+        book(MORNING_SLOT);
+        AgentTurnResponse second = book(service.start().conversationId(), AFTERNOON_SLOT);
+        AgentTurnResponse card = service.chat(second.conversationId(), "都取消预约");
+        assertThat(card.stage()).isEqualTo("AWAITING_CONFIRMATION");
+
+        AgentTurnResponse kept = service.chat(second.conversationId(), "不取消，全部保留");
+        assertThat(kept.stage()).isNotEqualTo("AWAITING_CONFIRMATION");
+        assertThat(confirmedAppointments()).isEqualTo(2);
+    }
+
+    @Test void cancellationDateInThePastRefersToThisYearsExistingAppointment() {
+        LocalDate appointmentDay = LocalDate.now().minusDays(2);
+        LocalDate boundary = LocalDate.now().minusDays(1);
+        String slotId = "past-cancel-slot";
+        jdbc.update("""
+                INSERT INTO appointment_slots(id,hospital_id,hospital_name,department,
+                    appointment_date,appointment_time,available)
+                VALUES (?,'h001','市第一医院（模拟）','心内科',?,'09:00',FALSE)
+                """, slotId, appointmentDay);
+        jdbc.update("""
+                INSERT INTO appointments(id,slot_id,user_id,status,created_at,conversation_id)
+                VALUES ('past-cancel-appt',?,'user-001','CONFIRMED',CURRENT_TIMESTAMP,'seed-past-cancel')
+                """, slotId);
+
+        AgentTurnResponse card = service.chat(service.start().conversationId(),
+                "取消" + boundary.getMonthValue() + "." + boundary.getDayOfMonth() + "号前的预约");
+
+        assertThat(card.stage()).isEqualTo("AWAITING_CONFIRMATION");
+        assertThat(card.confirmation().operations().toString())
+                .contains(appointmentDay.getYear() + "年" + appointmentDay.getMonthValue() + "月"
+                        + appointmentDay.getDayOfMonth() + "日");
+        confirm(card);
+        assertThat(confirmedAppointments()).isZero();
     }
 
     @Test void emergencyExpressionPreemptsPageRequestsAndBookingFlow() {

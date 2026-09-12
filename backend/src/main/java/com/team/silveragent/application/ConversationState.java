@@ -80,6 +80,8 @@ final class ConversationState {
     String pendingAction = "CREATE";
     String appointmentId;
     String pendingAppointmentId;
+    /** 当前取消确认卡绑定的全部预约；单条取消也保存为一项，兼容旧快照时回退到 pendingAppointmentId。 */
+    List<String> pendingAppointmentIds = List.of();
     Stage interruptedStage;
     String interruptedPendingAction;
     String interruptedPendingAppointmentId;

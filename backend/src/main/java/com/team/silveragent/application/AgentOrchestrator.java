@@ -49,23 +49,28 @@ final class AgentOrchestrator {
         QUERY_CARE_TIMELINE, QUERY_CARE_NOTIFICATIONS,
         // 家属/志愿者给长辈留一条提醒：落到长辈自己的备忘里，反向通知。
         REMIND_ELDER,
+        // 模型提议了一个执行不了的工具（未注册、无权限或写工具），它给的 intent 也归不到任何业务链路：
+        // 由 Java 明确回绝，不用模型的话术。单独成一个路由，是因为 DIRECT_ANSWER 会 pauseActiveTask，
+        // 把正在办理的预约流程停掉；这里只是“这条工具我不认”，不该动任务状态。
+        REFUSE_UNSUPPORTED_TOOL,
         CURRENT_FLOW
     }
 
     Route decide(String message, ExtractedFacts facts, ConversationState state) {
         String intent = facts.intent() == null ? "UNKNOWN" : facts.intent();
 
-        Route deterministic = deterministicOverride(message);
-        if (deterministic != null) return deterministic;
-
         if (state.stage == ConversationState.Stage.AWAITING_CONFIRMATION) {
             if ("CONFIRM_ACTION".equals(intent) || contains(message, "确认取消", "确认办理", "执行操作")) {
                 return Route.CONFIRM_PENDING;
             }
-            if ("DENY_ACTION".equals(intent) || contains(message, "保留预约", "不执行", "返回修改")) {
+            if ("DENY_ACTION".equals(intent) || contains(message, "保留预约", "全部保留", "不取消",
+                    "先别取消", "算了", "不执行", "返回修改")) {
                 return Route.DENY_PENDING;
             }
         }
+
+        Route deterministic = deterministicOverride(message);
+        if (deterministic != null) return deterministic;
         if (state.stage == ConversationState.Stage.CONFLICT
                 && ("CONFIRM_ACTION".equals(intent)
                 || contains(message, "还是这个时间", "仍然这个时间", "保留这个时间", "就按这个时间", "时间不改"))) {
