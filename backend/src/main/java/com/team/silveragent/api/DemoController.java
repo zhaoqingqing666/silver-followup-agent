@@ -1,8 +1,10 @@
 package com.team.silveragent.api;
 
+import com.team.silveragent.application.demo.DemoScenario;
+
 import com.team.silveragent.agent.model.ModelGateway;
 import com.team.silveragent.agent.model.ModelRequest;
-import com.team.silveragent.application.DemoScenarioService;
+import com.team.silveragent.application.demo.DemoScenarioService;
 import com.team.silveragent.domain.model.DemoScenarioResponse;
 import com.team.silveragent.service.AsrService;
 import com.team.silveragent.service.TtsService;

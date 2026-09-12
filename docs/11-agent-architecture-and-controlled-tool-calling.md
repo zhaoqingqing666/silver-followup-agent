@@ -1,6 +1,6 @@
 # 复诊事项智能体架构与受控工具调用方案
 
-> 文档版本：v0.2 ｜ 更新日期：2026年9月11日
+> 文档版本：v0.2 ｜ 更新日期：2026年9月12日
 
 ## 文档目的与结论
 
@@ -23,6 +23,8 @@
 当前支持一次提出最多三个互不依赖的只读工具，也支持在同一个用户轮次内把真实结果交回模型后继续选择有依赖的只读工具。循环最多 3 轮，并按“工具名＋参数”拦截重复调用。普通聊天只调用一次主模型；查询轮次通常调用一次规划和一次结果续跑，组合查询可能增加续跑次数，但始终复用同一个模型与核心提示词。模型不可用时保留规则流程作为运行降级，而不是正常模式的二次裁决。
 
 v0.2 已落地的增量能力：会话身份拆成“数据轴（服务谁）”与“能力轴（谁在操作）”两条轴，家属/志愿者可以代长辈办理；`ToolRegistry` 扩到 17 个只读工具，并按角色过滤模型可见的工具；新增健康记录（`HealthRecordTool`）与健康备忘（`MemoTool`）；协同照护端助手接入同一个智能体、同一套工具和同一个确认门禁。后端自动测试 317 项，0 失败 0 错误。身份、工具与协同照护端的细节见第十四、十五节。
+
+2026-09-12 的增量是**纯结构**、不含新能力：`application/` 下 30 个类原来平铺在一个包里，现按业务域分成 `care/ health/ memo/ longterm/ preference/ travel/ demo/` 七个子包，编排簇因包级私有字段仍留在根包。对外接口、字段与行为一律未变（317 项测试、前端零改动）。真实布局见第八节 8.1。
 
 ## 一 大模型和智能体不是同一个东西
 
@@ -525,9 +527,52 @@ PROPOSE_WORKFLOW_ACTION  提议修改草稿或进入需要确认的业务动作
 
 `ToolRegistry` 按当前会话的操作者身份（`AgentRole`）过滤模型可见的工具清单：老人本人看不到只给照护者用的 `care.timeline` 和 `care.notifications`，家属/志愿者则两条都能看见。过滤只影响模型“想得到什么”，不构成安全边界——模型仍可能吐出一个它看不见的工具名，所以 `ToolPolicy` 在执行前会按角色再判一次，两道都通过才执行。身份与角色的完整说明见第十四节。
 
-## 八 建议拆分后的 Java 中控结构
+## 八 Java 中控结构：现状与拆分方向
 
-### 8.1 目标模块
+### 8.1 当前实际结构（2026-09-12）
+
+`application/` 共 9408 行、30 个类：
+
+```text
+application/
+├─ （根包）编排、门禁、状态、进度 —— 15 个类
+│  ├─ FollowupAgentService.java    4883 行 —— 补问、选时段、查冲突、准备确认、
+│  │                               执行与结果组合全在这一个类里，占本层 52%
+│  ├─ AgentRuntime.java            模型调用与同轮只读工具循环
+│  ├─ AgentOrchestrator.java       意图到路线
+│  ├─ AgentTurn 相关的状态与存储：
+│  │  ConversationState.java       （~35 个包级私有字段 + 四个嵌套枚举）
+│  │  ConversationStore.java       状态快照与消息落库
+│  │  ConversationLifecycle.java   会话状态标记（ACTIVE/CLOSED/EXPIRED）
+│  │  TurnProgress.java            一轮的实时进度
+│  ├─ ToolRegistry.java            暴露给模型的只读工具目录
+│  ├─ ToolPolicy.java              工具权限分级
+│  ├─ ActionValidator.java         参数与状态校验
+│  ├─ SafetyGuard.java             紧急与医疗边界
+│  ├─ CatalogEntityResolver.java   医院/科室口语名归一
+│  ├─ DialogueService.java         对话状态与任务状态的分离
+│  ├─ ReplyContextBuilder.java     组装权威回答上下文
+│  └─ AppointmentRecordStore.java  模拟预约记录读写
+├─ care/         CareService、CareBookingService、CareCatalogRepository
+├─ demo/         DemoScenario、DemoScenarioService
+├─ health/       HealthRecordStore、HealthRecordParser、HealthReportParser、
+│                HealthReportService
+├─ longterm/     MemoryStore（跨对话长期记忆）
+├─ memo/         MemoStore、MemoParser、MemoCommandParser
+├─ preference/   UserPreferenceStore（朗读开关、语速、音色）
+└─ travel/       TravelGuideService
+```
+
+要点两条：
+
+- **编排簇刻意留在根包。** `ConversationState` 的字段与嵌套枚举、以及 `ToolPolicy`/`AgentRuntime`/`SafetyGuard`/`ActionValidator` 等 11 个类都是**包级私有**，彼此互相引用。把它们拆进不同子包就得逐个提成 `public`——那是放宽封装，不是整理结构。所以「拆到哪一层」是从可见性算出来的，不是按目录好看定的。
+- **`FollowupAgentService` 4883 行的问题没有解决。** 分包只把它的邻居归了位，它自己一行没动。这是下一步要做的事（见 8.3）。
+
+取舍理由见 `04-architecture-and-modules.md`「当前实际分包」与 DEC-018。
+
+### 8.2 早期设想的拆分形态（未落地，存档）
+
+下面是 2026-09-09 提的按**技术分层**的目标形态，**没有照此落地**，留档备查：
 
 ```text
 application/
@@ -553,20 +598,26 @@ application/
    └─ ResponseComposer.java        模型回答和模板回退
 ```
 
-这是一份职责设计，不要求一次性搬完所有类。应在保持现有测试可运行的前提下逐步提取。
+**这棵树里的 `AgentTurnCoordinator`、`FollowupWorkflow`、`MissingFieldChecker`、`PlanService`、`ConfirmationService`、`ToolExecutor`、`ToolResult`、`ResponseComposer` 八个类都不存在**，其余几个类也确实不在这些包下（例如 `AgentRuntime` 和 `ToolPolicy` 都在根包）。不要把它当成现状。
 
-### 8.2 各核心模块职责
+上面那个 `runtime/ policy/ workflow/ tool/` 的方案后来没被采纳：这一层只有 30 个类、业务也单一，按技术分层会把同一件事的代码拆到三四个包里，改一处要跨包跳。实际改成了按**业务域**分（`care/ health/ memo/ longterm/ preference/ travel/ demo/`），理由见 DEC-018。
+
+### 8.3 下一步：把 `FollowupAgentService` 按业务拆开
+
+真正要拆的是那个 4883 行的类，不是目录。方向与 8.2 的技术分层不同——按**业务**拆开：预约办理、材料、备忘、健康、出行各成一块。这件事**还没做**，原因是拆分边界取决于前端需要什么形状的接口，而前端那波改造还没定形；现在切容易划错。
+
+下表描述的是**拆分完成后**各模块应有的职责分工，不是现状：
 
 | 模块 | 负责 | 不负责 |
 | --- | --- | --- |
-| `FollowupAgentService` | 接收请求并交给协调器 | 不实现所有分支和工具细节 |
+| `FollowupAgentService` | 接收请求并交给协调器（**现状相反：它自己实现了全部分支和工具细节**） | 不实现所有分支和工具细节 |
 | `AgentRuntime` | 模型调用、工具循环、次数和超时 | 不直接写 H2 业务逻辑 |
 | `ToolPolicy` | 根据工具风险和阶段允许或拒绝 | 不生成自然语言回复 |
-| `FollowupWorkflow` | 状态转移、依赖失效、异常恢复 | 不选择模型厂商 |
-| `ConfirmationService` | 生成、绑定、消费和废止确认凭据 | 不根据一句模糊语言直接执行 |
+| `FollowupWorkflow`（待建） | 状态转移、依赖失效、异常恢复 | 不选择模型厂商 |
+| `ConfirmationService`（待建） | 生成、绑定、消费和废止确认凭据 | 不根据一句模糊语言直接执行 |
 | `ToolRegistry` | 提供工具名、说明、schema 和风险级别 | 不执行工具 |
-| `ToolExecutor` | 调用真实 Java 工具、统一记录结果 | 不自行决定下一业务目标 |
-| `ResponseComposer` | 根据权威事实生成适老化回答 | 不改变工具结果和成功状态 |
+| `ToolExecutor`（待建） | 调用真实 Java 工具、统一记录结果 | 不自行决定下一业务目标 |
+| `ResponseComposer`（待建） | 根据权威事实生成适老化回答 | 不改变工具结果和成功状态 |
 
 ## 九 推荐架构的端到端示例
 

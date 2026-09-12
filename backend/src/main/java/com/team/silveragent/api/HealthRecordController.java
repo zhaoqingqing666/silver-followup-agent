@@ -1,6 +1,6 @@
 package com.team.silveragent.api;
 
-import com.team.silveragent.application.HealthRecordStore;
+import com.team.silveragent.application.health.HealthRecordStore;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;

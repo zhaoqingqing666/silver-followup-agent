@@ -11,4 +11,5 @@ public interface AppointmentTool {
     String submit(String conversationId, String slotId, String userId);
     String reschedule(String conversationId, String appointmentId, String slotId, String userId);
     String cancel(String conversationId, String appointmentId, String userId);
+    List<String> cancelAll(String conversationId, List<String> appointmentIds, String userId);
 }

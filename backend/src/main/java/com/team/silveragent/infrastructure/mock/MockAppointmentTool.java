@@ -112,6 +112,25 @@ public class MockAppointmentTool implements AppointmentTool {
         return "CANCELLED";
     }
 
+    /** 批量取消先校验整批归属与状态，再在一个事务里逐条执行；任一条失效则整批不动。 */
+    @Override
+    @Transactional
+    public List<String> cancelAll(String conversationId, List<String> appointmentIds, String userId) {
+        List<String> ids = appointmentIds == null ? List.of() : appointmentIds.stream().distinct().toList();
+        if (ids.isEmpty()) throw new IllegalArgumentException("没有选择要取消的预约");
+        for (String id : ids) {
+            Integer count = jdbc.queryForObject(
+                    "SELECT COUNT(*) FROM appointments WHERE id=? AND user_id=? AND status='CONFIRMED'",
+                    Integer.class, id, userId);
+            if (count == null || count != 1) throw new IllegalStateException("有预约已经变更，整批没有取消");
+        }
+        for (String id : ids) cancel(conversationId, id, userId);
+        traces.record(conversationId, "appointment.cancelBatch",
+                Map.of("appointmentIds", ids, "userId", userId),
+                Map.of("status", "CANCELLED", "count", ids.size()), true);
+        return ids;
+    }
+
     @Override
     @Transactional
     public String reschedule(String conversationId, String appointmentId, String slotId, String userId) {

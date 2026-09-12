@@ -1,7 +1,7 @@
 package com.team.silveragent;
 
-import com.team.silveragent.application.CareBookingService;
-import com.team.silveragent.application.CareService;
+import com.team.silveragent.application.care.CareBookingService;
+import com.team.silveragent.application.care.CareService;
 import com.team.silveragent.application.AppointmentRecordStore;
 import com.team.silveragent.support.DemoSeed;
 import org.junit.jupiter.api.BeforeEach;

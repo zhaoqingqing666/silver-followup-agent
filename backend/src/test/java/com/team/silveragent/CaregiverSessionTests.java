@@ -1,7 +1,7 @@
 package com.team.silveragent;
 
 import com.team.silveragent.application.AppointmentRecordStore;
-import com.team.silveragent.application.CareBookingService;
+import com.team.silveragent.application.care.CareBookingService;
 import com.team.silveragent.application.FollowupAgentService;
 import com.team.silveragent.domain.model.AgentTurnResponse;
 import com.team.silveragent.support.DemoSeed;

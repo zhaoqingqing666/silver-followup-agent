@@ -1,6 +1,6 @@
 package com.team.silveragent.infrastructure.mock;
 
-import com.team.silveragent.application.CareCatalogRepository;
+import com.team.silveragent.application.care.CareCatalogRepository;
 import com.team.silveragent.domain.model.ToolModels.HospitalProfile;
 import com.team.silveragent.domain.tool.HospitalCatalogTool;
 import org.springframework.stereotype.Component;

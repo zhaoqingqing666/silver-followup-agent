@@ -1,7 +1,9 @@
 package com.team.silveragent.api;
 
-import com.team.silveragent.application.CareBookingService;
-import com.team.silveragent.application.CareCatalogRepository;
+import com.team.silveragent.application.AppointmentRecordStore;
+
+import com.team.silveragent.application.care.CareBookingService;
+import com.team.silveragent.application.care.CareCatalogRepository;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.*;
 

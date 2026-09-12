@@ -1,4 +1,6 @@
-package com.team.silveragent.application;
+package com.team.silveragent.application.care;
+
+import com.team.silveragent.application.AppointmentRecordStore;
 
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;

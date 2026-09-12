@@ -1,5 +1,54 @@
 # 踩坑记录
 
+## 2026-09-12 `CANCEL_APPOINTMENT` 不能等同于确认当前取消卡
+
+- 现象：当前卡准备取消6条预约时，用户说“还是只取消12号之前的”，模型已识别为修改取消范围，Java却直接消费旧卡并取消6条。
+- 原因：等待确认阶段把任何 `CANCEL_APPOINTMENT` 意图都映射成 `CONFIRM_PENDING`，丢掉了本轮新的日期和范围。
+- 处理：模型通过 `CALL_CONFIRMATION_TOOL` 明确调用申请/修改范围或确认/拒绝工具；修改范围作废旧凭据并生成新卡，只有 `respondConfirmation(CONFIRM)` 可以确认当前卡。
+- 结论：业务意图和确认决定是两个维度。“想取消哪些对象”绝不能隐式等于“确认执行上一张卡”。
+
+## 2026-09-12 `npm run build` 报 EACCES：`dist/` 被 root 建过一次
+
+- 现象：`npm run build` 失败，`Error: EACCES: permission denied, rmdir '/workspace/frontend/dist/client'`。`dist/` 是 `vscode:vscode` 的时候正常，不知何时变成 `root:root`。
+- 原因：构建脚本会先 `rm -rf dist/` 再重建。只要有人在容器里以 root 身份跑过一次构建（例如 `docker exec` 没带 `-u`），`dist/` 里就会留下 root 属主的目录，之后以 `vscode` 身份构建就删不掉它们。`dist/` 已在 `frontend/.gitignore` 里，删了不会丢任何源码。
+- 处理：`docker exec silver-followup-dev chown -R vscode:vscode /workspace/frontend/dist`（只改属主，不删内容），之后构建即通过。后续构建统一走 `docker exec -u vscode silver-followup-dev sh -lc 'cd /workspace/frontend && npm run build'`。
+- 结论：容器里跑构建**一律带 `-u vscode`**。以 root 建出来的产物目录会让下一个人（或下一次 CI）构建失败，而报错信息只提一个目录，看不出是属主问题。
+
+## 2026-09-12 模型补全的日期把“都取消”缩成了一天
+
+- 现象：老人说“都取消”，本意是取消候选里的全部预约，结果一张批量卡都没生成——筛选后一条都没剩。
+- 原因：`cancellationCandidates` 一直无条件用 `facts.date()` 当范围边界。`facts` 是模型抽取的，它的 `date` 可能来自上一轮闲聊、也可能只是它自己的补全。用户这句话里根本没有日期，模型却给了一个日子，整批取消就被悄悄缩成了那一天。
+- 处理：新增 `mentionsCancellationDate(message)`——先看用户这一句**自己**提没提日期（完整日期、`9.12号`、`今天/明天/后天`、`下周/本周/周X/星期X`，与 `RuleFactExtractor.parseDate` 同口径），没提就一律不用模型的日期。补 `CancelScopeTests` 2 例：`@MockitoBean` 假规划器给出一个库里绝不会有的日期，断言“都取消”仍选中全部候选；另一例断言用户真说了日期时模型日期照用，守住修复没矫枉过正。
+- 结论：**模型抽出来的槽位不是证据，用户原话才是**。拿模型的字段去收窄一个批量写操作的范围，等于把一个“全部”悄悄变成“一条”。范围边界必须回原文核对。
+
+## 2026-09-12 回绝模型时不能用 DIRECT_ANSWER
+
+- 现象：模型编了一个执行不了的工具（未注册、角色无权限，或写工具）时，原先的代码只是把它从 `approved` 里滤掉。若列表滤空，就落进最后的 `DIRECT_ANSWER`——于是**没有任何报错、没有卡片、也没有拒绝**，只有一段普通回答。用户以为事情办了。
+- 原因：`DIRECT_ANSWER` 在 `FollowupAgentService` 里不是中性的“回答一下”。`DialogueService.modelReply` 会调 `pauseActiveTask(state)`，把正在办理的预约流程暂停掉，草稿、阶段和按钮都停在原地。
+- 处理：新增 `AgentOrchestrator.Route.REFUSE_UNSUPPORTED_TOOL`，由 Java 用固定话术明确回绝，不复用模型话术、不动任务状态。同时先做一次受控回退：模型的 `intent` 能归到既有 Java 工作流（`CANCEL_APPOINTMENT`→`CANCEL_EXISTING_APPOINTMENT` 等）就按 intent 走那条流程，写操作仍会被翻译成确认卡。工具在任何情况下都不进 `proposedTools`。补 `AgentRuntimeRoutingTests` 3 例（编造写工具+合法写意图、编造工具+UNKNOWN、角色无权限）。
+- 结论：**“拒绝”和“回答”是两条路**。回绝一个不受支持的动作不能借道会改任务状态的回答分支；该回绝就回绝，任务状态原地不动。
+
+## 2026-09-12 等待确认时，普通取消路由抢走了用户的语音确认
+
+- 现象：取消卡已经出现后，用户说“取消”“是的”仍会重新查询预约或号源；“取消 9.12 号前的预约”也会被拆成选日期/选单条，始终无法执行。
+- 原因：确定性取消路由在 `AWAITING_CONFIRMATION` 之前运行，而且状态只保存一个 `pendingAppointmentId`。Java 关键词判断既覆盖了模型的上下文理解，又无法表达一组已圈定预约。
+- 处理：等待确认上下文优先路由；新增只建卡不写库的 `interaction.requestConfirmation`；状态保存整组预约 ID；最终仍由 Java 校验并原子取消。文本、语音和按钮统一消费同一 `confirmationId`。
+- 结论：不要靠不断扩充“是的/好的/取消吧”词表解决开放表达。模型负责把自然语言归一成确认、拒绝或修改对象，Java 负责验证当前卡片和执行业务不变量。
+
+## 2026-09-12 “之前那个”不能只凭“之前”判成批量范围
+
+- 现象：候选列表后说“之前那个”，系统可能把全部预约装进一张批量取消卡。
+- 原因：批量判断把“之前/以后”单独当范围词，但没有要求同一句里存在日期；范围过滤没有日期时又不会缩小候选。
+- 处理：范围批量必须同时出现可解析日期；“都取消/这些预约”等明确整体说法仍可直接批量。只有指代而无法唯一定位时重新展示候选。
+- 结论：范围词必须由边界值约束。“之前”既可能表示时间范围，也可能是对上一项的指代，不能脱离日期单独决定写操作对象。
+
+## 2026-09-12 黑名单挡不住“已经帮您取消好了”
+
+- 现象：确认卡的模型话术闸门列了“已经取消 / 取消成功 / 已为您取消 / 号源已释放”，看起来够用。但模型写“已经帮您取消好了。”时四条全部漏过，这句会跟着口播念给老人听。
+- 原因：中文完成态是组合式的（`已经|已` + `帮您|为您` + `取消` + `好了|成功|完成`），逐条列举一定列不全。更要紧的是当时还有一条“开场话术正文”的路径，它只查黑名单、不要求问句，陈述句可以直接进入回复。
+- 处理：闸门改成一条**结构性约束**——模型这句话**不得提及任何业务事实**：出现“取消/预约/号源/提醒”等业务词、数字，或“已/成功/完成/好了/释放”等完成态说法，就整句丢弃。它一个业务词都说不了，自然也就编不出“已经帮您取消好了”。**卡片标题同时收归 Java 固定生成**（单条「是否取消这次复诊预约」，批量带真实条数），模型的话只出现在卡片前面那一句开场白里。补 `ConfirmationInteractionToolTests` 6 例钉住（含数字、含完成结论、干净开场白、批量条数、提业务的开场白被丢、字段来源）。
+- 结论：安全闸门要有一条**结构性约束**兜底，黑名单只当补强。只靠黑名单，漏一个组合说法就是一句假结论念给老人听。更根本的一条：**凡是老人据以决策的字段（标题、条数、日期、影响、按钮），都不要交给看不见数据库的模型写**——模型写过“已经帮您取消预约了吗？”这种标题。
+
 ## 2026-09-11 「无新增告警」的比对漏掉了全新文件
 
 - 现象：核对「前端代码规范检查是否引入新命中」时，只把**改动过的、且在 HEAD 里存在**的文件取出来逐一比对，结论是「与改动前一致」。但本轮新增的 `tool-trace-describe.ts`（未跟踪文件）实际带着 40 条 `no-base-to-string` / `restrict-template-expressions`，`camera-capture.tsx` 还带着 1 条 `EffectSetState`——两者都是本次新写的代码，等于一次也没被比对过。
@@ -139,3 +188,19 @@
 - 解决办法：`page.tsx` 的居中改用 `-ml-8`（按钮 `size-16` 的一半，不产生 transform），浮层宽度从百分比改成按视口的 `w-[calc(100vw-40px)]`，两处都写了注释说明为什么不能用 `-translate-x-1/2`。顺手全仓核对了一遍其余 `fixed` 元素，暂无第二个同款组合。
 - 无效尝试：只调 `max-w`、只加 `whitespace-nowrap`——都在改「多宽」这个结果，而真正错的是「以谁为基准算宽度」。
 - 结论：`fixed` 不等于「相对视口」，它相对的是**最近的、带 transform / filter / will-change / contain 的祖先**（构建工具、动画库、居中小技巧都可能顺手加上）。要断言「相对视口」，就别让祖先带这些属性；宽度也别只写百分比——同一个表达式在两种包含块下算出来的数字能差十倍，而 `tsc`、`oxlint`、构建检查一样都不会报警，只能起来看。
+
+## 2026-09-12 批量改 import 的脚本把注释里的类名当成真引用
+
+- 现象：切包后编译报 `SafetyGuard is not public in com.team.silveragent.application; cannot be accessed from outside package`。报错的两个文件（`agent/MedicalBoundaryRules.java`、`agent/RuleFactExtractor.java`）正文里一次都没用过 `SafetyGuard`，只在**注释**里提到它。
+- 根因：迁移脚本判断「这个文件要用哪些类」用的是 `grep -E "\b类名\b"`，注释里的提及和真调用一视同仁，于是给两个文件补了 import。`SafetyGuard` 是包级私有，从别的包 import 它直接编译不过——这次是编译器替我们发现了。
+- 更隐蔽的是同一次脚本的另一半：它还给 `health/` 下三个文件补了 `import ...memo.MemoParser` / `MemoStore`，同样只服务注释里的 `{@link}`。这三个**编译得过**，于是悄无声息地让子包依赖图多出三条根本不存在的边（`health → memo`）。下一个做结构分析的人（包括写这段脚本的人）会照着这张假图去理解代码。
+- 解决办法：注释里的跨包引用改用全限定名 `{@link com.team.silveragent.application.memo.MemoParser}`，不再需要 import；三条假边删掉。真调用的那一条（`HealthReportService` 里的 `MemoParser.nowInDemoZone()`）保留。
+- 结论：**「文本上出现了」和「真的引用了」是两回事**，批量改写 import 的脚本必须把注释排除在外（先剥注释，或只匹配 `类名.` / `new 类名` 这类用法形态）。另外这一轮的运气不错——批量改写如果**编译不过**，那反而是好事；真正要怕的是它编译得过。
+
+## 2026-09-12 移了源码却没清 `target/`，Spring 报 bean 重名
+
+- 现象：把 `MemoryStore` 从 `application/memory/` 移到 `application/longterm/` 后跑测试，**317 项里 207 个错误**，报 `ConflictingBeanDefinitionException: bean name 'memoryStore' for [com.team.silveragent.application.memory.MemoryStore] conflicts with existing, non-compatible bean definition of same name and class [com.team.silveragent.application.longterm.MemoryStore]`。看着像代码改错了。
+- 根因：`git mv` 只动源码，`target/classes/` 里旧的 `application/memory/MemoryStore.class` 还在。Spring 扫的是**编译输出目录**，两个 simpleName 相同的类都在 → 默认 bean 名（`memoryStore`）撞车。整个过程**编译完全通过**，所以上一步的「编译过了」并不能说明运行时状态是一致的。
+- 附带的坑：`mvn clean` 删不掉 `target/`，报 `Device or resource busy`——占用它的不是 maven，是 **VS Code 的 Java 语言服务器**（`redhat.java`）在盯着这个目录。不用去杀 IDE：`clean` 失败之前已经把内容删空了，接着跑 `mvn test` 就是全新构建。
+- 解决办法：清空 `target/` 后重跑，317 项全绿。
+- 结论：**改包名或类名之后，唯一算数的验证是「清空 `target/` 再构建」**；增量编译的绿只证明源码能编译，不证明运行时加载到的类是对的。还有一个现成的判据：Spring 应用里同一个 simpleName 的类若同时存在于两个包，bean 名必然冲突、启动必然炸——**没炸就说明没有重复**，可以用它反过来确认历史那几次验证是干净的。

@@ -2,6 +2,18 @@
 
 进度文件记录“当前事实”，不写大段过程描述。功能完成后由负责人更新，并附对应 Pull Request 或提交。
 
+## 2026-09-12 自然语言确认与批量取消预约（未提交）
+
+- 新增独立的 `CALL_CONFIRMATION_TOOL` 模型动作，以及 `interaction.requestConfirmation`、`interaction.respondConfirmation` 两个确认工具。模型把自然语言归一成结构化范围或确认决定；Java只查真实预约、维护凭据和执行门禁。
+- `requestConfirmation` 支持 `ALL`、`DATE_RANGE`、`SINGLE_FILTER`、`AMBIGUOUS`；模型模式不再依靠Java中文词表判断取消范围。`respondConfirmation` 只接收 `CONFIRM/DENY`，confirmationId由Java注入。
+- 确认卡出现后再次提出日期、范围或对象会作废旧卡、重新查库并生成新卡；`CANCEL_APPOINTMENT` 不再自动等同于确认。批量取消仍先校验全部预约存在、属于当前用户且为已确认状态，再以单事务执行。
+- 取消查询中的无年份月日按当年已有预约匹配，不复用新建预约“过去日期顺延到明年”的规则。
+- 前端确认卡对取消动作使用红色确认按钮、绿色保留按钮，并保留清晰文字标签。
+- 模型话术只允许作卡片前面一句**不提业务事实**的开场白；卡片标题改由 Java 固定生成（单条「是否取消这次复诊预约」，批量「是否取消这N条复诊预约」，N 取自真实预约对象）。闸门是「这句话不许提业务」这条结构性约束——出现业务词、数字或完成态说法就整句丢弃——而不是一张穷举不尽的完成态黑名单（黑名单被“已经帮您取消好了”击穿过，见 PITFALLS）。
+- 原中文日期和范围解析只保留给模型不可用时的兼容降级路径，不参与模型成功工具调用后的范围决策。
+- `AgentRuntime` 对「模型编了执行不了的工具」做受控回退：绝不执行，也不再静默降成一段没有卡片的回答。intent 能归到既有 Java 工作流就走那条流程，归不到则由新增的 `Route.REFUSE_UNSUPPORTED_TOOL` 明确回绝（不用 `DIRECT_ANSWER`，那条路会 `pauseActiveTask`，把正在办理的流程停掉）。
+- 结构化通道最薄弱的一环是 `scope=ALL`：Java 不再拿关键词复核“用户这句话配不配全选”，防线落在确认卡上。`CancelScopeTests` 新增一条把新防线写下来的用例——模型对没圈定范围的话硬答 `ALL` 时，过宽的范围逐条列在卡上，且确认之前库里一条都不动。
+- Dev Container 验证（2026-09-12，`/workspace/backend`）：确认与取消专项 `VoiceFirstP0Tests` 17 + `AgentRuntimeRoutingTests` 13 + `ConfirmationInteractionToolTests` 6 + `CancelScopeTests` 4 = 40/40 通过；完整后端回归 **341/341 通过**（0 failure、0 error、0 skipped）。
 ## 2026-09-12 新增四个演示场景的工作流文档（未提交）
 
 - 新增 `docs/13-demo-scenarios-workflow.md`，编号接在 12 之后（10 号已随 `10-innovation-assessment.md` 并入设计思路报告而退役，不复用）。
@@ -361,3 +373,17 @@
 - 改法：`page.tsx` 的居中改用 `-ml-8`（按钮 `size-16` 的一半，不产生 transform），浮层的宽度从百分比改成按视口算的 `w-[calc(100vw-40px)]`——包含块哪天真被谁再改变一次，宽度也不会跟着塌掉。两处都写了注释说明为什么不能用 `-translate-x-1/2`。
 - 验证：`tsc --noEmit`、`oxlint`、`npm run build` 通过；已核对全仓其余 `fixed` 元素，暂无第二个「fixed 后代落在带 transform 的祖先里」的组合。真正算数的还是实机按一次。
 - 教训与上一版恰好对称：上一轮删掉的是「同一件事做了两遍」，这一轮踩的是「把定位交给了一个会变的包含块」。两者都不是类型检查能挡的，只能靠起来看一眼。
+
+## 2026-09-12 `application/` 包按职责拆分（切包，一行逻辑没动）
+
+- 起因：`application/` 下 30 个类平铺在一个包里，找一个类要顺着 30 个文件名扫。这一步只解决「找文件」，**不解决耦合**——真正的病是 `FollowupAgentService` 4883 行、占这一层 9408 行的 **52%**，那要靠切类，本次一行没动。
+- 做法：按职责把 15 个类移进 7 个子包——`care/`（CareService、CareBookingService、CareCatalogRepository）、`health/`（HealthRecordStore、HealthRecordParser、HealthReportParser、HealthReportService）、`memo/`（MemoStore、MemoParser、MemoCommandParser）、`longterm/`（MemoryStore）、`preference/`（UserPreferenceStore）、`travel/`（TravelGuideService）、`demo/`（DemoScenario、DemoScenarioService）。
+- 编排簇 15 个类留在根包，不是懒得挪：`ConversationState` 的 ~35 个字段和四个嵌套枚举是**包级私有**，另有 `ToolPolicy`、`AgentRuntime`、`SafetyGuard`、`ActionValidator` 等 11 个类也是包级私有，它们与 `ConversationState` 互相引用。真要分家就得把这些字段和类逐个提成 `public`——那是**放宽**封装，不是整理结构。所以拆到哪一层是算出来的，不是拍脑袋定的。
+- 纯搬家：diff 里除 `package` 行和 `import` 行外没有任何增删。
+- 复查时改掉三处不对味（第二个提交）：
+  - `health/` 看起来依赖 `memo/` 四条，实际只有一条是真的。`HealthReportService` 调 `MemoParser.nowInDemoZone()` 是真的（那是个演示时区时钟，塞在 MemoParser 里属历史原因）；另三条是迁移脚本按类名匹配误补的 import，只服务注释里的 `{@link}`。改成注释里用全限定名，删掉这三行。
+  - `memory/` 里 `MemoryStore`（跨对话长期记忆）和 `UserPreferenceStore`（朗读开关、语速、音色，属**设置**）不是一回事，之前只是按「都属于某个用户」放在一起。拆成 `longterm/` 和 `preference/`。
+  - 包名 `memory/` 与 `memo/` 只差一个字母却指两回事（备忘是「要做的事、可完成可删除」，长期记忆是「常去的医院、科室、习惯时段」），看错一次就找错地方。长期记忆的包定名 `longterm/`。
+- 验证：`target/` 清空后**全新构建**，后端 **317 项全绿**（0 失败 0 错误）；前端零改动。队长本人起服务手测，四条主流程功能正常。
+- 文档同步：`04-architecture-and-modules.md` 的「当前实际分包」换成本次的新布局并写明 `longterm` 的命名理由；`11-agent-architecture-and-controlled-tool-calling.md` 第八节那份「建议拆分」是按技术分层（`runtime/ policy/ workflow/`），与本次按业务域的实际切法不是一回事，加了指引；决定记在 DEC-018，踩坑记在 PITFALLS 同日两条。
+- 留给下一步：切类（把 `FollowupAgentService` 按业务拆开）等前端大改定了接口形状再做，否则边界容易划错。**别把这次当成「结构问题已解决」**——它只把邻居归了位。

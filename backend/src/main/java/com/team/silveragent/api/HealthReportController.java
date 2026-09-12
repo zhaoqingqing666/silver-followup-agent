@@ -1,7 +1,7 @@
 package com.team.silveragent.api;
 
-import com.team.silveragent.application.HealthReportParser;
-import com.team.silveragent.application.HealthReportService;
+import com.team.silveragent.application.health.HealthReportParser;
+import com.team.silveragent.application.health.HealthReportService;
 import com.team.silveragent.domain.model.ToolModels.Contact;
 import org.springframework.web.bind.annotation.*;
 

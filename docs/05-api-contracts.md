@@ -1,6 +1,6 @@
 # 前后端 API 契约
 
-> 文档版本：v0.2　更新日期：2026年9月11日
+> 文档版本：v0.2　更新日期：2026年9月12日
 
 服务地址：http://localhost:8080
 
@@ -38,6 +38,20 @@ POST /api/agent/confirmations
 只有确认接口可以触发提交或取消预约、创建提醒和通知家属。
 
 `confirmation.confirmationId` 是当前计划的随机确认凭据，修改后失效，确认执行前即消费；`approved=false` 也必须携带凭据。未另设数字 `planVersion`。旧客户端缺少凭据将被拒绝，前后端必须一同更新。通知工具日志名为 `family.notify`。
+
+取消预约时，自由文字、语音转文字和确认卡按钮统一进入同一套确认状态机：
+
+- 模型使用 `CALL_CONFIRMATION_TOOL` 调用确认工具；这条通道与 `CALL_READ_TOOL` 分开，只能创建或处理确认交互，不能直接写预约表。
+- `interaction.requestConfirmation` 接受结构化选择器：`scope=ALL|DATE_RANGE|SINGLE_FILTER|AMBIGUOUS`。日期范围另带 `date`（ISO）和 `direction=BEFORE|ON_OR_BEFORE|AFTER|ON_OR_AFTER`；单条筛选可带 `time`、`period`、`position`、医院或科室。模型不得提供 appointmentId，Java按选择器查询当前用户的真实预约。
+- `interaction.respondConfirmation` 只接受 `decision=CONFIRM|DENY`。`confirmationId` 由Java从当前会话注入，模型不能选择或提交确认凭据。
+- 卡片标题、预约 ID、日期、医院、科室、影响、按钮文字和 `confirmationId` 全部由 Java 按数据库快照生成。模型的 `replyDraft` 最多作为卡片前的一句自然开场白，不能代替工具调用或权威事实。
+- 单条和批量取消都必须先返回确认卡。批量卡把全部 `appointmentId` 绑定到当前 `confirmationId`；确认时 Java 再检查凭据有效、未消费、预约仍存在且属于当前用户，全部验证通过后才在同一事务中取消。
+- 等待确认时，用户可点击红色“确认取消/确认全部取消”、绿色“保留预约/全部保留”，也可说出等价的自然语言。按钮直接提交当前凭据；文字和语音由模型调用 `interaction.respondConfirmation`。
+- 用户在确认卡出现后改日期、范围或对象时，模型必须重新调用 `interaction.requestConfirmation`。Java立即作废旧凭据、重新查库并生成新卡；只有明确调用 `respondConfirmation(CONFIRM)` 才能执行当前卡。
+- “取消 9 月 12 日前的预约”按范围生成一张批量确认卡；“都取消”可承接上一轮候选列表。只说“取消预约”且有多条时仍先要求圈定对象，不擅自全选。
+- 模型模式不再用 Java 中文词表判断“都取消、之前那个、12号以前”等范围；这些表达由模型归一成结构化 `scope`。旧词表只保留在模型不可用时的兼容降级路径，且不能绕过确认门禁。
+
+上述改动不改变 `POST /api/agent/messages`、`POST /api/agent/actions`、`POST /api/agent/confirmations` 或 `AgentTurnResponse` 的外部字段结构。
 
 新增阶段：`EMERGENCY_PAUSED`、`PARTIAL`、`TOOL_ERROR`。新增操作：`SET_CONTACT`（当前用户联系人 ID）、`EDIT_PREFERENCES`、`EDIT_BOOKING`、`RETRY_EXECUTION`。`plan.taskStatuses` 与 `plan.tasks` 按下标对应。`PARTIAL` 也可能返回事项卡，前端不得一律标为全部完成。
 

@@ -74,7 +74,10 @@ final class AgentRuntime {
 
     private Outcome legacyProposal(String message, AgentContext context, ConversationState state,
                                    PlannerDecision existingProposal) {
-        AgentOrchestrator.Route fastRoute = orchestrator.deterministicOverride(message);
+        // 有确认卡时先让“同意/拒绝当前卡”按上下文解释；不能让“取消预约”关键词把它
+        // 抢回候选查询。模型不可用时仍由 orchestrator 的确认阶段规则安全兜底。
+        AgentOrchestrator.Route fastRoute = state.stage == ConversationState.Stage.AWAITING_CONFIRMATION
+                ? null : orchestrator.deterministicOverride(message);
         if (fastRoute == AgentOrchestrator.Route.QUERY_CARE_GUIDE) {
             List<PlannerToolCall> calls = new ArrayList<>();
             calls.add(new PlannerToolCall("careGuide.search", java.util.Map.of("query", message)));
@@ -106,7 +109,8 @@ final class AgentRuntime {
                 ? planner.plan(message, context, registry.plannerTools(state.actorRole)) : existingProposal;
         ExtractedFacts facts = proposal.facts();
 
-        AgentOrchestrator.Route deterministic = orchestrator.deterministicOverride(message);
+        AgentOrchestrator.Route deterministic = state.stage == ConversationState.Stage.AWAITING_CONFIRMATION
+                ? null : orchestrator.deterministicOverride(message);
         if (deterministic != null
                 && !(deterministic == AgentOrchestrator.Route.QUERY_CARE_GUIDE
                 && proposal.toolCalls().size() > 1)) {
@@ -166,12 +170,61 @@ final class AgentRuntime {
      */
     private Outcome modelProposal(PlannerDecision proposal, ConversationState state) {
         ExtractedFacts facts = proposal.facts();
+        if (proposal.actionType() == PlannerActionType.CALL_CONFIRMATION_TOOL) {
+            if (proposal.toolCalls().size() != 1) {
+                return outcome(AgentOrchestrator.Route.REFUSE_UNSUPPORTED_TOOL, proposal, null,
+                        List.of(), true);
+            }
+            PlannerToolCall call = proposal.toolCalls().get(0);
+            ToolRegistry.RegisteredTool tool = registry.find(call.toolName()).orElse(null);
+            if (toolPolicy.evaluateConfirmation(state.actorRole, tool) != ToolPolicy.Decision.ALLOW) {
+                return outcome(AgentOrchestrator.Route.REFUSE_UNSUPPORTED_TOOL, proposal, null,
+                        List.of(), true);
+            }
+            if ("interaction.requestConfirmation".equals(call.toolName())) {
+                return outcome(tool.route(), proposal, call.toolName(), List.of(call), true);
+            }
+            if ("interaction.respondConfirmation".equals(call.toolName())) {
+                String decision = call.arguments().getOrDefault("decision", "").trim().toUpperCase();
+                if ("CONFIRM".equals(decision)) {
+                    return outcome(AgentOrchestrator.Route.CONFIRM_PENDING, proposal,
+                            call.toolName(), List.of(call), true);
+                }
+                if ("DENY".equals(decision)) {
+                    return outcome(AgentOrchestrator.Route.DENY_PENDING, proposal,
+                            call.toolName(), List.of(call), true);
+                }
+            }
+            return outcome(AgentOrchestrator.Route.REFUSE_UNSUPPORTED_TOOL, proposal, null,
+                    List.of(), true);
+        }
+        // 确认回答优先于普通 ANSWER/ASK_USER：模型已经结合确认卡理解为同意或拒绝时，
+        // 不能只把 replyDraft 说给用户听而不推进 confirmationId。
+        if (state.stage == ConversationState.Stage.AWAITING_CONFIRMATION) {
+            if ("CONFIRM_ACTION".equals(proposal.intent())) {
+                return outcome(AgentOrchestrator.Route.CONFIRM_PENDING, proposal, null, List.of(), true);
+            }
+            if ("DENY_ACTION".equals(proposal.intent())) {
+                return outcome(AgentOrchestrator.Route.DENY_PENDING, proposal, null, List.of(), true);
+            }
+        }
         if (proposal.actionType() == PlannerActionType.CALL_READ_TOOL
                 || proposal.actionType() == PlannerActionType.CALL_READ_TOOLS) {
             List<PlannerToolCall> approved = new ArrayList<>();
+            boolean rejectedTool = false;
             for (PlannerToolCall call : proposal.toolCalls()) {
                 ToolRegistry.RegisteredTool tool = registry.find(call.toolName()).orElse(null);
-                if (toolPolicy.evaluate(state.actorRole, tool) == ToolPolicy.Decision.ALLOW) approved.add(call);
+                ToolPolicy.Decision decision = toolPolicy.evaluate(state.actorRole, tool);
+                if (decision == ToolPolicy.Decision.ALLOW) {
+                    approved.add(call);
+                } else if (decision == ToolPolicy.Decision.DENY_SIDE_EFFECT && tool != null
+                        && "CONFIRMATION_ONLY".equals(tool.definition().risk())) {
+                    // 模型偶尔会把确认交互误写成 CALL_READ_TOOL。它仍然不能自动执行，
+                    // 但应降级为“进入 Java 确认流程”，不能静默变成一段没有卡片的回答。
+                    return outcome(tool.route(), proposal, call.toolName(), List.of(), true);
+                } else {
+                    rejectedTool = true;
+                }
             }
             if (approved.size() == 1) {
                 ToolRegistry.RegisteredTool tool = registry.find(approved.get(0).toolName()).orElseThrow();
@@ -189,6 +242,17 @@ final class AgentRuntime {
                 PlannerToolCall first = limited.get(0);
                 return outcome(registry.find(first.toolName()).orElseThrow().route(), proposal,
                         first.toolName(), List.of(first), true);
+            }
+            if (rejectedTool) {
+                // 模型编了一个执行不了的工具（没注册、角色没权限，或者是个写工具）：绝不执行它，
+                // 也绝不能静默降成一段没有卡片的回答。先忽略工具名，按它自己给的 intent 回到既有
+                // Java 工作流——写操作在那里仍会被翻译成确认卡，而不是被这里直接执行。
+                AgentOrchestrator.Route byIntent = dailyRoute(proposal.intent());
+                if (byIntent == null) byIntent = modelRoute(proposal.intent(), state);
+                if (byIntent != null) return outcome(byIntent, proposal, null, List.of(), true);
+                // intent 也不可信（UNKNOWN 或没映射）时明确回绝，不复用模型话术、不动任务状态。
+                return outcome(AgentOrchestrator.Route.REFUSE_UNSUPPORTED_TOOL, proposal, null,
+                        List.of(), true);
             }
             return outcome(AgentOrchestrator.Route.DIRECT_ANSWER, proposal, null, List.of(), true);
         }

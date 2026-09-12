@@ -1,4 +1,6 @@
-package com.team.silveragent.application;
+package com.team.silveragent.application.health;
+
+import com.team.silveragent.application.memo.MemoParser;
 
 import com.team.silveragent.domain.model.ToolModels.Contact;
 import com.team.silveragent.domain.tool.FamilyNotificationTool;

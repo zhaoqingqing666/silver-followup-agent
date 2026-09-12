@@ -1,7 +1,7 @@
-package com.team.silveragent.application;
+package com.team.silveragent.application.health;
 
 /**
- * “把健康记录发给家属”的识别（规则版，和 {@link MemoParser}/{@link HealthRecordParser} 同一思路）。
+ * “把健康记录发给家属”的识别（规则版，和 {@link com.team.silveragent.application.memo.MemoParser}/{@link HealthRecordParser} 同一思路）。
  *
  * <p>三种说法都要命中才认，缺一不认，交回原链路：
  * <ol>

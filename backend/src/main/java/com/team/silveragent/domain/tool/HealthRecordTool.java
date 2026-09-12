@@ -1,6 +1,6 @@
 package com.team.silveragent.domain.tool;
 
-import com.team.silveragent.application.HealthRecordStore;
+import com.team.silveragent.application.health.HealthRecordStore;
 
 import java.math.BigDecimal;
 import java.util.List;

@@ -1,4 +1,6 @@
-package com.team.silveragent.application;
+package com.team.silveragent.application.demo;
+
+import com.team.silveragent.application.FollowupAgentService;
 
 import com.team.silveragent.domain.model.AgentTurnResponse;
 import com.team.silveragent.domain.model.DemoScenarioResponse;

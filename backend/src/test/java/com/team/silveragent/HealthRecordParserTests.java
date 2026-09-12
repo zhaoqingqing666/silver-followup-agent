@@ -1,6 +1,6 @@
 package com.team.silveragent;
 
-import com.team.silveragent.application.HealthRecordParser;
+import com.team.silveragent.application.health.HealthRecordParser;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;

@@ -12,7 +12,7 @@ import java.util.Optional;
 import java.util.Set;
 
 /**
- * 模型可见的只读工具白名单。写工具不会注册到这里。
+ * 模型可见的受控工具清单。查询工具可以自动执行；确认交互工具只能提出确认卡，不能写业务数据。
  *
  * <p>本表是“系统一共能做哪些事”的能力清单。谁能看见哪几条由每条工具自己声明的角色决定，
  * 实际判定在 {@link ToolPolicy}，按角色取清单在 {@link AgentRuntime}：
@@ -52,6 +52,14 @@ final class ToolRegistry {
                 List.of("date", "time"), AgentOrchestrator.Route.CHECK_CONFLICT);
         register("appointment.queryMine", "查询当前服务对象已确认预约（本人自办时即本人；代他人办理时是被协同的长辈）；只读，用户身份由 Java 注入",
                 List.of("date", "hospital", "department"), AgentOrchestrator.Route.QUERY_MY_APPOINTMENTS);
+        registerInteraction("interaction.requestConfirmation",
+                "申请或修改取消预约确认卡；只描述筛选范围，不提供预约ID，也不执行取消。"
+                        + "scope=ALL|DATE_RANGE|SINGLE_FILTER|AMBIGUOUS；日期用ISO格式；范围方向用BEFORE|ON_OR_BEFORE|AFTER|ON_OR_AFTER",
+                List.of("scope", "date", "direction", "time", "period", "position", "hospital", "department"),
+                AgentOrchestrator.Route.CANCEL_EXISTING_APPOINTMENT);
+        registerInteraction("interaction.respondConfirmation",
+                "处理当前确认卡；decision只能是CONFIRM或DENY。confirmationId由Java从当前会话注入，模型不得提供",
+                List.of("decision"), AgentOrchestrator.Route.CURRENT_FLOW);
         register("material.checklist", "查询医院和科室的复诊材料清单；只读",
                 List.of("hospital", "department"), AgentOrchestrator.Route.ASK_MATERIALS);
         register("travel.routePlan", "查询到医院的路线、距离、预计用时和建议出发时间；只读",
@@ -82,6 +90,12 @@ final class ToolRegistry {
                 ? EnumSet.allOf(AgentRole.class) : EnumSet.copyOf(List.of(roles));
         tools.put(name, new RegisteredTool(new PlannerTool(name, description, "READ_ONLY", arguments),
                 route, allowed));
+    }
+
+    private void registerInteraction(String name, String description, List<String> arguments,
+                                     AgentOrchestrator.Route route) {
+        tools.put(name, new RegisteredTool(new PlannerTool(name, description, "CONFIRMATION_ONLY", arguments),
+                route, EnumSet.allOf(AgentRole.class)));
     }
 
     /** 交给模型的工具清单：按当前会话的操作者身份过滤，模型看不见的就不会去想它。 */

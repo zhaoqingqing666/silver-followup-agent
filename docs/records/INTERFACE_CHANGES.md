@@ -2,6 +2,18 @@
 
 任何前后端共享字段、接口路径、枚举或日期格式变化都记录在这里。
 
+## 2026-09-12 取消预约的自然语言确认与批量确认（内部接口）
+
+- 外部 HTTP 路径和 `AgentTurnResponse` 结构不变；现有 `confirmation` 卡片字段继续承载按钮与 `confirmationId`。
+- `PlannerActionType` 新增内部动作 `CALL_CONFIRMATION_TOOL`，与只读工具调用分离。外部HTTP接口和前端响应结构不变。
+- `ToolRegistry` 新增 `interaction.requestConfirmation` 与 `interaction.respondConfirmation` 两个 `CONFIRMATION_ONLY` 工具；工具清单由17个只读工具扩展为17个只读工具加2个确认交互工具。
+- `requestConfirmation` 使用结构化取消选择器（全部、日期范围、单条筛选、不明确），不接受 appointmentId；`respondConfirmation` 只接受确认/拒绝，confirmationId由Java注入。模型修改范围时旧卡立即失效并生成新卡，不能再把 `CANCEL_APPOINTMENT` 自动映射成确认旧卡。
+- `AgentRuntime` 对「模型编了一个执行不了的工具」做了受控回退：未注册、当前角色无权限或写工具一律不执行，其 `intent` 能归到既有 Java 工作流就按 intent 走那条流程（`CREATE_FOLLOWUP`→`RESUME_TASK`/`RESTART_TASK`、`CANCEL_APPOINTMENT`→`CANCEL_EXISTING_APPOINTMENT`、备忘/健康数值/周报→对应路由），归不到任何业务链路则新增 `AgentOrchestrator.Route.REFUSE_UNSUPPORTED_TOOL` 由 Java 明确回绝。之所以不复用 `DIRECT_ANSWER`：那条路会 `pauseActiveTask`，把正在办理的预约流程停掉；这里只是“这条工具我不认”，不该动任务状态。任何情况下这个工具都不会出现在 `proposedTools` 执行列表里。
+- 模型成功返回确认工具调用时，Java不再解析原句里的中文范围词；原来的日期和范围解析仅作为模型不可用时的兼容降级。
+- `AppointmentTool` 新增内部方法 `cancelAll(conversationId, appointmentIds, userId)`。实现先校验整组预约的存在性、状态和用户归属，再在同一事务中取消，避免批量操作只成功一半。
+- 前端没有新增共享类型；确认卡根据取消动作显示红色确认按钮、绿色保留按钮，文字标签仍是必要信息，不仅靠颜色区分。
+- 兼容性：不破坏旧客户端。旧客户端继续通过 `/api/agent/confirmations` 点击确认；文字和语音确认只是新增入口，最终仍消费同一个 `confirmationId`。
+
 ## 2026-09-11 越界提示块与演示场景重置
 
 - `AgentTurnResponse` 新增可选分量 `notice`（第 12 个，`{type, title, message}`），旧的 11 / 9 / 8 参构造原样保留，前端可忽略。当前只有 `type=MEDICAL_BOUNDARY` 一种取值，未知 `type` 前端**不渲染**（不是渲染成空白卡）。`notice` 只影响展示：不切 `stage`、不改 `confirmationId`、不新增待办、不落库；越界那一轮仍把原来的确认卡连同同一个 `confirmationId` 带回，前端按老逻辑照常确认。

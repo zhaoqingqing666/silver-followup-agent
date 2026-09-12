@@ -1,7 +1,9 @@
 package com.team.silveragent;
 
+import com.team.silveragent.application.memo.MemoParser;
+
 import com.team.silveragent.application.FollowupAgentService;
-import com.team.silveragent.application.MemoStore;
+import com.team.silveragent.application.memo.MemoStore;
 import com.team.silveragent.domain.model.AgentTurnResponse;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;

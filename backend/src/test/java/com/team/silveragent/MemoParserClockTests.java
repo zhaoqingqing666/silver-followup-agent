@@ -1,6 +1,6 @@
 package com.team.silveragent;
 
-import com.team.silveragent.application.MemoParser;
+import com.team.silveragent.application.memo.MemoParser;
 import org.junit.jupiter.api.Test;
 
 import java.time.LocalDate;

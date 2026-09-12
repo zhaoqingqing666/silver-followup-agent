@@ -1,10 +1,10 @@
 package com.team.silveragent;
 
 import com.team.silveragent.application.FollowupAgentService;
-import com.team.silveragent.application.HealthRecordStore;
-import com.team.silveragent.application.HealthReportParser;
-import com.team.silveragent.application.HealthReportService;
-import com.team.silveragent.application.MemoParser;
+import com.team.silveragent.application.health.HealthRecordStore;
+import com.team.silveragent.application.health.HealthReportParser;
+import com.team.silveragent.application.health.HealthReportService;
+import com.team.silveragent.application.memo.MemoParser;
 import com.team.silveragent.domain.model.AgentTurnResponse;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;

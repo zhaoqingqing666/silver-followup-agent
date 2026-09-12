@@ -52,6 +52,7 @@ export function PlanCard({ plan }: { plan: AgentPlanCard }) {
 export function ConfirmationCardView({ card, busy, onConfirm, onCancel }: {
   card: AgentConfirmationCard; busy: boolean; onConfirm: () => void; onCancel: () => void;
 }) {
+  const destructive = card.confirmText.includes('取消');
   return <section className="rounded-3xl border-2 border-primary/35 bg-[#fff2df] p-5 shadow-sm">
     <p className="text-sm font-bold text-primary">关键操作确认</p>
     <h2 className="mt-1 text-xl font-bold">{card.title}</h2>
@@ -59,8 +60,14 @@ export function ConfirmationCardView({ card, busy, onConfirm, onCancel }: {
       {card.operations.map(item => <li key={item} className="flex gap-2 text-base leading-7"><Check className="mt-1 size-5 shrink-0 text-primary" />{item}</li>)}
     </ul>
     <p className="mt-3 rounded-2xl bg-white/75 p-3 text-sm leading-6 text-muted-foreground">可能影响：{card.impact}</p>
-    <button disabled={busy} onClick={onConfirm} className="mt-4 min-h-14 w-full rounded-2xl bg-primary px-4 text-lg font-bold text-white disabled:opacity-50">{busy ? '正在办理…' : card.confirmText}</button>
-    <button disabled={busy} onClick={onCancel} className="mt-2 min-h-12 w-full rounded-2xl border bg-white text-base font-semibold">{card.cancelText}</button>
+    <button disabled={busy} onClick={onConfirm}
+      className={`mt-4 min-h-14 w-full rounded-2xl px-4 text-lg font-bold text-white shadow-sm disabled:opacity-50 ${destructive ? 'bg-[#b42318]' : 'bg-primary'}`}>
+      {busy ? '正在办理…' : card.confirmText}
+    </button>
+    <button disabled={busy} onClick={onCancel}
+      className={`mt-2 min-h-12 w-full rounded-2xl border px-4 text-base font-bold ${destructive ? 'border-[#2f6f3e] bg-[#2f6f3e] text-white' : 'bg-white'}`}>
+      {card.cancelText}
+    </button>
   </section>;
 }
 

@@ -1,6 +1,6 @@
 package com.team.silveragent;
 
-import com.team.silveragent.application.MemoCommandParser;
+import com.team.silveragent.application.memo.MemoCommandParser;
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;

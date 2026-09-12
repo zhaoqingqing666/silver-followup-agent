@@ -7,7 +7,7 @@ import com.team.silveragent.agent.planning.LlmConversationPlanner;
 import com.team.silveragent.agent.planning.PlannerActionType;
 import com.team.silveragent.agent.planning.PlannerTool;
 import com.team.silveragent.agent.planning.RuleConversationPlanner;
-import com.team.silveragent.application.CareCatalogRepository;
+import com.team.silveragent.application.care.CareCatalogRepository;
 import org.junit.jupiter.api.Test;
 
 import java.time.LocalDate;
@@ -34,6 +34,25 @@ class LlmConversationPlannerTests {
         assertThat(decision.toolName()).isEqualTo("appointment.queryMine");
         assertThat(decision.facts().date()).isEqualTo(LocalDate.of(2026, 9, 18));
         assertThat(decision.source()).isEqualTo("MODEL_PLANNER");
+    }
+
+    @Test
+    void modelCanCallTheStructuredConfirmationTool() {
+        LlmConversationPlanner planner = planner("""
+                {"actionType":"CALL_CONFIRMATION_TOOL","intent":"CANCEL_APPOINTMENT",
+                 "toolName":"interaction.requestConfirmation",
+                 "arguments":{"scope":"DATE_RANGE","date":"2026-09-12","direction":"BEFORE"},
+                 "replyDraft":"我按新的范围重新确认。","dialogueMode":"FOLLOWUP_FLOW","facts":{}}
+                """);
+
+        var decision = planner.plan("还是只取消12号之前的预约", context(), List.of(
+                new PlannerTool("interaction.requestConfirmation", "申请取消确认", "CONFIRMATION_ONLY",
+                        List.of("scope", "date", "direction"))));
+
+        assertThat(decision.actionType()).isEqualTo(PlannerActionType.CALL_CONFIRMATION_TOOL);
+        assertThat(decision.toolName()).isEqualTo("interaction.requestConfirmation");
+        assertThat(decision.arguments()).containsEntry("scope", "DATE_RANGE")
+                .containsEntry("direction", "BEFORE");
     }
 
     @Test

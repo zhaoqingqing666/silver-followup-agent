@@ -1,6 +1,6 @@
 package com.team.silveragent.api;
 
-import com.team.silveragent.application.MemoStore;
+import com.team.silveragent.application.memo.MemoStore;
 import org.springframework.web.bind.annotation.*;
 
 import java.time.LocalDateTime;
