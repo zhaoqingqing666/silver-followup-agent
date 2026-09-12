@@ -2,6 +2,14 @@
 
 进度文件记录“当前事实”，不写大段过程描述。功能完成后由负责人更新，并附对应 Pull Request 或提交。
 
+## 2026-09-12 新增四个演示场景的工作流文档（未提交）
+
+- 新增 `docs/13-demo-scenarios-workflow.md`，编号接在 12 之后（10 号已随 `10-innovation-assessment.md` 并入设计思路报告而退役，不复用）。
+- 内容为命题要求的四个演示场景在当前源码里的真实路径：场景一走 `advance` 直线补问 → `querySlots` → `checkSchedule` → `checkDuplicate` → `buildConfirmation` → `confirm`；场景二的分支在 `querySlots` 的 `NO_SLOT` 段，「附近日期」口径在 `MockAppointmentTool#queryAlternatives` 的 `date+1..date+3`；场景三的冲突由 `RollingUserScheduleInitializer` 的「社区体检」10:00–11:00 与工作日 10:30 号源必然相撞造出；场景四的判定收在 `MedicalBoundaryRules`，回复由 `medicalBoundary` 装配并**原样交回确认卡**。
+- 同时登记到 `00-reading-order.md` 第 13 条与 v0.2 导航段。
+- 文中记录一条与需求目标的差距：`SafetyGuard#precheck` 的紧急表达词表只在模型不可用时执行，模型模式下紧急判定依赖主模型的 `EMERGENCY` 分类，越界那侧有规则兜底、紧急这侧没有。对应 Design.md 的 P0「高优先级规则前置」尚未闭合，演示紧急场景前需实测模型输出。
+- 该文档为纯说明，未改动任何代码与接口，不涉及前后端字段同步。
+
 ## 2026-09-11 会话生命周期、实时办理过程与长期记忆（未提交）
 
 - 分支 `zhaotingfang_model-tool-loop-v2`，接在上一段多模态移植之后，功能增量全部围绕「评审要看见真实过程」和「老人能自己收尾」两件事。
