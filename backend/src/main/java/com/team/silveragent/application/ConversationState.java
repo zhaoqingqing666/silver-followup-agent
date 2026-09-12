@@ -86,7 +86,6 @@ final class ConversationState {
     String interruptedPendingAction;
     String interruptedPendingAppointmentId;
     String sideTask;
-    String returnPolicy;
     /** 医院/科室口语只命中一个近似候选时，先保存候选并等待用户确认。 */
     String pendingEntityType;
     String pendingEntityId;
@@ -131,14 +130,6 @@ final class ConversationState {
         this.userId = userId;
         this.actorUserId = userId;
         this.actorRole = AgentRole.ELDER;
-    }
-
-    /** 家属/志愿者会话：userId 是就诊人，actorUserId 是操作者。 */
-    ConversationState(String id, String userId, String actorUserId, AgentRole actorRole, String relationLabel) {
-        this(id, userId);
-        if (actorUserId != null && !actorUserId.isBlank()) this.actorUserId = actorUserId;
-        if (actorRole != null) this.actorRole = actorRole;
-        this.relationLabel = relationLabel;
     }
 
     /** 是否为“代他人办理”的会话。 */

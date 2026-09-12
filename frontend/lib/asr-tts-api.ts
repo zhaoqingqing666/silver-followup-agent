@@ -70,12 +70,6 @@ export async function synthesizeSpeech(
   }
 }
 
-/** 后台预合成（不播放）：收到 AI 回复时提前生成音频，用户点朗读时秒播 */
-export function prewarmSpeech(text: string, options?: { voice?: string; speed?: number }): void {
-  if (!text.trim()) return;
-  void synthesizeSpeech(text, options);
-}
-
 /** 获取可用音色列表 */
 export async function getVoices(): Promise<Array<{ id: string; label: string }>> {
   try {

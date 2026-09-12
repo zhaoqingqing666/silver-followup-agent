@@ -6,7 +6,6 @@ import org.springframework.stereotype.Repository;
 import java.sql.Timestamp;
 import java.time.LocalDateTime;
 import java.util.List;
-import java.util.Optional;
 
 /**
  * 长期记忆：跨对话记住的、关于这位老人的事。
@@ -71,10 +70,6 @@ public class MemoryStore {
                 rs.getString(4),
                 rs.getTimestamp(5) == null ? null : rs.getTimestamp(5).toLocalDateTime()),
                 userId);
-    }
-
-    public Optional<Memory> find(String userId, String key) {
-        return list(userId).stream().filter(item -> item.key().equals(key)).findFirst();
     }
 
     /**

@@ -91,10 +91,6 @@ final class DialogueService {
         }
     }
 
-    private boolean hasProgressHint(String value) {
-        return containsAny(value, "办理进度", "预约进度", "已经停止", "不会提交", "普通办理", "先暂停", "先保留");
-    }
-
     private QuickReply q(String label, String action) { return new QuickReply(label, action, ""); }
 
     private boolean containsAny(String value, String... words) {

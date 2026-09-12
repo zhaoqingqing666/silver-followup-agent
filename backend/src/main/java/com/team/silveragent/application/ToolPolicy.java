@@ -1,7 +1,6 @@
 package com.team.silveragent.application;
 
 import com.team.silveragent.agent.AgentRole;
-import com.team.silveragent.agent.planning.PlannerDecision;
 import org.springframework.stereotype.Component;
 
 /**
@@ -13,10 +12,6 @@ import org.springframework.stereotype.Component;
 @Component
 final class ToolPolicy {
     enum Decision { ALLOW, DENY_UNKNOWN_TOOL, DENY_SIDE_EFFECT, DENY_ROLE }
-
-    Decision evaluate(PlannerDecision proposal, ToolRegistry.RegisteredTool tool) {
-        return evaluate(AgentRole.ELDER, tool);
-    }
 
     Decision evaluate(AgentRole role, ToolRegistry.RegisteredTool tool) {
         if (tool == null) return Decision.DENY_UNKNOWN_TOOL;

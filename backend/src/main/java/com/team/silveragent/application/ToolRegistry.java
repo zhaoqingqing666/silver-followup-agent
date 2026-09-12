@@ -106,10 +106,6 @@ final class ToolRegistry {
                 .toList();
     }
 
-    List<PlannerTool> plannerTools() {
-        return tools.values().stream().map(RegisteredTool::definition).toList();
-    }
-
     Optional<RegisteredTool> find(String name) {
         return Optional.ofNullable(name == null ? null : tools.get(name));
     }

@@ -30,19 +30,11 @@ public record AgentContext(
     public record Identity(String actorName, String subjectName, String relationLabel, AgentRole role) {
         public static final Identity SELF = new Identity(null, null, null, AgentRole.ELDER);
 
-        public static Identity self() { return SELF; }
-
         public boolean isCaregiver() { return role != null && role.isCaregiver(); }
     }
 
     public AgentContext {
         vision = vision == null ? List.of() : List.copyOf(vision);
-    }
-
-    /** 带身份、没有识图记录：代他人办理的既有调用点。 */
-    public AgentContext(String stage, String knownFacts, LocalDate currentDate,
-                        List<Message> recentMessages, Identity identity) {
-        this(stage, knownFacts, currentDate, recentMessages, identity, List.of());
     }
 
     /** 老人端自办：没有关系上下文、没有识图记录。保留给既有调用点与测试。 */
