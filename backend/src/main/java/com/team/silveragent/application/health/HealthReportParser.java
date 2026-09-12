@@ -1,4 +1,6 @@
-package com.team.silveragent.application;
+package com.team.silveragent.application.health;
+
+import com.team.silveragent.application.memo.MemoParser;
 
 /**
  * “把健康记录发给家属”的识别（规则版，和 {@link MemoParser}/{@link HealthRecordParser} 同一思路）。

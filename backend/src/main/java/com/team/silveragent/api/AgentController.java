@@ -1,7 +1,7 @@
 package com.team.silveragent.api;
 
 import com.team.silveragent.application.FollowupAgentService;
-import com.team.silveragent.application.MemoryStore;
+import com.team.silveragent.application.memory.MemoryStore;
 import com.team.silveragent.application.TurnProgress;
 import com.team.silveragent.domain.model.AgentTurnResponse;
 import com.team.silveragent.domain.model.ConversationHistoryResponse;

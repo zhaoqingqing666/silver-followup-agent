@@ -1,6 +1,6 @@
 package com.team.silveragent.infrastructure.mock;
 
-import com.team.silveragent.application.MemoStore;
+import com.team.silveragent.application.memo.MemoStore;
 import com.team.silveragent.domain.tool.MemoTool;
 import org.springframework.stereotype.Component;
 

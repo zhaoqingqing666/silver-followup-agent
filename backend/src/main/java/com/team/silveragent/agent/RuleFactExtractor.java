@@ -1,6 +1,6 @@
 package com.team.silveragent.agent;
 
-import com.team.silveragent.application.CareCatalogRepository;
+import com.team.silveragent.application.care.CareCatalogRepository;
 import org.springframework.stereotype.Component;
 
 import java.time.DateTimeException;

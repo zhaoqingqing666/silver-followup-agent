@@ -1,5 +1,7 @@
 package com.team.silveragent.application;
 
+import com.team.silveragent.application.care.CareCatalogRepository;
+
 import com.team.silveragent.agent.ExtractedFacts;
 import org.springframework.stereotype.Component;
 

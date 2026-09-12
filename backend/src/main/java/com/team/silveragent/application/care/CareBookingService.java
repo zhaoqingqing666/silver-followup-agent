@@ -1,4 +1,6 @@
-package com.team.silveragent.application;
+package com.team.silveragent.application.care;
+
+import com.team.silveragent.application.AppointmentRecordStore;
 
 import com.team.silveragent.domain.model.ToolModels.Slot;
 import com.team.silveragent.domain.model.ToolModels.TravelPlan;

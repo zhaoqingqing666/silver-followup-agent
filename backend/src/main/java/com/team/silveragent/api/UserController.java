@@ -1,7 +1,7 @@
 package com.team.silveragent.api;
 
-import com.team.silveragent.application.CareCatalogRepository;
-import com.team.silveragent.application.UserPreferenceStore;
+import com.team.silveragent.application.care.CareCatalogRepository;
+import com.team.silveragent.application.memory.UserPreferenceStore;
 import org.springframework.web.bind.annotation.*;
 
 @RestController

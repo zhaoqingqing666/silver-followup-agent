@@ -1,4 +1,4 @@
-package com.team.silveragent.application;
+package com.team.silveragent.application.memo;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;

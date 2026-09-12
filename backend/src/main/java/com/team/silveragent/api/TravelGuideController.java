@@ -1,6 +1,6 @@
 package com.team.silveragent.api;
 
-import com.team.silveragent.application.TravelGuideService;
+import com.team.silveragent.application.travel.TravelGuideService;
 import com.team.silveragent.domain.model.ToolModels.AppointmentTravelGuide;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;

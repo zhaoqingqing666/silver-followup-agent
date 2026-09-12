@@ -1,4 +1,6 @@
-package com.team.silveragent.application;
+package com.team.silveragent.application.health;
+
+import com.team.silveragent.application.memo.MemoStore;
 
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;

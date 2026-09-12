@@ -1,4 +1,4 @@
-package com.team.silveragent.application;
+package com.team.silveragent.application.travel;
 
 import com.team.silveragent.domain.model.ToolModels.AppointmentTravelGuide;
 import com.team.silveragent.domain.model.ToolModels.FacilityGuide;

@@ -7,7 +7,7 @@ import com.team.silveragent.agent.planning.LlmConversationPlanner;
 import com.team.silveragent.agent.planning.PlannerActionType;
 import com.team.silveragent.agent.planning.PlannerTool;
 import com.team.silveragent.agent.planning.RuleConversationPlanner;
-import com.team.silveragent.application.CareCatalogRepository;
+import com.team.silveragent.application.care.CareCatalogRepository;
 import org.junit.jupiter.api.Test;
 
 import java.time.LocalDate;

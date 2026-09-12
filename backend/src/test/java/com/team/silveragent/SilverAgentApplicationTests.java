@@ -1,7 +1,7 @@
 package com.team.silveragent;
 
 import com.team.silveragent.application.FollowupAgentService;
-import com.team.silveragent.application.TravelGuideService;
+import com.team.silveragent.application.travel.TravelGuideService;
 import com.team.silveragent.agent.RuleFactExtractor;
 import com.team.silveragent.agent.AgentContext;
 import com.team.silveragent.domain.model.AgentTurnResponse;

@@ -1,5 +1,18 @@
 package com.team.silveragent.application;
 
+import com.team.silveragent.application.care.CareBookingService;
+import com.team.silveragent.application.care.CareCatalogRepository;
+import com.team.silveragent.application.care.CareService;
+import com.team.silveragent.application.health.HealthRecordParser;
+import com.team.silveragent.application.health.HealthRecordStore;
+import com.team.silveragent.application.health.HealthReportParser;
+import com.team.silveragent.application.health.HealthReportService;
+import com.team.silveragent.application.memo.MemoCommandParser;
+import com.team.silveragent.application.memo.MemoParser;
+import com.team.silveragent.application.memo.MemoStore;
+import com.team.silveragent.application.memory.MemoryStore;
+import com.team.silveragent.application.travel.TravelGuideService;
+
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.team.silveragent.agent.AgentContext;
 import com.team.silveragent.agent.AgentRole;

@@ -1,6 +1,6 @@
 package com.team.silveragent.infrastructure;
 
-import com.team.silveragent.application.HealthReportService;
+import com.team.silveragent.application.health.HealthReportService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;

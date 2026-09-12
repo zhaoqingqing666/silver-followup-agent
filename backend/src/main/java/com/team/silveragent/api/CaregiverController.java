@@ -1,6 +1,6 @@
 package com.team.silveragent.api;
 
-import com.team.silveragent.application.CareService;
+import com.team.silveragent.application.care.CareService;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.*;
 

@@ -93,7 +93,7 @@ backend/src/main/java/com/team/silveragent/
 └─ exception/
 ```
 
-### 当前实际分包（2026-09-11）
+### 当前实际分包（2026-09-12）
 
 上面的树是早期推荐形态；源码实际按“接口 / 智能体 / 应用服务 / 领域工具 / 基础设施”分层：
 
@@ -103,10 +103,17 @@ backend/src/main/java/com/team/silveragent/
 ├─ agent/                身份与语言概念（AgentRole、ExtractedFacts、回答生成）
 │  ├─ model/             模型网关接口
 │  └─ planning/          主提示词、规划器、决策与工具调用模型
-├─ application/          FollowupAgentService、AgentOrchestrator、AgentRuntime、
-│                        ToolRegistry、ToolPolicy、会话/照护/健康/备忘服务、
-│                        MemoryStore（跨对话长期记忆）、TurnProgress（一轮实时进度）、
-│                        ConversationLifecycle（会话状态标记）
+├─ application/          编排与门禁留在根包：FollowupAgentService、AgentOrchestrator、
+│  │                     AgentRuntime、ToolRegistry、ToolPolicy、ActionValidator、
+│  │                     SafetyGuard、ConversationState/Store/Lifecycle、
+│  │                     AppointmentRecordStore、TurnProgress
+│  ├─ care/              协同照护：CareService、CareBookingService、CareCatalogRepository
+│  ├─ demo/              演示场景：DemoScenario、DemoScenarioService
+│  ├─ health/            健康记录与报告：HealthRecordStore、HealthRecordParser、
+│  │                     HealthReportParser、HealthReportService
+│  ├─ memo/              备忘：MemoStore、MemoParser、MemoCommandParser
+│  ├─ memory/            跨对话长期记忆：MemoryStore、UserPreferenceStore
+│  └─ travel/            出行：TravelGuideService
 ├─ domain/
 │  ├─ model/             领域对象与 DTO
 │  └─ tool/              15 个领域工具接口（含 HealthRecordTool、MemoTool、DrugKnowledgeTool）
