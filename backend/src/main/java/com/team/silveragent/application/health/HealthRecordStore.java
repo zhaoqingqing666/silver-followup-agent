@@ -1,7 +1,5 @@
 package com.team.silveragent.application.health;
 
-import com.team.silveragent.application.memo.MemoStore;
-
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
@@ -13,7 +11,7 @@ import java.util.UUID;
 
 /**
  * 老人上报的实测健康数值（血压/血糖/心率/体温/体重/血氧）。
- * 与 {@link MemoStore} 分家：备忘是“要做的事”（带提醒、可完成可删除），这里是“已经量到的数”（只增，用来回查）。
+ * 与 {@link com.team.silveragent.application.memo.MemoStore} 分家：备忘是“要做的事”（带提醒、可完成可删除），这里是“已经量到的数”（只增，用来回查）。
  * 写入只来自助手对话（HealthRecordTool），首页只读。
  */
 @Repository

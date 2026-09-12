@@ -10,7 +10,7 @@ import com.team.silveragent.application.health.HealthReportService;
 import com.team.silveragent.application.memo.MemoCommandParser;
 import com.team.silveragent.application.memo.MemoParser;
 import com.team.silveragent.application.memo.MemoStore;
-import com.team.silveragent.application.memory.MemoryStore;
+import com.team.silveragent.application.longterm.MemoryStore;
 import com.team.silveragent.application.travel.TravelGuideService;
 
 import com.fasterxml.jackson.databind.ObjectMapper;

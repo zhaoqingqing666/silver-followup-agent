@@ -1,4 +1,4 @@
-package com.team.silveragent.application.memory;
+package com.team.silveragent.application.longterm;
 
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;

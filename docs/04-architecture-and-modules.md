@@ -111,8 +111,9 @@ backend/src/main/java/com/team/silveragent/
 │  ├─ demo/              演示场景：DemoScenario、DemoScenarioService
 │  ├─ health/            健康记录与报告：HealthRecordStore、HealthRecordParser、
 │  │                     HealthReportParser、HealthReportService
+│  ├─ longterm/          跨对话长期记忆：MemoryStore（常去的医院、科室、习惯时段）
 │  ├─ memo/              备忘：MemoStore、MemoParser、MemoCommandParser
-│  ├─ memory/            跨对话长期记忆：MemoryStore、UserPreferenceStore
+│  ├─ preference/        用户设置：UserPreferenceStore（朗读开关、语速、音色）
 │  └─ travel/            出行：TravelGuideService
 ├─ domain/
 │  ├─ model/             领域对象与 DTO
@@ -123,6 +124,8 @@ backend/src/main/java/com/team/silveragent/
 │  └─ persistence/       持久化
 └─ config/
 ```
+
+「长期记忆」的包名是 `longterm/` 而不是 `memory/`：`memo/`（备忘＝要做的事，能完成能删除）和 `memory/` 只差一个字母却指两回事，看错一次就找错地方。同理 `UserPreferenceStore` 存的是朗读开关、语速、音色这类**设置**，不跟长期记忆同包，单独放 `preference/`。
 
 ### 状态存在哪儿（2026-09-11）
 

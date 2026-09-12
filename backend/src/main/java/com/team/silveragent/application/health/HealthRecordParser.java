@@ -1,7 +1,5 @@
 package com.team.silveragent.application.health;
 
-import com.team.silveragent.application.memo.MemoParser;
-
 import java.math.BigDecimal;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -9,7 +7,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * 老人上报实测数值的识别（规则版，与 {@link MemoParser} 同一思路）。
+ * 老人上报实测数值的识别（规则版，与 {@link com.team.silveragent.application.memo.MemoParser} 同一思路）。
  *
  * 与备忘的分工：备忘是“要做的事”（明早八点吃药），这里是“已经量到的数”（我的血压是100）。
  * 所以命中要求「项目词 + 数值或说法」两件都齐 —— 只说“提醒我量血压”是备忘，不是记录。
