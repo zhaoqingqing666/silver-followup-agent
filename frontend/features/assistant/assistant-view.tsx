@@ -18,7 +18,6 @@ import { ChatBubble } from './chat-bubble';
 import { HistorySheet } from './history-sheet';
 import { ToolTracePanel } from './tool-trace-panel';
 import { useTurnProgress } from './use-turn-progress';
-import { TtsSettings } from './tts-settings';
 
 /** 点一下就填进输入框的示例话：分别对应“记数值 / 记提醒 / 管理已有提醒”三件事。 */
 const EXAMPLE_SAYINGS = ['我的血压是100', '明早八点提醒我吃药', '我都有哪些备忘'];
@@ -59,7 +58,6 @@ const stageLabels: Record<string, string> = {
 };
 
 export function AssistantView({ active, onNavigate, onOpenTravel, voicePreference, onRegisterSend,
-  voicePreferenceBusy = false, voicePreferenceError = '', onSpeechRateChange,
   pendingAsk = '', onAskConsumed }: {
   active: boolean;
   onNavigate: (tab: TabId) => void;
@@ -73,10 +71,6 @@ export function AssistantView({ active, onNavigate, onOpenTravel, voicePreferenc
    */
   pendingAsk?: string;
   onAskConsumed?: () => void;
-  /** 朗读设置面板的保存态：由外层持有，因为这个偏好是所有页面共用的 */
-  voicePreferenceBusy?: boolean;
-  voicePreferenceError?: string;
-  onSpeechRateChange?: (patch: { speechRate?: number }) => void;
 }) {
   const [conversationId, setConversationId] = useState('');
   /** 等待提示的当前阶段。图片轮用它轮换，普通轮恒为一条。 */
@@ -458,9 +452,9 @@ export function AssistantView({ active, onNavigate, onOpenTravel, voicePreferenc
 
   return <main className="flex min-h-dvh flex-col pb-[180px]">
     <PageHeader title="复诊助手" subtitle="一次只问一件事" onBack={() => onNavigate('home')}
-      onHelp={() => void sendAction('CONTACT_HUMAN', '', '联系人工帮助')} />
-
-    <div className="sticky top-[76px] z-40 border-b bg-[#fffaf3]/95 px-5 py-3 backdrop-blur">
+      onHelp={() => void sendAction('CONTACT_HUMAN', '', '联系人工帮助')}>
+      {/* 这一栏放进页头里，而不是自己再写一层 sticky top-[76px]：
+          它原本粘在标题行下面 76px 处，大字模式把标题行撑高后就会错位或者留一条缝。 */}
       <div className="flex items-center gap-2">
         <div className="flex min-w-0 flex-1 items-center gap-2 text-sm font-semibold text-[#76533d]">
           <Sparkles className="size-4 shrink-0 text-primary" aria-hidden="true" />
@@ -475,7 +469,7 @@ export function AssistantView({ active, onNavigate, onOpenTravel, voicePreferenc
           <SquarePen className="size-4 text-primary" aria-hidden="true" />新对话
         </button>
       </div>
-    </div>
+    </PageHeader>
 
     {/* 只读态由前端自己声明，不靠拼后端回复：后端每一轮的 reply 与 speechText
         必须逐字对应（有测试盯着），前端往里加自己的话会破坏这个约定。 */}
@@ -497,12 +491,8 @@ export function AssistantView({ active, onNavigate, onOpenTravel, voicePreferenc
         <button disabled={busy || readOnly} onClick={() => void sendAction('CONTINUE', '', turn?.task?.active ? '继续刚才的办理' : '我想预约复诊')} className="flex min-h-12 items-center justify-center gap-2 rounded-2xl bg-primary text-base font-bold text-white disabled:opacity-40"><CalendarSearch className="size-5" />{turn?.task?.active ? '继续办理' : '预约复诊'}</button>
         <button onClick={() => onNavigate('tasks')} className="flex min-h-12 items-center justify-center gap-2 rounded-2xl border bg-white text-base font-bold"><ClipboardCheck className="size-5 text-primary" />事项查询</button>
       </div>
-      {/* 朗读设置就放在两个主按钮下面：老人觉得「念得太快 / 声音不好听」时，
-          顺着页面往下看一眼就能找到，不必翻到别的页面去。 */}
-      <div className="mt-2">
-        <TtsSettings voicePreference={voicePreference} busy={voicePreferenceBusy}
-          error={voicePreferenceError} onChange={patch => onSpeechRateChange?.(patch)} />
-      </div>
+      {/* 朗读设置整块搬到「我的」了（见 profile-view.tsx）：语速和音色是全局偏好，
+          和「自动朗读」开关摆在一起才讲得通，也免得每个页面各摆一份、各存一份。 */}
       <div className="mt-2 rounded-2xl border border-dashed border-[#dba976] bg-white px-3 py-2 shadow-sm">
         <p className="flex items-center gap-2 text-sm font-semibold text-[#6c3d24]"><NotebookPen className="size-4 text-primary" aria-hidden="true" />记数值、记提醒、看看有哪些提醒，都可以说一句</p>
         <div className="mt-1.5 flex flex-wrap gap-2">
@@ -513,15 +503,25 @@ export function AssistantView({ active, onNavigate, onOpenTravel, voicePreferenc
       </div>
     </div>
 
+    {/* 办理中的紧凑摘要：只说清「办的是哪一次、到哪一步了」，不再摆第二颗「继续办理」。
+        summary 由后端按真实状态拼（字段没定就写「待选择科室」，不编造），日期是中文写法。
+        恢复办理用上面操作区那颗按钮（有任务时它就叫「继续办理」），要回答的问题在对话里。
+        取消仍留在这里——办理中连一个显式的退出入口都没有，老人就只能靠说话，代价太大。 */}
     {!readOnly && turn?.task?.active && <section className="border-b bg-[#fff4e7] px-5 py-3">
       <div className="rounded-2xl border border-[#e6bc8c] bg-white px-4 py-3 shadow-sm">
-        <div className="flex items-start justify-between gap-3"><div><p className="text-sm font-bold text-primary">复诊办理待继续</p><p className="mt-1 text-base font-semibold">{turn.task.summary}</p>{turn.task.missingField && <p className="mt-1 text-sm text-muted-foreground">下一步：确认{turn.task.missingField}</p>}</div><span className="rounded-full bg-[#fff0dc] px-3 py-1 text-sm font-bold text-primary">{turn.task.status === 'PAUSED' ? '已暂停' : '进行中'}</span></div>
-        <div className="mt-3 flex gap-2"><button disabled={busy} onClick={() => void sendAction('RETURN_TO_FLOW', '', '继续刚才的办理')} className="min-h-11 flex-1 rounded-xl bg-primary px-3 font-bold text-white">继续办理</button><button disabled={busy} onClick={() => void sendAction('CANCEL_TASK', '', '取消本次办理')} className="min-h-11 flex-1 rounded-xl border px-3 font-semibold">取消本次办理</button></div>
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-sm font-bold text-primary">当前复诊办理</p>
+            <p className="mt-1 text-base font-semibold">{turn.task.summary}</p>
+          </div>
+          <span className="shrink-0 rounded-full bg-[#fff0dc] px-3 py-1 text-sm font-bold text-primary">{turn.task.status === 'PAUSED' ? '已暂停' : '进行中'}</span>
+        </div>
+        <button disabled={busy} onClick={() => void sendAction('CANCEL_TASK', '', '取消本次办理')} className="mt-3 min-h-11 w-full rounded-xl border px-3 font-semibold">取消本次办理</button>
       </div>
     </section>}
     <div className="flex-1 space-y-4 px-5 py-5">
       <section aria-label="对话记录" className="space-y-3">
-        {messages.map(message => <ChatBubble key={message.id} message={message} />)}
+        {messages.map(message => <ChatBubble key={message.id} message={message} voicePreference={voicePreference} />)}
         {busy && <div aria-live="polite" className="flex items-center gap-2 text-base text-muted-foreground"><LoaderCircle className="size-5 animate-spin" />{stages[Math.min(stageIndex, stages.length - 1)]}</div>}
       </section>
 

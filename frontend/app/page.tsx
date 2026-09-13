@@ -16,7 +16,13 @@ import { TravelGuideView } from '@/features/travel/travel-guide-view';
 import { VoiceMicButton } from '@/features/voice/voice-mic-button';
 import type { VoiceRecording } from '@/features/voice/use-press-to-talk';
 import { getVoicePreference, updateVoicePreference } from '@/lib/appointment-api';
+import { speakText, stopPlayback } from '@/lib/tts-player';
 import type { CareActor, RecordPage, TabId, TravelFocus, VoicePreference } from '@/types/domain';
+
+/** 开场提示气泡说的话。它指向的是屏幕上真实的那个麦克风按钮，不是比喻。 */
+const GREETING_TEXT = '我是复诊小助手，有什么问题，长按下面的麦克风告诉我。';
+/** 气泡自己收起的时间。老人点了别处、或者按住麦克风，都会比这更早。 */
+const GREETING_MS = 9000;
 
 export default function HomePage() {
   // 入口先选身份：就诊人本人走老人端，家属 / 志愿者走协同照护端。
@@ -36,6 +42,14 @@ export default function HomePage() {
   });
   const [voicePreferenceBusy, setVoicePreferenceBusy] = useState(false);
   const [voicePreferenceError, setVoicePreferenceError] = useState('');
+  /**
+   * 语音偏好读回来了没有。开场气泡要不要念，取决于「自动朗读」这个开关，
+   * 而它默认是关的、要等后端返回才知道真实值——不等就读，会在开关明明开着的时候不吭声。
+   */
+  const [voicePreferenceReady, setVoicePreferenceReady] = useState(false);
+  /** 开场提示气泡：新进入老人端时显示一次，之后在应用内部切页不再弹（状态活在本组件里）。 */
+  const [greetingVisible, setGreetingVisible] = useState(true);
+  const greetingSpoken = useRef(false);
   // 助手注册的“说一句话就发送”，以及当前页面注册的只读语音口令。
   const assistantSendRef = useRef<((text: string, recording: VoiceRecording | null) => void) | null>(null);
   const pageVoiceRef = useRef<((text: string) => boolean) | null>(null);
@@ -51,9 +65,19 @@ export default function HomePage() {
   useEffect(() => {
     // 协同照护端没有语音入口，不必拉取朗读设置。
     if (actor !== 'ELDER') return;
-    getVoicePreference().then(setVoicePreference).catch(() => {
-      setVoicePreferenceError('后端未连接，暂时使用关闭状态');
-    });
+    let cancelled = false;
+    getVoicePreference().then(
+      preference => {
+        if (cancelled) return;
+        setVoicePreference(preference);
+        setVoicePreferenceReady(true);
+      },
+      () => {
+        if (cancelled) return;
+        setVoicePreferenceError('后端未连接，暂时使用关闭状态');
+        setVoicePreferenceReady(true);
+      });
+    return () => { cancelled = true; };
   }, [actor]);
 
   /**
@@ -110,6 +134,43 @@ export default function HomePage() {
     assistantSendRef.current?.(text, recording);
   }, []);
 
+  /**
+   * 收掉开场气泡。点它本身、点页面上任何别的地方、按住麦克风，都会走到这里。
+   * 同时停掉提示音：字消失了声音还在响，老人只会以为关不掉。
+   */
+  const dismissGreeting = useCallback(() => {
+    setGreetingVisible(false);
+    stopPlayback();
+  }, []);
+
+  /**
+   * 气泡出现期间监听整页的 pointerdown，用捕获阶段：按住麦克风时它自己的处理还没跑完，
+   * 这里就要先把气泡收掉，否则气泡会一直压在录音浮层上。超过时间也自己收。
+   */
+  useEffect(() => {
+    if (actor !== 'ELDER' || !greetingVisible) return;
+    const hide = () => dismissGreeting();
+    document.addEventListener('pointerdown', hide, true);
+    const timer = window.setTimeout(hide, GREETING_MS);
+    return () => {
+      document.removeEventListener('pointerdown', hide, true);
+      window.clearTimeout(timer);
+    };
+  }, [actor, greetingVisible, dismissGreeting]);
+
+  /**
+   * 念一遍开场白，遵守「自动朗读」开关与语速；关着就只显示文字。
+   * greetingSpoken 保证只念一次——气泡因重渲染重新出现时不会再念第二遍。
+   */
+  useEffect(() => {
+    if (actor !== 'ELDER' || !greetingVisible || !voicePreferenceReady) return;
+    if (!voicePreference.autoSpeakEnabled || greetingSpoken.current) return;
+    greetingSpoken.current = true;
+    void speakText(`greeting-${Date.now()}`, GREETING_TEXT, {
+      rate: voicePreference.speechRate, volume: voicePreference.speechVolume,
+    });
+  }, [actor, greetingVisible, voicePreferenceReady, voicePreference]);
+
   // hooks 必须全部先于下面的提前 return，否则身份切换会改变 hook 顺序。
   if (!actor) {
     return <MobileShell largeText={false}><ActorPicker onPick={setActor} /></MobileShell>;
@@ -141,18 +202,26 @@ export default function HomePage() {
     <div className={activeTab === 'assistant' ? 'block' : 'hidden'} aria-hidden={activeTab !== 'assistant'}>
       <AssistantView active={activeTab === 'assistant'} onNavigate={setActiveTab}
         onOpenTravel={openTravel} voicePreference={voicePreference} onRegisterSend={registerAssistantSend}
-        voicePreferenceBusy={voicePreferenceBusy} voicePreferenceError={voicePreferenceError}
-        pendingAsk={pendingAsk} onAskConsumed={consumeAsk}
-        onSpeechRateChange={patch => void changeVoicePreference(patch)} />
+        pendingAsk={pendingAsk} onAskConsumed={consumeAsk} />
     </div>
     {activeTab === 'travel' && <TravelGuideView key={travelSession} appointmentId={travelAppointmentId}
       initialTab={travelFocus} forceSpeak={travelForceSpeak} voicePreference={voicePreference}
       onBack={closeTravel} onRegisterVoice={registerPageVoice} />}
     {activeTab === 'profile' && <ProfileView onNavigate={setActiveTab} largeText={largeText} onLargeTextChange={setLargeText}
       autoSpeakEnabled={voicePreference.autoSpeakEnabled} voicePreferenceBusy={voicePreferenceBusy}
-      voicePreferenceError={voicePreferenceError} onAutoSpeakChange={changeAutoSpeak} />
+      voicePreferenceError={voicePreferenceError} onAutoSpeakChange={changeAutoSpeak}
+      speechRate={voicePreference.speechRate} onSpeechRateChange={patch => void changeVoicePreference(patch)} />
     }
     {activeTab !== 'travel' && <BottomNav activeTab={activeTab} onChange={setActiveTab} />}
+
+    {/* 开场提示气泡：每次新进入老人端显示一次，之后在应用内部切页不再弹。
+        位置就在麦克风正上方（bottom-[132px] 是录音浮层用的同一档），不盖住那个按钮本身。
+        宽度按视口算、不放进麦克风那个 64px 的小盒子——理由和录音浮层一样（见下面的注释）。
+        点它、点别处、按住麦克风，三种情况都会收掉它。 */}
+    {greetingVisible && <button type="button" onClick={dismissGreeting}
+      className="fixed bottom-[132px] left-1/2 z-50 w-[calc(100%-48px)] max-w-[420px] -translate-x-1/2 rounded-3xl bg-white px-5 py-4 text-left text-base font-semibold leading-7 text-[#6c3d24] shadow-[0_16px_48px_rgb(91_55_32/28%)]">
+      {GREETING_TEXT}
+    </button>}
     {/* 全局麦克风在所有页面保持同一位置，包括助手页和地图页。
         它是操作入口而不是第五个路由；助手输入框不再重复放置第二个麦克风。
         居中用 -ml-8（按钮 size-16 的一半），**不要**改成 -translate-x-1/2：

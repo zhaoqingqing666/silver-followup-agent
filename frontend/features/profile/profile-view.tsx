@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { Accessibility, Brain, Headphones, Trash2, UserRound } from 'lucide-react';
 import { PageHeader } from '@/components/common/page-header';
+import { TtsSettings } from '@/features/assistant/tts-settings';
 import { Switch } from '@/components/ui/switch';
 import { forgetMemory, listMemories, type AgentMemory } from '@/lib/agent-api';
 import { getUserProfile } from '@/lib/appointment-api';
@@ -16,9 +17,16 @@ interface ProfileProps {
   voicePreferenceBusy: boolean;
   voicePreferenceError: string;
   onAutoSpeakChange: (value: boolean) => void;
+  /**
+   * 朗读语速。它由 app/page.tsx 持有并写回后端，助手页、事项页、地图页读的是同一个值；
+   * 这里只负责改，不另存一份，否则「改完这个页面、那个页面没变」。
+   */
+  speechRate: number;
+  onSpeechRateChange: (patch: { speechRate?: number }) => void;
 }
 export function ProfileView({ onNavigate, largeText, onLargeTextChange, autoSpeakEnabled,
-  voicePreferenceBusy, voicePreferenceError, onAutoSpeakChange }: ProfileProps) {
+  voicePreferenceBusy, voicePreferenceError, onAutoSpeakChange,
+  speechRate, onSpeechRateChange }: ProfileProps) {
   const [user, setUser] = useState<UserProfile | null>(null);
   /** null 表示还没读回来。用 null 而不是另开一个 loading 布尔，少一个可能对不上的状态。 */
   const [memories, setMemories] = useState<AgentMemory[] | null>(null);
@@ -84,6 +92,12 @@ export function ProfileView({ onNavigate, largeText, onLargeTextChange, autoSpea
           要保留入口就得真接上，接不上就先不摆。 */}
       <div className="flex min-h-18 items-center gap-4 px-5"><Headphones className="size-7 text-primary"/><div className="flex-1"><strong className="text-lg">语音朗读</strong><p className="text-sm text-muted-foreground">{voicePreferenceBusy ? '正在保存设置…' : '智能体新回复后自动朗读'}</p>{voicePreferenceError && <p className="text-sm text-red-700">{voicePreferenceError}</p>}</div><Switch checked={autoSpeakEnabled} disabled={voicePreferenceBusy} onCheckedChange={onAutoSpeakChange} aria-label="语音朗读" /></div>
     </section>
+
+    {/* 朗读的音色和语速原来是助手页里的一块面板，搬到这里和「语音朗读」开关挨着：
+        它们说的是同一件事（念不念、念多快、用什么声音），分散在两个页面只会让老人
+        「刚才那个念得快的开关在哪来着」。偏好仍由 app/page.tsx 统一保存，这里不复制状态。 */}
+    <TtsSettings speechRate={speechRate} busy={voicePreferenceBusy}
+      error={voicePreferenceError} onChange={onSpeechRateChange} />
 
     {/* 助手记住的事摆在明面上：记了什么、为什么记、怎么删，三件事都要老人自己看得见。
         「忘掉」必须做成本页唯一的入口——记忆只在确认放行的预约落库时才写，
