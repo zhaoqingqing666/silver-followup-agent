@@ -2,6 +2,16 @@
 
 进度文件记录“当前事实”，不写大段过程描述。功能完成后由负责人更新，并附对应 Pull Request 或提交。
 
+## 2026-09-13 死代码复查第二轮 + 模拟工具实现说明并入 06 号文档（未提交）
+
+- 死代码复查（静态扫描，未在宿主机构建）：删除 `frontend/next.config.ts`（Next.js 时代残留，空配置 `{}` 且 `import type { NextConfig } from 'next'`，而 `package.json` 已无 `next`；项目跑 vinext，vinext 支持不提供 next.config）。删除 5 处未使用 import：`agent/MedicalBoundaryRules.java`（HealthRecordParser）、`api/DemoController.java`（DemoScenario）、`application/demo/DemoScenarioService.java`（LocalDate）、`test/CareBookingServiceTests.java`（LocalDate）、`test/MemoFlowTests.java`（MemoParser）——后三处仅在 Javadoc/注释里被提及。
+- 确认保留、不属死代码：`FactExtractor` 接口（仅一个实现，经确认作为扩展点保留）；前端 `react-dom` / `react-server-dom-webpack` / `@vitejs/plugin-react` / `@vitejs/plugin-rsc`（源码零 import，但是 vinext 的 peerDependencies）；`tw-animate-css` / `shadcn`（在 `globals.css` 里 `@import`）；`TemplateAnswerGenerator` / `RuleConversationPlanner`（LLM 版的 fallback）；两类 mock 工具（接口与实现一对一，Spring 按接口注入）。
+- 扫描结论：前端无孤儿文件与孤儿导出，后端 69 个 Spring bean 无孤儿，无注释掉的代码块残留，`NEXT_PUBLIC_*` 五个变量与 `compose.yml` 一致。
+- `docs/06-mock-data-design.md` 升到 v0.3，**新增第十二节「模拟工具的实现方式」**：三层数据填充（结构 / 静态目录 / 滚动数据）、四类骨架工具（预约查询 / 日程管理 / 出行规划 / 家属通知）各自的 SQL 与实现要点、两层守门（`ToolRegistry` + `ToolPolicy`，`READ_ONLY` vs `CONFIRMATION_ONLY`）、`callTool` 与 `ToolTraceStore` 的定位、CAS 条件更新与两种幂等范式，并说明 `Mock*` / `H2*` 前缀属历史遗留命名。
+- 同时在第十一节与 `00-reading-order.md` 登记「演示话术避开『步行』」：`travel_routes` 只配了家属开车 / 打车 / 公交三种，而 `RuleFactExtractor` 的口语解析认得「步行」，说「我走过去」会命中未配置路线而走异常分支。
+- `00-reading-order.md` 的 v0.2 导航段新增一条指引到 06 号文档第十二节。
+- 两处文档改动均为纯说明，未改动任何代码与接口，不涉及前后端字段同步。第六节 5 处 import 删除属清理，需在 Dev Container 内跑一次后端测试确认编译通过。
+
 ## 2026-09-12 自然语言确认与批量取消预约（未提交）
 
 - 新增独立的 `CALL_CONFIRMATION_TOOL` 模型动作，以及 `interaction.requestConfirmation`、`interaction.respondConfirmation` 两个确认工具。模型把自然语言归一成结构化范围或确认决定；Java只查真实预约、维护凭据和执行门禁。

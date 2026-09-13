@@ -31,6 +31,7 @@
 - **代他人办理 / 协同照护端**（家属、志愿者代长辈办理）：先看 `01-requirement-mapping.md` 第十一节，再看 `06-mock-data-design.md` 的 `care_relations` 身份绑定。
 - **健康记录与健康备忘**（记血压血糖、设长期重复备忘）：看 `06-mock-data-design.md` 第八节（`memos`、`health_records`）。
 - **模型工具循环 / 受控工具调用**（模型提出只读工具调用、写操作过确认）：看 `03-agent-workflow.md` 与 `11-agent-architecture-and-controlled-tool-calling.md`。
+- **四类骨架工具怎么实现的**（预约查询 / 日程管理 / 出行规划 / 家属通知各自读哪张表、怎么被调用、并发与幂等怎么保证）：看 `06-mock-data-design.md` 第十二节。
 - **录屏前理清四个演示场景**（正常办理、无号、冲突、越界在代码里各走哪条路，以及各自的起始状态怎么摆）：看 `13-demo-scenarios-workflow.md`。
 
 `records/` 下的四个文件（`PROGRESS.md`、`DECISIONS.md`、`INTERFACE_CHANGES.md`、`PITFALLS.md`）从项目开始后持续更新，它们不是一次性报告。
