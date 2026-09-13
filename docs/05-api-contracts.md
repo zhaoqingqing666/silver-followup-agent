@@ -71,6 +71,8 @@ POST /api/agent/confirmations
 
 `status` 可取 `NONE`、`ACTIVE`、`PAUSED`、`AWAITING_CONFIRMATION`、`COMPLETED`、`CANCELLED`。前端用它展示持续任务卡，不能根据聊天文字猜测任务是否存在。
 
+`summary` 由 Java 按 `医院 · 科室 · 日期` 逐级拼，没凑齐的那段用「尚未选择医院 / 待选择科室 / 待选择日期」如实说；日期一律 `yyyy年M月d日`（`DATE_LABEL`，如 `市第一医院 · 心内科 · 2026年9月15日`），与 `plan.date`、`result.date` 同源同格式，不再用 ISO 写法。老人端助手页把它原样当「当前复诊办理」的摘要显示，所以这句话必须是给人看的。
+
 ## 模型状态
 
 GET /api/agent/model-status
@@ -277,3 +279,50 @@ quickReplies：[{"label":"市第一医院","action":"SET_HOSPITAL","value":"h001
 - `message` **不是 `reply` 的复制**：`reply`（及 `speechText`）是权威回答，照常进 `conversation_messages`、照常朗读；`notice.message` 只回答「这条为什么长得不一样、要办的事没被打断」。
 - 停在确认卡上时，这一轮**原样带回同一张 `ConfirmationCard`**（`confirmationId` 不变，逐条内容与上一版一致）——老人问完一句药，正要按的「确认办理」不能跟着消失。取消类确认卡（`CANCEL_EXISTING` / `CANCEL_MANAGED`）不在这条路上。
 - 兼容：字段是 record 的第 12 个分量，旧的 11 / 9 / 8 参构造全部保留，缺席即 `null`；旧会话 `last_response_json` 缺这个字段，反序列化照常。
+
+## 工具契约与通用澄清（2026-09-13）
+
+**对外 HTTP 契约没有变化**：没有新增 / 删除 / 改名任何端点，`AgentTurnResponse` 的字段一个没动。这一节记的是「模型看到的工具说明」与「`toolTraces` 里会出现的新工具名」，以及澄清轮的用户可见行为。
+
+### 工具参数声明变强类型了
+
+每个工具的参数声明现在是「名字 + 类型 + 是否必填 + 枚举取值 + 一句人话说明」，另有字段组合约束：
+
+```json
+{
+  "name": "interaction.requestConfirmation",
+  "description": "…",
+  "risk": "CONFIRMATION_ONLY",
+  "arguments": [
+    { "name": "scope", "type": "enum", "required": true, "values": ["ALL", "DATE_RANGE", "SINGLE_FILTER", "AMBIGUOUS"] },
+    { "name": "direction", "type": "enum", "required": false, "values": ["BEFORE", "AFTER"] },
+    { "name": "date", "type": "date", "required": false }
+  ],
+  "constraints": [
+    { "kind": "REQUIRES_ALL", "field": "scope", "fieldValues": ["DATE_RANGE"], "fields": ["date", "direction"] }
+  ]
+}
+```
+
+- 判罚**只有一处**（`ToolContract`），五种：`UNKNOWN_TOOL`、`MISSING_ARGUMENT`、`INVALID_FORMAT`、`INVALID_ENUM`、`CONSTRAINT_VIOLATED`。前一种算「失败」，后四种算「缺少信息」——**「没查到」和「你没说清」是两套话术、两套动作**，不再落进同一个 `null`。
+- 通过校验后参数会被规范化：**只保留声明过的字段**（模型多塞的一律丢弃）、**空字符串算「没给」**、枚举统一转大写；日期与时段先按严格 ISO 解析，不成再收 `2026-9-6` / `9:30` 这类宽松写法，收下之后统一成一种。
+- `interaction.requestConfirmation` **刻意不声明 `appointmentId`**：模型看不到、也填不了「取消哪一条」，目标由 Java 按候选匹配决定。
+
+### `interaction.askClarification`：模型提问、候选来自数据库
+
+模型在「范围说不清」时提这个工具，参数是 `question`（可选，模型自己写的自然问句）与 `candidateTool`（必填，枚举，目前只有 `appointment.queryMine`）。返回给老人的是：
+
+```json
+{ "reply": "您想取消的是哪一条复诊预约？\n• 2026年9月10日 09:00 市第一医院（模拟）心内科\n• …",
+  "quickReplies": [ { "label": "取消这条：2026年9月10日 09:00", "action": "SELECT_APPOINTMENT_TO_CANCEL", "value": "clarify-a" }, … ] }
+```
+
+- **候选是数据库里查出来的真行**，最多 4 条，不是模型编的。按钮上的文字与口播的话逐字一致（这一轮的回复不交给润色模型），文字语音点选三条路都能走。
+- **澄清不是确认，不生成执行授权**：这一轮**不发 `confirmationId`、不建卡、不进 `AWAITING_CONFIRMATION`**。澄清完老人直接说「确认」，凭据仍然是空的，那句话只能被判成「确认已失效」——一句澄清问不出一次取消。
+- 模型写的 `question` 要过结构门（≤80 字、不含数字、不含完成态字样、得是个问句），过不了就用 Java 固定的那一句。
+- 库里没有可取消的已确认预约时：回复「我没有查到可以取消的已确认预约，所以没有执行任何取消操作。」，**一个按钮都不摆**。
+- 模型这一轮给了合法工具调用时，Java 不再用原句里的「都取消」这类关键词覆盖它的意图。
+
+### `toolTraces` 里的新工具名
+
+`ToolTrace` 仍然是原来的四个字段，但 `toolName` 会多出一个取值 `interaction.askClarification`。前端 `tool-trace-describe.ts` 已补三条中文说明：`interaction.requestConfirmation`（取消预约 · 生成确认卡，备注按 `scope` 渲染范围）、`interaction.respondConfirmation`（取消预约 · 处理确认卡，`decision=DENY` 时说明「老人选择保留」）、`interaction.askClarification`（按结果区分「没有查到」与「已列出 N 条真实候选」）。未知工具名按未知处理，不白屏。

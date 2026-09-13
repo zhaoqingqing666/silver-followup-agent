@@ -23,6 +23,7 @@
 11. 想从零理解大模型、工具调用、中控权限及项目下一版架构：看 [复诊事项智能体架构与受控工具调用方案](11-agent-architecture-and-controlled-tool-calling.md)。
 12. 想了解语音优先（P0）方案：看 [语音优先 P0 方案](12-voice-first-p0-plan.md)。
 13. 想知道比赛要求的四个演示场景（正常办理、无号、冲突、越界）在代码里各走哪条路：看 [四个演示场景的智能体工作流](13-demo-scenarios-workflow.md)。
+14. 想知道智能体灵活性、确认与执行架构、多工具循环和适老界面**接下来怎么做**：看 [智能体灵活性与老人端界面实施方案](15-agent-flexibility-and-elder-ui-plan.md)。它是**后续方案，不是已完成能力的证明**；已经落地的那部分以该文档中标了「现状」的段落为准。
 
 上述清单中的文档在 `docs/` 下均存在。
 
@@ -32,6 +33,7 @@
 - **健康记录与健康备忘**（记血压血糖、设长期重复备忘）：看 `06-mock-data-design.md` 第八节（`memos`、`health_records`）。
 - **模型工具循环 / 受控工具调用**（模型提出只读工具调用、写操作过确认）：看 `03-agent-workflow.md` 与 `11-agent-architecture-and-controlled-tool-calling.md`。
 - **录屏前理清四个演示场景**（正常办理、无号、冲突、越界在代码里各走哪条路，以及各自的起始状态怎么摆）：看 `13-demo-scenarios-workflow.md`。
+- **智能体灵活性、确认与执行架构、多工具循环、适老界面的后续方案**（含时间统一、工具契约、澄清通道、确认凭据与执行归口、六项老人端界面需求的分阶段做法）：看 `15-agent-flexibility-and-elder-ui-plan.md`。**该文档整体是建议方案**，第 9 节第 4 项与第 7 节「时间」里标了「现状」的段落写的是已经落地的部分，其余仍是设想。
 
 `records/` 下的四个文件（`PROGRESS.md`、`DECISIONS.md`、`INTERFACE_CHANGES.md`、`PITFALLS.md`）从项目开始后持续更新，它们不是一次性报告。
 

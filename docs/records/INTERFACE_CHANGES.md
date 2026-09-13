@@ -2,6 +2,24 @@
 
 任何前后端共享字段、接口路径、枚举或日期格式变化都记录在这里。
 
+## 2026-09-13 统一业务时间（内部改动）
+
+- 所有 HTTP 路径、请求体、响应字段、枚举与日期格式**一个都没变**。`AgentTurnResponse` 的 11 个规范字段原样不动，前端无需同步任何类型。
+- 变的是**每轮提示词的内容**（模型可见，不是接口）：新增【本轮运行信息】给出当前日期（含星期与 ISO 写法）、现在时间、时区名，以及【相对日期怎么算】一节（相对日期由模型按这个基准推算；算出来已经过去时用 `ASK_USER` 复述后请老人确认，不许自己往后推年份）。模型据此输出的 `facts.date` 仍是 `YYYY-MM-DD`，与既有契约一致。旧模型/规则回退路径不读这段文本，行为不变。
+- 行为变化（不涉及字段）：今天已经过去的预约时段不再出现在可选号源里，也不会被写进预约——包括「确认卡生成之后时间才走过去」的情况，这时确认会被拒回重选日期（`stage=ASK_DATE`，回复文案说明该时段已经过去）。**等于此刻的时段同样算过去**，与号源查询的 `appointment_time > 当前时间` 严格互补；这道门**只约束创建/改期**，取消已有预约（`CANCEL_EXISTING` / `CANCEL_MANAGED`）不受影响——办完预约的会话仍留着草稿里那份 `selectedSlot`，拿它拦取消会让老人先重选日期才能取消。
+- 内部 API（不涉及 HTTP）：`MemoParser` 新增接收业务时间锚点的重载（`detect(msg, now)`、`pastWeekdayDate(value, today)`、`resolveRemindAt(..., now)`、`resolveRepeatAnchor(..., today)`、`resolveDay(value, today)`），生产路径由 `FollowupAgentService` 传入 `BusinessClock` 的 `now()`/`today()`；旧的无参重载全部保留、语义不变，仅作单元测试兜底。`DemoScenarioService` 的构造参数新增一个 `BusinessClock`（Spring 注入，无测试直接 new）。两者都不出现在任何 HTTP 契约里。
+- 「只写月日、已过去的日期」不再自动顺延到明年（`RuleFactExtractor`）：同一句「3月5日」在 9 月问会得到今年的 3 月 5 日，由上层请老人重新说，而不是替他定到明年。这是口径收紧，不是格式变化。
+- 新增后端配置 `business.time.zone`（环境变量 `BUSINESS_TIME_ZONE`，默认 `Asia/Shanghai`），并已加进 `compose.yml` 与 `.env.example`。`HEALTH_REPORT_WEEKLY_ZONE` 仍可单独覆盖周报时区，默认跟着它走。配成不存在的时区会在启动时失败。
+- 兼容性：不破坏旧客户端。旧前端不感知时区与提示词变化；接口契约与响应结构完全一致。
+
+## 2026-09-13 老人端界面调整（未提交）
+
+- 唯一的后端字段变化：`task.summary` 里的日期从 ISO 改成 `DATE_LABEL`（`市第一医院 · 心内科 · 2026年9月15日`）。`missingField` 与 `task` 的其余字段、以及所有 HTTP 路径、枚举、请求体均不变。
+- 前端把「恢复办理」的入口从办理卡收敛到助手页顶部操作区：卡里只剩「取消本次办理」，那颗按钮发的是既有的 `CANCEL_TASK` 动作，**没有新增动作类型，也没有新的写接口**。顶部操作区的「继续办理 / 预约复诊」仍是既有的 `CONTINUE`。
+- 预约记录页的三段分组（即将到来 / 过去的 / 已取消的）与默认只摆三条，是**纯前端展示**：数据来源仍是一次 `GET /api/users/{userId}/appointments`，不新增查询参数与接口。
+- 朗读设置从助手页移到「我的」：写的还是既有的语音偏好接口，字段不变；助手页、事项页、地图页读的是同一份 `voicePreference`。
+- 兼容性：不破坏旧客户端。旧前端忽略 `task.summary` 的日期写法即可；后端不依赖任何前端字段。
+
 ## 2026-09-12 取消预约的自然语言确认与批量确认（内部接口）
 
 - 外部 HTTP 路径和 `AgentTurnResponse` 结构不变；现有 `confirmation` 卡片字段继续承载按钮与 `confirmationId`。
@@ -179,3 +197,16 @@
 - 自由语言意图新增 `REMIND_ELDER`（给长辈留提醒，区别于本人记账的 `MANAGE_MEMO`）。
 - 结构化动作新增 `QUERY_CARE_TIMELINE`、`QUERY_CARE_NOTIFICATIONS`；代约确认后返回 `result` 卡（归属与陪同人取自代约记录）。
 - 兼容性：未传 `actorId` 的旧请求字段与行为完全不变。
+
+## 2026-09-13 工具契约强类型与通用澄清能力
+
+**对外 HTTP 契约没有变**：没有新增/删除/改名任何端点，`AgentTurnResponse` 的 12 个字段一个没动，澄清复用既有的 `SELECT_APPOINTMENT_TO_CANCEL` 快捷操作与既有 4 字段 `ToolTrace` 结构。下面记的是内部契约与前端标签的变化。
+
+- **模型可见的工具说明变了（这是本次最实质的对外变化）**：每个工具的参数声明从「一串参数名」升级成带类型/必填/枚举/字段组合约束的结构。模型看到的 JSON 里因此出现 `"type": "enum"`（附 `enum` 取值表）、`"required": true`、以及 `REQUIRES_ALL` / `AT_LEAST_ONE` 两类组合约束；每个工具的参数名去重（已有断言钉住）。**同时是收紧**：`interaction.requestConfirmation` 刻意不声明 `appointmentId`，模型看不到、也填不了这个字段。
+- **新增内部工具 `interaction.askClarification`**（风险等级新设 `CLARIFICATION_ONLY`）：参数 `question` 可选、`candidateTool` 必填且**只能取枚举值 `appointment.queryMine`**。它不建卡、不发 `confirmationId`、不改 `stage`。这是「澄清」成为独立第三条通道的接口形态，说明见 DEC-021。
+- **新增内部工具结果类型 `ToolOutcome.Kind`**（七种：`SUCCESS`、`NO_RESULT`、`MISSING_INFO`、`NEEDS_CLARIFICATION`、`NEEDS_CONFIRMATION`、`STATE_CHANGED`、`FAILURE`）。它只进模型侧的工具循环证据，**不进 HTTP 响应**；`toolTraces` 的四个字段保持原样。
+- **`toolTraces` 里会出现新的 `toolName` 取值**：`interaction.askClarification`（另有既有的 `interaction.requestConfirmation`、`interaction.respondConfirmation` 两条一直在用）。前端若按未知工具名兜底展示，不会白屏——本次仍补齐了三条的中文说明。
+- **前端新增三个中文标签**（`frontend/features/assistant/tool-trace-describe.ts`，纯展示）：`interaction.requestConfirmation` → 「取消预约 · 生成确认卡」，备注按 `scope` 渲染 `ALL` / `DATE_RANGE`（带方向）/ `SINGLE_FILTER`（逐条列出条件）/ `AMBIGUOUS`；`interaction.respondConfirmation` → 「取消预约 · 处理确认卡」，`decision=DENY` 时备注「老人选择保留，没有执行取消」；`interaction.askClarification` → 按 `outcome` 区分「没有查到可以取消的预约」与「已列出 N 条真实候选，等老人选择」。
+- **参数非法时的用户可见行为**：不再落进「没查到」，而是分成「说不清」（请老人补充，并摆出真实候选）与「没得取消」（如实说没有、不摆按钮）两种话术。`DATE_RANGE` 却没给方向、`scope` 取值不在枚举里，都属于前者。
+- **接口文档**：`05-api-contracts.md` 新增「工具契约与通用澄清（2026-09-13）」一节，把上面这些落在对外文档里。
+- 兼容性：外部请求/响应结构与字段零变化，旧前端、旧脚本、旧会话 id 一律照常；变化集中在模型可见的工具说明与 `toolTraces` 的内容。

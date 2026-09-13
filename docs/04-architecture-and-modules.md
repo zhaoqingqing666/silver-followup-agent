@@ -2,7 +2,7 @@
 
 > 文档版本：v0.2　更新日期：2026年9月11日
 
-> 本文中的分包、类名和对象字段包含早期推荐结构。当前源码已采用“单一主模型＋结构化预约草稿＋真实工具”的模型主导架构；写操作确认与执行仍保留在 `FollowupAgentService`，后续再按团队维护需要拆出独立确认服务。
+> 本文中的分包、类名和对象字段包含早期推荐结构。当前源码已采用“单一主模型＋结构化预约草稿＋真实工具”的模型主导架构；写操作的**确认凭据**已拆到 `application/ConfirmationService`，**确认通过后的四类执行**各有归口——取消族在 `application/CancellationExecutor`，其余三类（开新预约 / 备忘 / 代约取消）分别由 `BookingExecutor`、`MemoExecutor`、`ManagedCancelExecutor` 承担，代他人办理另走 `CaregiverBookingExecutor`，统一由 `ConfirmationDispatcher` 按签发时冻结的 `Kind` 分派（**六个取值**，本人自办与代他人办理各成一类，判据只有 `Kind` 一个）；要取消/要写的对象都在签发时冻进凭据，执行时不再现找「当前那一条」，授权三样之外这一类动作执行所需的草稿（备忘正文与提醒时间等）也随快照一起存、缺了就整份作废；其余业务分支仍留在 `FollowupAgentService`（2026-09-13 见 DEC-022、DEC-023 与 DEC-024）。
 
 ## 一、推荐形态：模块化单体
 
@@ -36,6 +36,8 @@ flowchart LR
 会话身份由 `AgentRole`（`ELDER` / `FAMILY` / `VOLUNTEER`，`isCaregiver()` 即非 `ELDER`）表示，拆成两个轴：`userId` 是数据轴（这次会话服务谁），`actorId` 是能力轴（谁在操作），只用于关系校验与话术，不注入任何工具参数。身份固化在 `ConversationState` 里，因为确认接口只带 `conversationId`。
 
 当前代码中的实际对应关系是：`AgentSystemPrompt` 是唯一主提示词，`LlmConversationPlanner` 负责首轮理解、草稿补全、工具选择，并通过 `continueAfterTools` 阅读真实工具结果继续同一用户轮次。`AgentRuntime` 负责权限审核和续跑，`FollowupAgentService` 最多执行 3 轮只读工具循环、拦截重复调用，并复用已有无号、冲突、重复预约和模糊匹配处理。模型可用时不运行关键词快速路由，也不使用 Stage 二次覆盖模型结论；`ToolRegistry` 共注册 17 个只读工具：15 个两端通用，另 2 个仅家属/志愿者可见（`care.timeline`、`care.notifications`）。模型可见的工具由 `plannerTools(role)` 按角色过滤，但过滤不等于安全，`ToolPolicy` 在执行时再按角色与风险等级校验一次。写操作仍通过确认卡完成，`ModelGateway` 隔离具体模型厂商。
+
+工具的**参数**也有一道统一的门：每个参数的声明（类型、必填、枚举取值、字段组合约束）写在 `ToolRegistry` 一处，模型看到的说明就是这份声明的投影，判罚集中在 `ToolContract` 一处，**模型多塞的字段一律丢弃、空串算没给、枚举统一大写**。工具结果分成七种情形（成功 / 无结果 / 缺少信息 / 需要澄清 / 需要确认 / 状态变化 / 失败），「没查到」和「你没说清」因此给的是两套不同的话、做的是两件不同的事。风险通道也分三条且互不相通：只读走 `evaluate`、确认走 `evaluateConfirmation`、澄清走 `evaluateClarification`——**澄清走不到发凭据那条路上**。另外，模型这一轮给出合法工具调用时，Java 不再用原句关键词覆盖它的意图（`AgentRuntime.Outcome.hasContractCheckedToolCall()` 是这道门）。三条通道里只有 `interaction.respondConfirmation` 在**运行时这一层**自己查参数、而且查完只回绝不回退——它没有下游可依赖，直接翻成确认或拒绝，再往下就是执行（2026-09-13 见 DEC-022）。详见 DEC-020 / DEC-021 与 `11-agent-architecture-and-controlled-tool-calling.md` 七.5 节。
 
 对话状态与任务状态是两个维度：`DialogueMode` 表示本轮自由交流、支持性交流或流程办理，`TaskStatus` 表示是否存在未完成复诊任务。流程节点只决定恢复任务时从哪里继续，不能覆盖用户本轮真正的问题。地图模块同样保持工具化：`RouteGuideTool` 查询院外路线，`FacilityGuideTool` 查询院内位置，`TravelGuideService` 为事项页组合两类只读结果。
 
@@ -108,7 +110,14 @@ backend/src/main/java/com/team/silveragent/
 ├─ application/          编排与门禁留在根包：FollowupAgentService、AgentOrchestrator、
 │  │                     AgentRuntime、ToolRegistry、ToolPolicy、ActionValidator、
 │  │                     SafetyGuard、ConversationState/Store/Lifecycle、
-│  │                     AppointmentRecordStore、TurnProgress
+│  │                     AppointmentRecordStore、TurnProgress、
+│  │                     ToolContract/ToolOutcome（工具参数统一判罚与七种结果，见 DEC-020）、
+│  │                     ConfirmationInteractionTool/ClarificationInteractionTool
+│  │                     （确认与澄清两条互不相通的交互通道，见 DEC-021）、
+│  │                     ConfirmationService/CancellationExecutor
+│  │                     （确认凭据的唯一出处与取消族执行器，见 DEC-022；
+│  │                      一份授权＝凭据＋动作类型＋完整目标集合，三样都存在
+│  │                      ConversationState 上、一起进快照、一起清）
 │  ├─ care/              协同照护：CareService、CareBookingService、CareCatalogRepository
 │  ├─ demo/              演示场景：DemoScenario、DemoScenarioService
 │  ├─ health/            健康记录与报告：HealthRecordStore、HealthRecordParser、
@@ -116,6 +125,7 @@ backend/src/main/java/com/team/silveragent/
 │  ├─ longterm/          跨对话长期记忆：MemoryStore（常去的医院、科室、习惯时段）
 │  ├─ memo/              备忘：MemoStore、MemoParser、MemoCommandParser
 │  ├─ preference/        用户设置：UserPreferenceStore（朗读开关、语速、音色）
+│  ├─ time/              业务时间：BusinessClock（业务时区与可注入时钟，见 DEC-019）
 │  └─ travel/            出行：TravelGuideService
 ├─ domain/
 │  ├─ model/             领域对象与 DTO

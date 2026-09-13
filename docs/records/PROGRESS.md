@@ -2,6 +2,104 @@
 
 进度文件记录“当前事实”，不写大段过程描述。功能完成后由负责人更新，并附对应 Pull Request 或提交。
 
+## 2026-09-13 确认与执行架构整理（第四阶段 4B + 4B 修复轮，未提交）
+
+- 分支 `refactor/application-packages`，这一步只做 4B：**把「确认通过之后」那三类业务执行从 `confirm()` 里搬出去**（BOOKING / MEMO / CANCEL_MANAGED），CANCEL_APPOINTMENTS 上一轮已经归 `CancellationExecutor`，这一轮不动。不提交、不推送。
+- **4B 首轮评审未通过，本轮只修确认边界，不扩业务。**评审否掉的是三条把「确认卡上的目标」与「实际执行的对象」分开的缝，加上一条「确认失败变成 HTTP 500」。修法见下一节「4B 修复轮」。
+- **`confirm()` 现在只做统一确认流程**：校验会话与 `confirmationId` → 从 `ConfirmationService` 取出**签发时冻结**的 `PendingOperation` → 处理拒绝 → 确认时单次消费凭据 → 按 `Kind` 分派 → 汇总结果、走原来的出站对账。它不再读 `pendingAction`、`appointmentId` 这些可变字段来决定「执行哪件事」——那几个字段现在只剩「给界面看」的用途。
+- 新增 `application/ConfirmationDispatcher`（121 行，包级私有 `@Component`）：持有五个执行器，`dispatch(state, operation, approved, support)` 是唯一入口。分发次序逐条与重构前对齐：备忘和代约取消各自连「拒绝」一起接管（它们被拒时也要把自己那份草稿收干净）；剩下两类先处理拒绝、再处理执行；预约那一条的**过期时段检查排在写库之前**（代他人办理也绕不过去，与旧代码一致）。
+- 四个业务执行器，每个只管**一种**写操作，不建「大而全执行器」：`BookingExecutor`（129 行，开新预约 + 拒绝）、`MemoExecutor`（备忘的确认/拒绝/直写）、`ManagedCancelExecutor`（代约取消 + 通知安排者）、`CaregiverBookingExecutor`（代他人办理的开单与取消）。加上上一轮的 `CancellationExecutor`，`PendingOperation.Kind` 的六个取值各有归口，**没有任何一个取值会「落到」预约那条路上**——这条有专门的测试钉住。取值是六个而不是四个，是修复轮拆出来的（本人自办与代他人办理各成一类，见下）。
+- **执行器不复制数据库安全校验。**归属、当前状态、事务原子性仍然只由现有业务工具负责（`MockAppointmentTool.cancelAll` 的 `@Transactional` + `user_id` + `status='CONFIRMED'`），执行器组织的是「**什么时候跑**」与「跑完之后会话停在哪一页」。这一点沿用 DEC-022 决定五，没有第二套查询口径。
+- 新增 `application/ConfirmationSupport`（**包级私有抽象类**）：执行器要用到的那二十几个会话收尾动作（`respondWithPlan` / `advance` / `toolError` / `recordToolFailure` / `draftSlotExpired` / `resumeInterruptedReplies` …）在这里声明，`FollowupAgentService extends ConfirmationSupport` 并逐个 `@Override` 成包级私有的委派。选择抽象类而非接口是为了**不变宽可见性**：接口方法隐式 public，而 `FollowupAgentService` 是 public，DEC-018 明确禁止为了让拆分类能用而放宽封装。这个 support 对象是**分派时按参数传进去的**（`dispatcher.dispatch(state, operation, approved, this)`），不在构造器里注入——否则 `FollowupAgentService → Dispatcher → Executor → Support` 会绕成 Spring 循环依赖。
+- 构造器**没变长**：`FollowupAgentService` 只是把 `CancellationExecutor` 这一个参数换成了 `ConfirmationDispatcher`，仍是 38 参；五个执行器的依赖都收在分派器里。
+- 用户可见行为逐项保持：BOOKING 确认时**重新检查号源与时段是否仍有效**（号被人抢走则照旧走工具错误出口，凭据照样烧掉）；原有提醒、材料、出发建议、家属通知一字未改；MEMO 的确认/拒绝/重复确认行为未变；CANCEL_MANAGED 的归属校验、取消结果、通知与会话收尾未变；`confirmationId` 仍然**只能消费一次**；旧凭据、过期凭据、类型不可信的恢复状态继续 fail closed，一个写操作都不执行。
+- Dev Container 验证（2026-09-13，`/workspace/backend`）：修复轮先跑专项（`ConfirmationDispatcherTests` + `ManagedCancelExecutorTests` + `ConfirmationDispatchFlowTests` + `MemoConfirmationRecoveryTests` + `MemoToolFailureTests` + `ConfirmationServiceTests` + `ConversationRecoveryTests` + `CancellationExecutorTests`、`CancelScopeTests`），**79 项全绿**；随后后端全量 `mvn test` **477 项，0 失败 0 错误，BUILD SUCCESS**（4B 首轮基线 462，修复轮净增 15 项）。
+- 本阶段的测试覆盖（按 4B 要求逐条）：六个 `Kind` 各到各家、任意 `Kind` 不误落预约路（`ConfirmationDispatcherTests`）；改掉 `pendingAction`/`appointmentId` 换不掉已签发操作（分派器与端到端各一条）；`confirmationId` 重复确认不重复写库（预约、备忘、代约取消各一条）；会话恢复后仍执行原始 `Kind` 与完整目标（预约卡与代约取消卡各一条，走真实的库）；每类执行失败时凭据与会话状态的收场；拒绝确认不调用任何业务执行器。
+- 行数与分包：`FollowupAgentService` 5327 → **5185 行**；`application/` 37 → **43 个类**，11244 → **11977 行**。**这一步降的是耦合，不是体积**——搬走的是三类执行的编排，留下的是分派层与端口声明；修复轮往 `ConfirmationService`（304 → 417 行）与几个执行器里补的是护栏与注释，那就更不是「拆」。别再拿它当「已经拆完了」。
+- 修复轮改动的文件：`ConfirmationService`（Kind 拆六个、`requireTargetCount`、`payloadIntact`）、`ConversationStore`（快照加六个备忘草稿字段）、`FollowupAgentService`（四个签发点：代约取消冻住 id、按 `caregiving()` 选本人/代办的 `Kind`）、`ManagedCancelExecutor`（改写：只认冻结目标）、`CaregiverBookingExecutor`（按 id 取消）、`CareBookingService`（新增 `cancelAppointment`）、`MemoExecutor`（写异常收口）、`ConfirmationDispatcher`（按六个 `Kind` 分派，去掉 `caregiving()`）、`ConfirmationSupport`（删掉已无用的 `arrangedPlan` 端口）。业务语义、对外接口、`AgentTurnResponse` 字段、`confirmationId` 的取值与生命周期一律未变。
+- 对外接口、`AgentTurnResponse` 字段、`confirmationId` 的取值与生命周期一律未变，`docs/05-api-contracts.md` 与 `INTERFACE_CHANGES.md` 无需改动。
+### 4B 修复轮（2026-09-13，同分支，未提交）
+
+首轮评审未通过，四条确认边界**本轮全部修掉**，不再列为「以后处理的风险」：
+
+- **一、确认卡上的目标 == 实际执行的对象。**三处缝一起补：
+  - `CANCEL_MANAGED`：签发时把 `plan.appointmentId()` 冻进 `PendingOperation.targetIds`（以前传空列表）；`ManagedCancelExecutor` 只取消凭据上那一条，**执行时不再重找"当前那一份代约安排"**。按 id 的查询只用来取展示与通知字段（谁安排的、约在哪天），归属/存在/可取消仍由 `appointmentTool.cancel` 那条 SQL（`id + user_id + status='CONFIRMED'`）判；原目标失效就**什么都不取消**，返回友好提示，绝不换一条顶替。
+  - 照护端 `CANCEL_APPOINTMENTS_CAREGIVER`：`CaregiverBookingExecutor.cancel` 不再忽略 `operation.cancellationTargets()` 去调 `cancelUpcoming()`，改用新增的 `CareBookingService.cancelAppointment(caregiverId, elderUserId, appointmentId)` —— 按明确 appointmentId 的 `@Transactional` 入口，照护关系、预约归属、当前状态三项校验与原来的协同通知（含"通知原安排者"）都在里面。`cancelUpcoming` 保留：`CareBookingController` 那个"取消当前预约"的入口仍在用它。
+  - **两侧成对的条数护栏**：签发侧 `ConfirmationService.requireTargetCount`（`CANCEL_MANAGED` 与 `CANCEL_APPOINTMENTS_CAREGIVER` 必须**恰好一条**；本人整批取消至少一条；不针对已有对象的类型必须为空），执行侧 `PendingOperation.singleTarget()`（不是恰好一条返回 `null`，执行器什么都不做）。**不静默取第一条**。
+- **二、分派不再看 `caregiving()`。**`PendingOperation.Kind` 由四个拆成六个（`BOOKING` / `BOOKING_CAREGIVER` / `CANCEL_APPOINTMENTS` / `CANCEL_APPOINTMENTS_CAREGIVER` / `CANCEL_MANAGED` / `MEMO`），本人自办与代他人办理是**两类动作**而不是"一类动作加一个执行时再看一眼的开关"。`ConfirmationDispatcher` 的 switch 里现在一次都不出现 `caregiving()`，路由完全由签发时冻住的类型决定。
+- **三、备忘确认的会话恢复。**`ConversationStore.Snapshot` 带上 `pendingMemoText / pendingMemoAt / pendingMemoRepeat / pendingMemoDay / memoReturnStage / memoNeedsApproval` 六个字段，与 `confirmationId / confirmationKind / confirmationTargetIds` 一起存、一起回。恢复后确认写入的就是卡片上那一条（正文与提醒时间逐字相同）。**旧快照缺这些草稿时 fail closed**：`restored()` 里加 `payloadIntact`，凭据在门口就当不可信、当场作废并请老人重说，绝不写一条残缺的备忘；签发侧 `issue()` 同样要求草稿已在（否则是调用点的编程错误）。
+- **四、备忘写入异常不再变成 500。**`MemoExecutor.write` 把 `memoTool.create` 的异常收在 `try/catch` 里走统一 `toolError`。失败后的账是明确的：凭据在 `consume` 里**已经消费掉**、草稿已被 `leaveConfirmation` 清干净，所以不会重复写库，页面上也不会再留一张实际已经作废的确认卡。
+- 补的回归（全部落在真实的库 / 真实 HTTP 上）：发卡后库里新增另一条更早代约，确认仍只取消卡上那一条；照护端发卡后列表顺序变化，仍只取消冻结目标（中途重启一次）；冻结目标已取消、或已不属于该就诊人时，一条替代的都不取消；备忘卡签发→落库→重启→确认，写入正文与原提醒时间；旧快照缺备忘草稿时在门口作废、库里零条；`memoTool.create` 抛异常时 HTTP 200 + 友好话术 + 库里零条 + 凭据已烧；拒绝确认不调用任何取消或备忘写工具。
+- 未解决（本轮范围之外，如实列出）：`FollowupAgentService` 仍是 5173 行量级的大类（拆体积不是这一轮的目标）；`CaregiverBookingExecutor` 里那条 `"CANCEL".equals(pendingAction)` 死条件仍未删（删掉会让人以为这里曾有过一条分支，已在 Javadoc 写明它为什么可以忽略）。
+- 反向验证的口径：修复轮里 `requireTargetCount` 判错的那一版是**真的红过**——`ConfirmationDispatchFlowTests` 的代约取消卡整条报 `TOOL_ERROR`（"目标集合必须为空，实际 1 条"）才被发现，改对之后转绿，这条是红的→绿的完整来回。其余判据是"断言的就是库里的那一行/那一张卡"，没有另做变异测试；其中"旧快照缺草稿在门口作废"这一条本想临时关掉 `payloadIntact` 验证它会变红，该改动被权限分类器按"削弱安全校验"拦下，遂放弃，**这一条只有正向验证**。
+- 用户自己跑在 `:8080`/`:3000` 的实例未受影响。
+
+## 2026-09-13 确认与执行架构整理（第四阶段 4A，未提交）
+
+- 分支 `refactor/application-packages`，这一步**只做 4A：凭据与授权范围的数据正确性**，不提交、不推送。执行器迁移（预约 / 备忘 / 代约取消）留作 4B 单独一轮，避免一次改动过大。
+- 新增 `application/ConfirmationService`（304 行，包级私有）：确认凭据的签发、校验、消费、废止、出站对账，全部只在这一处发生。`Decision` 是「这次请求过没过」的裁决，`PendingOperation`（嵌套 record）是「这件事是哪一类、对哪几条对象」。
+- **一份授权＝凭据＋动作类型＋完整目标集合，三样都由这个类管，全部写在 `ConversationState` 上、全部随 `ConversationStore.Snapshot` 持久化。**三样同生共死：`issue` 一起写，`consume`、`clear`、`retire` 一起清（只清凭据是最容易犯、又最看不出来的错——凭据为空时所有判据都说"没有待确认的东西"，可状态里还躺着一个类型和一个目标集合）。
+- **动作类型在签发时由调用方给死，确认时不再重算。**四处签发各自都知道自己在建哪张卡（取消预约 / 开新预约 / 代约取消 / 备忘），就在调用点写死传进去；`pendingAction` 这个可变字段不再参与分派。不这样做会留下一个真实的错配：卡是取消卡，签发之后中间某一步把 `pendingAction` 写成了别的值，确认时重算类型就会让**同一把钥匙去执行另一件事**——老人点头的是取消，执行的是开单。
+- **认不出来的一律 fail closed。**从快照还原时认不出的类型名一律不认（`Kind.stored` 返回 `null`），**绝不退成 `BOOKING`**：`BOOKING` 恰好是全类里唯一会真去开一条新预约的类型，一个写坏或回滚出来的陌生类型名会静默变成一次开单。
+- **会话恢复改成完整恢复。**原先一次批量取消重启后只剩一条目标（`pendingAppointmentIds` 不进快照）；现在目标集合进快照，恢复出来的那一批与签发时逐条相同。改这条的是评审——第一版把它当"既有降级"保留并写了单测钉住，判断错了：那条降级没有任何产品理由，只是目标集合当初没进快照的副作用，而卡片上写着两条、实际只取消一条时，老人看到的界面和"取消成功"完全一样，他会以为那个号已经退了（见 DEC-022 的「评审修订」）。
+- **补发只在整份授权逐项相同时复用原凭据（评审第二轮收尾）。**原先的判据只是"手上有没有一份读得出来的凭据"，会漏掉最坏的一种组合：**屏幕上是一张新卡，钥匙却是上一件事的**（比如新的开新预约卡配着上一轮那张批量取消的凭据）——老人对着新卡点头，执行出来的是旧事，界面上没有任何东西提示他。现在 `ensureIssued` 逐项比对类型与目标集合，任何一处不同都签新的、旧的连同它的类型与范围一起作废；目标集合先取规范形态（去重、保留顺序，不排序——「先取消哪条」是调用方给的信息）再比。
+- **签发侧不再把 `null` 当空列表。**`issue` 与 `ensureIssued` 的 `kind`、`targetIds` 都不接受 `null`，空目标必须显式传 `List.of()`。`null` 在这套字段里的含义已经定死是"旧快照缺字段 / 不可信"（见上一条），在这里悄悄转成空列表就等于用一个只有签发侧才会做的转换，盖住调用方少写的那件事——而这两者存进快照之后读起来一模一样，重启一回就再也说不清当初是"本来没有目标"还是"目标丢了"。宁可让调用点在编码时就炸。
+- **旧快照整份作废，绝不部分执行。**旧快照只有 `confirmationId`，还原不出"当初授权了什么"，所以这份凭据当场作废、退出等待确认、请老人重新确认——**不按剩下的那一条凑合执行**。代价是旧快照里那张卡一律作废（哪怕是本来就没有目标的卡，因为看不出是"本来没有目标"还是"目标丢了"）。
+- 新增 `application/CancellationExecutor`（94 行，包级私有）：把目标**原样**交给那条事务（只去重、不筛选——多一套口径就多一个把卡片上没写的那几条也取消掉的机会），清掉 `pendingAppointment*`，收拾会话手里已经消失的 `appointmentId`，并决定收在哪一页（执行完落「已取消」、保留预约落「已完成」、被打断过就回到打断它的那一步且**不动任务状态**）。
+- 归属校验与批量原子**仍然刻意不搬进执行器**：`MockAppointmentTool.cancelAll` 是 `@Transactional`，那条 SQL 自带 `user_id` 与 `status='CONFIRMED'`，先整批查一遍再在同一个事务里逐条取消。在执行器里再查一遍只会多出第二套**没有事务**的口径，而先查后删之间正好就是别人改状态的那个窗口。执行器管的是「**什么时候跑**」，不是「这行是不是他的」；代他人办理的取消（`executeCaregiverBooking`）不走这里。
+- 范围修订作废旧凭据、批量原子取消、归属校验、重复确认防重四条行为逐条保持不变，并都有测试钉住（`CancelScopeTests` 6 项 + 会话恢复端到端 2 项）。
+- `respondConfirmation` 的参数校验统一到 `ToolContract` 一处，而且**查完只回绝、不回退**。若照抄澄清那条的「校验不过就按 intent 回退」，会踩到一个具体的坑：intent 是 `CONFIRM_ACTION` 时会话又停在等待确认时，`modelRoute` 把它接成 `CONFIRM_PENDING`——**一次参数写错的调用换来一次真的执行**。诚实地说，这一条**没有翻转任何用户可见的路由**（旧的手写 `toUpperCase` + 两个 `if` 判断同样会拒掉缺失与非法取值），它买到的是判罚只有一个出处、`decision` 一定是那两个枚举值之一、去掉一份重复的比较，以及**把这个坑写成会红的断言**（见 `PITFALLS.md` 同日条目）。
+- `AgentRuntime.Outcome.acceptedToolCall()` 改名为 `hasContractCheckedToolCall()`（2 处调用点）：名字说的是「契约查过了」而不只是「有东西」。「非空 ⇒ 已校验」是产品路径给的性质（只有 `modelProposal` 会往 `proposedTools` 里放东西，放之前必须过 `ToolContract`），不是这个 record 自己保证的。
+- `FollowupAgentService` 删掉 `pendingCancellationIds`（按状态推取消目标的第二份口径）与 `retireCancellationConfirmationForRevision`（范围修订时作废旧凭据），四处签发与十一处清空改为调 `ConfirmationService`，`finish` / `finishWithoutModel` 两个出口的开头各加一次 `confirmations.reconcile(...)`。
+- Dev Container 验证（2026-09-13，`/workspace/backend`）：全量 `mvn test` **438 项，0 失败 0 错误**（只跑这一遍——`Snapshot` 是落库的格式，不是可反复重跑的东西）。4A 相关：`ConfirmationServiceTests` 28 项（凭据只认签发时定下的类型、认不出的类型不执行任何写操作、目标集合为空与读不出来是两回事、旧快照整份作废而不是部分执行、多目标逐条活过重启、恢复不出范围就不许复用、补发不继承旧范围、补发只在类型与目标都相同时复用（不同则换新且旧的消费不了）、`kind`/`targetIds` 传 `null` 是编程错误且不动原授权、三条退场路径都清干净三样）、`ConversationRecoveryTests` 2 项（真库端到端：批量卡重启后取消掉的仍是签发时那两条；把 `confirmationKind`/`confirmationTargetIds` 从 `state_json` 里抹掉冒充旧快照后，凭据失效、库里两条 `CONFIRMED` 一条不动）、`CancellationExecutorTests` 8 项、`CancelScopeTests` 6 项、`AgentRuntimeRoutingTests` 17 项（含非法 `decision` 被回绝、缺 `decision` 被回绝、`decision` 归一化三例）。
+- **每条修复都做了反向复现**（能反向复现的修复才算修复）：把 `Snapshot.from` 强制写成 `null, null`，批量恢复那项立刻红（`expected: "CANCEL_APPOINTMENTS" but was: null`）；把 `restored` 退回旧的部分回填（类型退 `BOOKING`、目标退回 `pendingAppointmentId`/`appointmentId`），6 项红，含端到端的旧快照用例；把 `ensureIssued` 退回「只要读得出凭据就复用」，3 项红（不同类型不复用、不同目标集合不复用、只有完全相同才复用）。每次改完即回滚，测试复绿。
+- 收尾那一轮（授权一致性）按评审要求只重跑确认卡相关的五个类，**61 项全绿**（`ConfirmationServiceTests` 28、`ConversationRecoveryTests` 2、`CancellationExecutorTests` 8、`CancelScopeTests` 6、`AgentRuntimeRoutingTests` 17），不重跑全量——`ConfirmationService` 的改动只影响签发与补发两处，全量基线仍是上面那次的 438。
+- 用户自己跑在 `:8080`/`:3000` 的实例未受影响。
+- 对外接口、`AgentTurnResponse` 的字段、`confirmationId` 的取值与生命周期一律未变，`docs/05-api-contracts.md` 与 `INTERFACE_CHANGES.md` 无需改动。
+- 未解决 / 留给 4B 与评审：
+  - **四类待确认动作里只有一类搬了家（4B）。**`PendingOperation.Kind` 有 `BOOKING / CANCEL_APPOINTMENTS / CANCEL_MANAGED / MEMO` 四个取值，但只有 `CANCEL_APPOINTMENTS` 真的走 `CancellationExecutor`；`MEMO`、`CANCEL_MANAGED` 与 `BOOKING` 仍在 `confirm()` 里各自回到原来的私有方法。`Kind` 是分派的唯一依据，但**别把这个类读成「它现在管所有写动作」**；按业务逐个抽执行器是 4B 的活，本轮按评审要求刻意不一起做。
+  - **行数没降**（`FollowupAgentService` 5133 → 5327 行；抽走的是一件事的判罚与执行，换回来的是调用点上更长的说明）。构造器 36 参 → 38 参，已核实没有任何测试直接 `new FollowupAgentService(...)`，只影响 Spring 注入。这一步整理的是**边界**，不是体积。
+  - **后续（2026-09-13，4B 已完成）**：上面第一条「四类待确认动作里只有一类搬了家」是 4A 当时的现状，作为历史原样保留；**现状以这一条为准**——`BOOKING`、`MEMO`、`CANCEL_MANAGED`，以及本人的预约取消与照护端的取消，现在**全部**由 `ConfirmationDispatcher` 按**签发时冻结的 `Kind`** 分派到各自的执行器，`confirm()` 不再按 `pendingAction`、`caregiving()` 或任何可变会话字段重新推断执行路径。落地决定见 `DECISIONS.md` 的 **DEC-023** 与 **DEC-024**。
+
+## 2026-09-13 统一业务时间（未提交）
+
+- 分支 `refactor/application-packages`，本阶段**只统一业务时间**：不重构工具、不改第一阶段页面。
+- 新增 `application/time/BusinessClock`：可注入、可测的 `Clock` + 业务时区。时区来自 `business.time.zone`（环境变量 `BUSINESS_TIME_ZONE`，默认 `Asia/Shanghai`），配一个不存在的时区会在启动时明确失败，不会被悄悄忽略。
+- **业务钟面与审计钟面分开**，这是本阶段的核心决定。预约日期与时段截止、号源目录的 cutoff、「今天/明天」、提醒钟面、照护代约、号源与日程播种一律走 `BusinessClock`；`created_at` 这类历史时间戳仍按 JVM 默认时区写，**一个字都没改**——旧行是按那个口径写进去的，改了等于把历史数据凭空变老八小时（需求里「不直接批量给旧数据加八小时」说的就是这件事）。两者之间需要比较时经 `BusinessClock.toAuditClock` 换算。
+- 号源与目录查询原先在 SQL 里用 `CURRENT_DATE`/`CURRENT_TIME`，那是**数据库连接的 JVM 默认时区**，和 Java 侧 `LocalDate.now()` 是两套钟。开发容器是 UTC，北京时间 00:00–08:00 之间，SQL 眼里的「今天」还停在昨天，昨天下午已经过去的时段会被当成可约号源端给老人。三处号源查询（`appointment.querySlots`、`queryUpcomingSlots`、`queryAlternatives`）与 `CareCatalogRepository.availableDates` 全部改成绑定业务时钟参数。
+- `FollowupAgentService` 里 17 处 `LocalDate.now()` / `LocalDateTime.now()` / `MemoParser.nowInDemoZone()` 改走注入的时钟：上下文构建、日期范围校验、取消范围里「最近一次」的挑选、取消日期、出行改期、历史预约挑选、过期日期判断、备忘「现在」、可选日期。
+- 每轮提示词新增【本轮运行信息】：当前日期（含星期与 ISO 写法）、现在时间、时区（中英文名）。日期取 `context.currentDate()`、时刻取同一个时钟，两边同源，不会出现「提示词说今天是 9 号、Java 按 8 号校验」。同一节写明：相对日期（明天、下周三、下个月）由模型自己按这个基准推算，算出来已经过去时**不许自己往后推年份**，用 `ASK_USER` 复述后请老人确认；今天已经过去的时段不是可预约时间。`AgentContext` 刻意不加字段（4 参 / 5 参构造一个没动，18 个 Spring 上下文零影响）。
+- `RuleFactExtractor` 删掉两条「过去日期悄悄顺延到明年」的规则：「3月5日」一律按今天所在的这一年理解，原样返回，改由上层请老人重新说。替老人把 3 月 5 日定到明年，就是把一次询问换成一次八个月后的错约。
+- 今天已经过去的时段不再可约，闸门是同一条判断的两个位置：建确认卡时、以及**确认时**。后者是关键——确认卡上没有时间闸门，老人可能隔夜才按确认，08:00 建的 09:00 卡到 10:30 就不该还能提交。被挡住时退回重选日期，医院、科室、陪同、出行这些已经问过的信息都留着。
+- 两道口径必须与号源查询一致：**等于此刻也算过期**（查询用的是 `appointment_time > 当前时间`，差一毫秒都查不出来），所以判断写成 `!isAfter(now)` 而不是 `isBefore(now)`。确认时那道门**只挡「照草稿开新预约」**（建新预约/改期）：办完预约的会话仍留着当初那份 `selectedSlot`，拿它去拦取消，会让老人先重选一遍日期才能取消一条跟那个时段无关的预约（评审发现，见下）。
+- 确认卡的绝对日期不因跨午夜改变：卡上存的是选号那一刻的 `Slot`（绝对日期 + 时刻），`confirm` 写的就是它，不重新解读「明天」。新增用例把这条钉住（23:59 建卡、00:01 确认，落库仍是 17 号 09:00）。
+- 全库只找到一处跨钟面比较：`HealthReportService.weeklySentThisWeek` 的「本周一零点」是业务钟面，而 `family_notifications.created_at` 是审计钟面，改经 `toAuditClock` 换算。历史时间字段的语义逐个核实过：全部是审计钟面，只补注释不改写法；`data.sql` 的 `CURRENT_TIMESTAMP` 种子照旧。
+- 新增配置写进 `compose.yml` 与 `.env.example`（`BUSINESS_TIME_ZONE`，默认上海）；`health-report.weekly.zone` 默认跟着它走。
+- Dev Container 验证（2026-09-13，`/workspace/backend`）：完整回归 **341 → 361 项全部通过**（新增 20：业务时钟 5、相对日期 8、业务时间线 4、提示词时间 3），固定时钟覆盖明天/跨月/跨年/上海凌晨/今天已过时段/跨午夜确认卡。另在 `:8099` 用内存库单起一个后端冒烟：`/api/demo/health` 与 `POST /api/demo/scenarios/normal` 正常，演示日期与真实今天一致；把 `BUSINESS_TIME_ZONE` 设成非法值启动则明确失败（`Unknown time-zone ID: Not/AZone`），证明这个配置真的被读进 bean。用户自己跑在 `:8080`/`:3000` 的实例未受影响。
+- 评审修复（2026-09-13，同一分支，未提交）——三项发现全部修掉，另把两处「配置改了不生效」的生产入口接上业务时钟：
+  1. `confirm()` 里那道过期时段检查原先排在 `CANCEL_EXISTING` 之前，完成过预约的会话又留着完整 `selectedSlot`，于是「预约时间过去后再确认取消」会被错误送回选日期。加 `booksFromDraft(state)`（`pendingAction` 为 `null` 或 `CREATE` 才拦），取消类一律放行。
+  2. `business.time.zone` 补上两个生产入口：`DemoScenarioService` 改注入 `BusinessClock`、用 `checkupDate(clock.today())`/`dinnerDate(clock.today())`（原先调无参静态版，钉死在 `DEFAULT_ZONE`，改了配置后步骤文案里的日期会和真正播种进 `user_schedules` 的日程对不上）；`MemoParser` 新增带业务时间锚点的重载（`detect(msg, now)`、`pastWeekdayDate(value, today)`、`resolveRemindAt(..., now)`、`resolveRepeatAnchor(..., today)`、`resolveDay(value, today)`，私有的 `pastWeekdayMention`/`remindAtOf`/`dayOf` 同步收锚点），`FollowupAgentService` 的 9 处生产调用改传 `clock.now()`/`clock.today()`。旧的无参重载全部保留、语义不变，继续给单元测试兜底（`DEMO_ZONE` 现在只服务这些兜底路径，注释已改写）。
+  3. `slotAlreadyPassed` 改成 `!isAfter(clock.now())`，与号源查询口径对齐。
+  - 同步修正 `application.yml` 里「静态方法也读取配置」的错误注释：无参静态日期方法钉在 `Asia/Shanghai`，不读配置；生产路径（含 `DemoScenarioService`）走注入的时钟。
+  - 新增回归 **5 项**（`BusinessTimeFlowTests` +4、`MemoParserClockTests` +1），每条都先验证过「去掉修复即变红」：取消已完成预约不得被过期时段拦成 `ASK_DATE`（实际拿到 `CANCELLED`）；等于此刻的号源不得落库（`ASK_DATE`）；演示场景步骤日期跟着业务时钟（09-16 的「下周三」= 09-23，按真实系统时钟算会是 09-16）；「明天早上八点」的备忘按业务时钟存成 09-17 08:00（去掉锚点会存成系统时钟的 09-14 08:00）；锚点重载直接决定「今天」（钉 2026-09-14/09-17 两个与真实今天无关的锚点）。
+  - Dev Container 验证（2026-09-13，`/workspace/backend`）：**只跑受影响的时间、取消与备忘专项 9 个类共 117 项，全部通过**（业务时间线 8、业务时钟 5、相对日期 8、提示词时间 3、取消范围 4、备忘解析钟点 34、备忘流程 45、备忘命令 5、演示场景 5）。按评审要求本轮未机械重跑 361 项完整回归；改动为纯追加（新增重载、Spring 注入的构造参数），`mvn test` 会先编译整个测试树，编译已通过。
+- 未解决 / 留给评审：
+  - `MemoParser` 里备忘提醒的「过去年份顺延」逻辑**这次仍未动**（600 行静态解析器、测试耦合重，而且它本来就用 `Asia/Shanghai`），要不要一起改需要单独评估。取「现在」那一处已按上面的评审修复接入业务时钟。
+  - `RollingUserScheduleInitializer` 的**无参**静态日期方法（`checkupDate()` 等）仍固定跟着 `BusinessClock.DEFAULT_ZONE`，不随 `business.time.zone` 覆盖走——静态方法没有注入点。生产调用方 `DemoScenarioService` 已改走注入时钟；这几个无参方法现在只剩「不启动 Spring 的单元测试」在用。
+  - 审计钟面留下的已知窄口径：`memos.created_at` 按 JVM 默认时区写，而长驻备忘在页面上**按月分组**（`memo-list-view.tsx` 用 `createdAt`）。于是北京时间月初 00:00–08:00 记下的备忘会被分到上个月。不改的原因见 DEC-019：改了会让新旧行混用两种语义。要不要给这一处单独做展示层换算，留待评审。
+
+## 2026-09-13 老人端界面调整（未提交）
+
+- 分支 `refactor/application-packages`，本阶段**只动老人端界面**，不碰模型路由、业务执行和全局语音导航；界面调整一律不改写库路径。
+- 朗读设置从助手页搬到「我的」：助手页不再有自己的朗读设置块，语速只有一个权威来源（`app/page.tsx` 的 `voicePreference`）写回后端偏好，助手页、事项页、地图页、气泡喇叭读的都是它。`TtsSettings` 的入参从整个 `VoicePreference` 收成 `speechRate` 一个数字，就是不让它再管自动朗读开关。
+- 助手页的「继续办理」从两颗收敛成一颗：办理大卡改成紧凑摘要（当前复诊办理 / 进行中 / `市第一医院 · 心内科 · 2026年9月15日` / 取消本次办理），恢复办理用顶部操作区那颗按钮（有任务时它就叫「继续办理」）。原大卡里那颗重复的「继续办理」删掉，但**没有**留下「点了取消就直接删数据」的捷径——取消仍旧只发一句话给助手，照常走确认门禁。
+- 页头固定的根因不在助手页，在 `MobileShell`：那层 `overflow-hidden` 会把它自己变成滚动容器，而它的高度跟着内容长、自己永远不滚，于是**所有老人页**的 `sticky top-0` 都没有可粘的余量。改成 `overflow-x-clip`——保留横向裁切的本意，但不产生滚动容器。助手页原来自己写死 `sticky top-[76px]` 的次级栏一并并进 `PageHeader` 的 `children`，大字模式下标题行变高也不会露出缝。
+- 预约记录默认只摆最近三次即将到来的复诊，其余按「过去的复诊 / 已取消的预约」分组，展开后才出现；分组在读到数据时算一次并连结果一起存进 state（渲染期不读时钟，顺带让分组在停留期间不自己跳）。「即将到来」只认 `status=CONFIRMED` 且时间未到——拿一条过期记录冒充「即将复诊」比少显示一条更坏。展开/收起的判据与「现在是展开还是折叠」无关，否则全部记录都是「即将到来」时展开后按钮会把自己藏掉（见 PITFALLS）。
+- 开场麦克风提示气泡每次新进入老人端显示一次，应用内部切页不再弹；点它、点别处、按住麦克风都会收起，并同时掐掉正在播的提示音。气泡念不念由「自动朗读」开关决定（开着才念），念的时候用同一份语速与音量。
+- 后端只改一行：`task.summary` 的日期从 ISO 改成 `DATE_LABEL`（`2026年9月15日`）。理由是这行字原样出现在老人端的办理卡上，`2026-09-15` 太像编号；改的是这一行的呈现，`plan.date` / `result.date` 本来就是中文，现在三处同源同格式。
+- Dev Container 验证（2026-09-13，`/workspace`）：后端完整回归 **341/341 通过**；前端 `npm run build` 通过；`oxlint` 与 HEAD 基线逐条比对**未引入新命中**（仍是那 4 条既有命中，仅行号位移）。页面用 Playwright 的 chromium 按 390×844 手机视口实检 **39/39 通过**（气泡、朗读设置、页头固定普通/大字、预约记录默认三次与展开收起、真模型跑一遍预约流程后的紧凑卡），另跑一组边界数据 **5/5 通过**（10 条全是「即将到来的已确认」时展开后仍能收起）。
+- 未解决：`mvn -o test` 在一次运行里出现过 218 个 `ApplicationContext` 报错（表现为 `USER_SCHEDULES` / `APPOINTMENT_SLOTS` 表不存在），重跑与在 HEAD 基线上重跑都是全绿，**没能复现，原因未知**。可以排除的方向：全部 18 个 `@SpringBootTest` 都显式覆盖成 H2 内存库，测试不与开发服务器共用 `backend/data/silver-agent` 文件库，两边不存在争用同一个数据库文件这回事。
+
 ## 2026-09-12 自然语言确认与批量取消预约（未提交）
 
 - 新增独立的 `CALL_CONFIRMATION_TOOL` 模型动作，以及 `interaction.requestConfirmation`、`interaction.respondConfirmation` 两个确认工具。模型把自然语言归一成结构化范围或确认决定；Java只查真实预约、维护凭据和执行门禁。
@@ -387,3 +485,25 @@
 - 验证：`target/` 清空后**全新构建**，后端 **317 项全绿**（0 失败 0 错误）；前端零改动。队长本人起服务手测，四条主流程功能正常。
 - 文档同步：`04-architecture-and-modules.md` 的「当前实际分包」换成本次的新布局并写明 `longterm` 的命名理由；`11-agent-architecture-and-controlled-tool-calling.md` 第八节那份「建议拆分」是按技术分层（`runtime/ policy/ workflow/`），与本次按业务域的实际切法不是一回事，加了指引；决定记在 DEC-018，踩坑记在 PITFALLS 同日两条。
 - 留给下一步：切类（把 `FollowupAgentService` 按业务拆开）等前端大改定了接口形状再做，否则边界容易划错。**别把这次当成「结构问题已解决」**——它只把邻居归了位。
+
+## 2026-09-13 第三阶段：工具契约强类型化 + 通用澄清能力（先接预约取消链路）
+
+- 范围：为模型工具的声明补上参数类型、必填项、枚举与字段组合约束，Java 统一校验；把「成功 / 无结果 / 缺少信息 / 需要澄清 / 需要确认 / 状态变化 / 失败」七种结果说清楚；把「模型提个自然问题 + 真候选来自数据库 + 支持文字/语音/点选」的澄清交互做出来，并且**澄清不等于确认、不生成执行授权**；堵住「模型给了合法工具调用、Java 还拿原句关键词覆盖意图」这个洞。**只接预约取消一条链路**，备忘与健康记录这次没动。
+- 新增（后端）：`agent/planning/ToolArgument.java`、`agent/planning/ToolConstraint.java`（`REQUIRES_ALL` / `AT_LEAST_ONE`）、`application/ToolContract.java`、`application/ToolOutcome.java`（七种 `Kind` + 带进度的 `Step`）、`application/ClarificationInteractionTool.java`。
+- 改动（后端）：`agent/planning/PlannerTool.java`（诊断声明升成强类型，保留只服务旧测试的 `List<String>` 兼容构造器）、`application/ToolRegistry.java`（所有工具补齐声明并注册 `interaction.askClarification`；`interaction.requestConfirmation` 刻意不声明 `appointmentId`）、`application/ToolPolicy.java`（新增 `evaluateClarification`，风险等级新设 `CLARIFICATION_ONLY`）、`application/AgentOrchestrator.java`（`Route.ASK_CLARIFICATION`）、`application/AgentRuntime.java`（执行前统一过 `ToolContract.check`；`Outcome.acceptedToolCall()`；包级私有 `rejection(...)` / `acceptedArguments(...)`，6 参测试构造器逐字未动）、`application/FollowupAgentService.java`（取消支线重写：`beginCancellationStep` / `clarifyCancellationTargets` / `modelCancellationSelection`；`Outcome.acceptedToolCall()` 守门禁）、`agent/planning/AgentSystemPrompt.java`（新增「工具参数是怎么声明的」「工具结果的七种情形」「范围说不清时先问，不要硬填」三节）。
+- 改动（前端，纯展示）：`features/assistant/tool-trace-describe.ts` 新增 `describeCancelScope(req)` 与三条 `interaction.*` 的中文标签。
+- 关键取舍：**风险分成三条互不相通的通道**——只读走 `evaluate`、确认走 `evaluateConfirmation`、澄清走 `evaluateClarification`。澄清工具因此**根本走不到发凭据那条分支上**（不是被拦住，是没有那条路）。澄清轮的回复走 `respondWithoutModel`，`speechText == reply`，按钮上的字和口播的话逐字一致，润色模型碰不到。决定记在 DEC-020 / DEC-021。
+- 新增测试：`ToolContractTests` 17 项（五种判罚、空串算没给、未声明字段被丢弃、宽松日期/时段写法、模型看到的说明里带 `"type":"enum"` / `"required":true` / `REQUIRES_ALL` 且**不含 `appointmentId`**、参数名无重复）；`ClarificationFlowTests` 6 项（模型提问 + 真候选 + 无执行授权；澄清后说「确认」一条也不动；无候选时说清「没查到」且不摆按钮；`DATE_RANGE` 没给方向 → 追问不执行；范围不在枚举里 → 不执行；**合法工具调用不被「都取消」关键词覆盖**）。既有批量取消测试全部保留。
+- 验证：`target/` 清空后全新构建，后端 **389 项全绿**（0 失败 0 错误，比阶段前的 317 项多出 72 项）；`tsc --noEmit` 与 `oxlint` 通过（改动文件零告警）；接口文档与前端类型已同步。
+- 回归守卫有效性实测：把 requirement-6 的守卫改回旧写法重跑，那张**莫须有的 2 条批量取消卡立刻复现**，加回即消失——这个洞是真的，不是只为测试而加的。
+- 后续（2026-09-13，第四阶段）：上面的 `Outcome.acceptedToolCall()` 已改名为 `hasContractCheckedToolCall()`（名不符实，见 DEC-022 决定六），本条目里的旧名字按当时写法保留。`interaction.respondConfirmation` 的参数校验也在那一阶段统一到了 `ToolContract`。
+- 真实模型评测（deepseek-v4-flash，独立端口 8099 + 内存 H2，全程没碰你跑着的 :8080 / :3000）：
+  - 模糊指代：一次跑出 `interaction.askClarification`，`questionFromModel=true`，2 条真候选摆成 `SELECT_APPOINTMENT_TO_CANCEL`，**无卡、无 `confirmationId`**；另一次模型判成 `scope=ALL` 直接出卡（卡上逐条列出目标）。**模型在这两条路之间摇摆**，都还在安全边界内。也见到过一次 `questionFromModel=false`（模型写的话被结构门拦下，用了 Java 固定问句）。
+  - 澄清 → 点选候选 → 单条确认卡 `092e0540` → 确认 → `stage=CANCELLED`，另一条预约仍在库里。这是要求 4 / 5 端到端的实证。
+  - 修改取消范围：「全都要」出卡 `48f726b7` → 改口只取消下午那条 → 新卡 `76a968be`，新旧 id 不同；拿旧 id 确认 → 「刚才那份确认已经失效或者已经办理过了」。
+  - 非法参数：「9月32号」→「您说的『9月32号』这个日期不存在，九月只有30天…」，无卡、库里没动。
+  - **工具失败这一路真模型没被触发**（不注入故障没法稳定构造），只有单测覆盖，如实记在这里。
+- 未解决风险（两条都是展示层面的，功能与安全边界不受影响）：
+  1. **澄清轮不改 `stage`**：这一轮沿用上一件事的 stage（冷会话下见过 `ASK_HOSPITAL`，也见过 `COMPLETED`）。前端只在 `turn?.task?.active` 为真时才显示阶段标签，目前看不出问题，但语义上仍然是「澄清不动状态」的副作用。
+  2. **澄清 / 追问轮不下发仍有效的那张待确认卡**：见到的例子是「9月32号」那一轮 `stage` 报 `AWAITING_CONFIRMATION` 而 `confirmation` 为空，于是先前发出去的那张卡的按钮从这次响应里消失了。这与 DEC-016 给越界提示块修过的是同一类问题（回复另起一件事时，老人正要按的按钮不能跟着不见），值得下一阶段按同样思路处理。
+- 未提交、未推送。接口文档同步：`05-api-contracts.md` 新增「工具契约与通用澄清（2026-09-13）」，`INTERFACE_CHANGES.md` 同日一条，决定记在 DEC-020 / DEC-021，踩坑记在 PITFALLS 同日两条。等审查。
