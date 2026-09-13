@@ -97,10 +97,21 @@ management:
 demo:
   user-id: ${DEMO_USER_ID:user-001}
 
+business:
+  time:
+    # 业务时区：预约、取消、提醒、备忘推算、照护代约、号源与日程播种里的「今天/现在」都按这个时区算。
+    # 开发容器的 JVM 默认时区是 UTC，不用这个的话北京时间凌晨那八小时会算成昨天。
+    # 生产路径都经 BusinessClock 读这个值（含 DemoScenarioService、FollowupAgentService 传给
+    # MemoParser 的锚点）；RollingUserScheduleInitializer 那几个无参静态方法是给不启动 Spring 的
+    # 用例兜底的，钉在 Asia/Shanghai 上，不读这里的配置。
+    zone: ${BUSINESS_TIME_ZONE:Asia/Shanghai}
+
 health-report:
   weekly:
     # 每周一早上八点发一份健康小结给家属。后端每次启动还会补发一次（同一周只发一条），
     # 所以周一那一刻没开机也不会漏。
     enabled: ${HEALTH_REPORT_WEEKLY_ENABLED:true}
     cron: ${HEALTH_REPORT_WEEKLY_CRON:0 0 8 * * MON}
-    zone: ${HEALTH_REPORT_WEEKLY_ZONE:Asia/Shanghai}
+    # 周一早上八点说的是业务时区里的八点，默认跟着 business.time.zone 走，
+    # 需要单独改时仍然可以用 HEALTH_REPORT_WEEKLY_ZONE 覆盖。
+    zone: ${HEALTH_REPORT_WEEKLY_ZONE:${BUSINESS_TIME_ZONE:Asia/Shanghai}}

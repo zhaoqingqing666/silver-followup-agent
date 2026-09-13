@@ -1,5 +1,6 @@
 package com.team.silveragent.infrastructure.persistence;
 
+import com.team.silveragent.application.time.BusinessClock;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -20,9 +21,11 @@ public class RollingAppointmentSlotInitializer implements ApplicationRunner {
     private static final DateTimeFormatter ID_DATE = DateTimeFormatter.BASIC_ISO_DATE;
 
     private final JdbcTemplate jdbc;
+    private final BusinessClock clock;
 
-    public RollingAppointmentSlotInitializer(JdbcTemplate jdbc) {
+    public RollingAppointmentSlotInitializer(JdbcTemplate jdbc, BusinessClock clock) {
         this.jdbc = jdbc;
+        this.clock = clock;
     }
 
     /** 号源 id 的拼法只此一处：回滚重放、场景重置和回归用例都按这个规则找号源。 */
@@ -56,7 +59,9 @@ public class RollingAppointmentSlotInitializer implements ApplicationRunner {
                 """, (rs, rowNum) -> new DepartmentSeed(
                 rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4)));
 
-        LocalDate start = LocalDate.now();
+        // 号源从「业务时区的今天」开始铺。用服务器默认时区的话，UTC 容器里北京时间凌晨那八小时
+        // 铺出来的第一天是昨天，老人一进页面看到的「今天」根本没有号。
+        LocalDate start = clock.today();
         LocalDate end = start.plusMonths(1);
         for (DepartmentSeed department : departments) {
             for (LocalDate date = start; !date.isAfter(end); date = date.plusDays(1)) {

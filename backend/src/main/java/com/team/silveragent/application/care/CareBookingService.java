@@ -1,6 +1,7 @@
 package com.team.silveragent.application.care;
 
 import com.team.silveragent.application.AppointmentRecordStore;
+import com.team.silveragent.application.time.BusinessClock;
 
 import com.team.silveragent.domain.model.ToolModels.Slot;
 import com.team.silveragent.domain.model.ToolModels.TravelPlan;
@@ -34,10 +35,11 @@ public class CareBookingService {
     private final MaterialChecklistTool materialTool;
     private final ScheduleTool scheduleTool;
     private final TravelTool travelTool;
+    private final BusinessClock clock;
 
     public CareBookingService(JdbcTemplate jdbc, CareCatalogRepository catalog, AppointmentRecordStore records,
                               AppointmentTool appointmentTool, MaterialChecklistTool materialTool,
-                              ScheduleTool scheduleTool, TravelTool travelTool) {
+                              ScheduleTool scheduleTool, TravelTool travelTool, BusinessClock clock) {
         this.jdbc = jdbc;
         this.catalog = catalog;
         this.records = records;
@@ -45,6 +47,7 @@ public class CareBookingService {
         this.materialTool = materialTool;
         this.scheduleTool = scheduleTool;
         this.travelTool = travelTool;
+        this.clock = clock;
     }
 
     public record BookingRequest(
@@ -76,7 +79,7 @@ public class CareBookingService {
         requireBound(caregiverId, elderUserId);
         CareCatalogRepository.Department department = catalog.department(hospitalId, departmentId)
                 .orElseThrow(() -> new IllegalArgumentException("没有找到该科室"));
-        List<LocalDate> dates = catalog.availableDates(hospitalId, department.name(), LocalDate.now(), 3);
+        List<LocalDate> dates = catalog.availableDates(hospitalId, department.name(), clock.today(), 3);
         List<DateWindow> result = new ArrayList<>();
         for (LocalDate date : dates) {
             List<Slot> slots = appointmentTool.queryAvailableSlots("", hospitalId, department.name(), date);
@@ -104,7 +107,7 @@ public class CareBookingService {
         CareCatalogRepository.Department department = catalog.department(request.hospitalId(), request.departmentId())
                 .orElseThrow(() -> new IllegalArgumentException("没有找到该科室"));
         LocalDate date = LocalDate.parse(request.date());
-        if (date.isBefore(LocalDate.now())) throw new IllegalArgumentException("该日期已经过去，请重新选择");
+        if (date.isBefore(clock.today())) throw new IllegalArgumentException("该日期已经过去，请重新选择");
 
         String bookingId = "CB-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
         List<Slot> available = appointmentTool.queryAvailableSlots(bookingId, hospital.id(), department.name(), date);
@@ -158,7 +161,7 @@ public class CareBookingService {
             throw new IllegalArgumentException("请补齐医院、科室、日期、号源和交通方式");
         }
         AppointmentRecordStore.AppointmentView target = records.allFor(elderUserId).stream()
-                .filter(item -> "CONFIRMED".equals(item.status()) && !item.date().isBefore(LocalDate.now()))
+                .filter(item -> "CONFIRMED".equals(item.status()) && !item.date().isBefore(clock.today()))
                 .findFirst()
                 .orElseThrow(() -> new IllegalArgumentException("这位长辈当前没有可修改的进行中复诊预约"));
         CareCatalogRepository.Hospital hospital = catalog.hospital(request.hospitalId())
@@ -166,7 +169,7 @@ public class CareBookingService {
         CareCatalogRepository.Department department = catalog.department(request.hospitalId(), request.departmentId())
                 .orElseThrow(() -> new IllegalArgumentException("没有找到该科室"));
         LocalDate date = LocalDate.parse(request.date());
-        if (date.isBefore(LocalDate.now())) throw new IllegalArgumentException("该日期已经过去，请重新选择");
+        if (date.isBefore(clock.today())) throw new IllegalArgumentException("该日期已经过去，请重新选择");
 
         String bookingId = "CB-MOD-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
         List<Slot> available = appointmentTool.queryAvailableSlots(bookingId, hospital.id(), department.name(), date);
@@ -227,7 +230,7 @@ public class CareBookingService {
     public AppointmentRecordStore.AppointmentView toggleAccompany(String caregiverId, String elderUserId, boolean accompany) {
         requireBound(caregiverId, elderUserId);
         AppointmentRecordStore.AppointmentView target = records.allFor(elderUserId).stream()
-                .filter(item -> "CONFIRMED".equals(item.status()) && !item.date().isBefore(LocalDate.now()))
+                .filter(item -> "CONFIRMED".equals(item.status()) && !item.date().isBefore(clock.today()))
                 .findFirst()
                 .orElseThrow(() -> new IllegalArgumentException("这位长辈当前没有进行中的复诊预约"));
         String columnValue = accompany ? caregiverId
@@ -255,7 +258,7 @@ public class CareBookingService {
 
     private boolean hasUpcoming(String elderUserId) {
         return records.allFor(elderUserId).stream()
-                .anyMatch(item -> "CONFIRMED".equals(item.status()) && !item.date().isBefore(LocalDate.now()));
+                .anyMatch(item -> "CONFIRMED".equals(item.status()) && !item.date().isBefore(clock.today()));
     }
 
     private boolean isRole(String caregiverId, String elderUserId, String role) {
@@ -303,9 +306,48 @@ public class CareBookingService {
     public AppointmentRecordStore.AppointmentView cancelUpcoming(String caregiverId, String elderUserId) {
         requireBound(caregiverId, elderUserId);
         AppointmentRecordStore.AppointmentView target = records.allFor(elderUserId).stream()
-                .filter(item -> "CONFIRMED".equals(item.status()) && !item.date().isBefore(LocalDate.now()))
+                .filter(item -> "CONFIRMED".equals(item.status()) && !item.date().isBefore(clock.today()))
                 .findFirst()
                 .orElseThrow(() -> new IllegalArgumentException("这位长辈当前没有进行中的复诊预约，无需取消"));
+        appointmentTool.cancel("CB-CANCEL-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase(),
+                target.appointmentId(), elderUserId);
+
+        String elderName = jdbc.queryForObject("SELECT name FROM users WHERE id=?", String.class, elderUserId);
+        notifyCaregiver(caregiverId, elderUserId,
+                "已取消" + elderName + "的复诊：" + managedText(target) + "。号源已释放，可重新安排。",
+                "cancel");
+        if (target.arrangedBy() != null && !target.arrangedBy().equals(caregiverId)) {
+            notifyCaregiver(target.arrangedBy(), elderUserId,
+                    "取消通知：已取消您代约的复诊：" + managedText(target) + "。预约与关联提醒已失效。",
+                    "cancel");
+        }
+        return target;
+    }
+
+    /**
+     * 家属/志愿者取消长辈名下<b>指定的那一条</b>预约（确认卡上写的是哪一条，就只取消哪一条）。
+     *
+     * <p>与 {@link #cancelUpcoming} 的区别只在"取哪一条"：那个取的是"当前进行中的那一条"，
+     * 适合照护端页面上直接点取消；这里取的是调用方给死的一条，因为助手那张确认卡在签发时
+     * 就已经把对象写给老人看过了，执行时再按"当前那一条"现找，中间别人又代约了一条更早的，
+     * 同一张卡按下去取消的就是另一条——而界面上从头到尾写的是原来那条。
+     *
+     * <p>三道校验一个都没少，只是都对着指定的那一条做：照护关系（{@code requireBound}）、
+     * 预约归属（记录按 {@code elderUserId} 取，且 {@code appointmentTool.cancel} 那条 SQL 自带
+     * {@code user_id}）、当前状态（{@code status='CONFIRMED'}）。任何一道不过就抛，<b>绝不改取消别的</b>。
+     * 通知与 {@code cancelUpcoming} 保持一致：给操作者一条回执，原安排者是别人时再通知对方。
+     */
+    @Transactional
+    public AppointmentRecordStore.AppointmentView cancelAppointment(String caregiverId, String elderUserId,
+                                                                    String appointmentId) {
+        requireBound(caregiverId, elderUserId);
+        if (appointmentId == null || appointmentId.isBlank()) {
+            throw new IllegalArgumentException("这张取消卡上没有指定要取消的预约，没有执行任何操作");
+        }
+        AppointmentRecordStore.AppointmentView target = records.allFor(elderUserId).stream()
+                .filter(item -> item.appointmentId().equals(appointmentId))
+                .findFirst()
+                .orElseThrow(() -> new IllegalArgumentException("这条预约不属于这位就诊人，或已经不存在，没有执行取消"));
         appointmentTool.cancel("CB-CANCEL-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase(),
                 target.appointmentId(), elderUserId);
 

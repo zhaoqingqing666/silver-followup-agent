@@ -11,6 +11,7 @@ import com.team.silveragent.application.memo.MemoCommandParser;
 import com.team.silveragent.application.memo.MemoParser;
 import com.team.silveragent.application.memo.MemoStore;
 import com.team.silveragent.application.longterm.MemoryStore;
+import com.team.silveragent.application.time.BusinessClock;
 import com.team.silveragent.application.travel.TravelGuideService;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -80,13 +81,29 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 @Service
-public class FollowupAgentService {
-    /** 模型对取消对象的结构化选择；valid=false 表示工具参数不完整，绝不回退猜测用户原话。 */
+public class FollowupAgentService extends ConfirmationSupport {
+    /**
+     * 模型对取消对象的结构化选择；valid=false 表示工具参数不完整，绝不回退猜测用户原话。
+     *
+     * <p>{@code rejection} 是那份参数被契约判罚时的第一条判罚，带过来是为了说清「缺的是什么」：
+     * 缺参数（{@code MISSING_INFO}）和不唯一（{@code NEEDS_CLARIFICATION}）都是让老人再选一次，
+     * 但对老人说的话和系统里的下一步不是一回事。
+     */
     private record CancellationSelection(boolean valid, String scope, LocalDate date, String direction,
                                          LocalTime time, String period, String position,
-                                         String hospital, String department) {
+                                         String hospital, String department,
+                                         ToolContract.Rejection rejection) {
         boolean batch() { return "ALL".equals(scope) || "DATE_RANGE".equals(scope); }
     }
+
+    /**
+     * 取消支线走完一步之后：给老人看的那份响应，加上这一步到底是什么结果。
+     *
+     * <p>结果类型不能靠读中文反推——「没有符合条件的预约」「我还不能确定您想取消哪些」
+     * 「请从下面的真实预约里选一条」「确认卡已生成」在文字上都是几句话，在系统里却是四种不同的
+     * 下一步。这里顺手把类型带出来，随工具证据一起回给模型（{@code outcomeKind}）。
+     */
+    private record CancellationStep(ToolOutcome.Kind kind, AgentTurnResponse response, String detail) { }
     private static final int MAX_MODEL_TOOL_ROUNDS = 3;
     /** 一轮最多接受几张图：再多会超过并发识别池的批次，也会让这一轮明显变慢。 */
     private static final int MAX_IMAGES_PER_TURN = 3;
@@ -97,8 +114,9 @@ public class FollowupAgentService {
     private static final int MAX_IMAGE_DATA_URL_CHARS = 4_000_000;
     /** 老人只传图、没写文字时的默认问法。 */
     private static final String DEFAULT_IMAGE_QUESTION = "请帮我看看这些图片里的药品或材料是什么、有什么要注意的。";
-    private static final DateTimeFormatter DATE_LABEL = DateTimeFormatter.ofPattern("yyyy年M月d日");
-    private static final DateTimeFormatter TIME_LABEL = DateTimeFormatter.ofPattern("HH:mm");
+    /** 执行器回读同一份日期/时间格式，不能各写一份（差一个字老人看到的就是两套说法）。 */
+    static final DateTimeFormatter DATE_LABEL = DateTimeFormatter.ofPattern("yyyy年M月d日");
+    static final DateTimeFormatter TIME_LABEL = DateTimeFormatter.ofPattern("HH:mm");
     private static final Pattern SPOKEN_DATE = Pattern.compile("(\\d{1,2})月(\\d{1,2})[日号]?");
     /** 取消筛选同时接受“9月12日”和老人常说/常输的“9.12号”。 */
     private static final Pattern CANCELLATION_DATE =
@@ -180,6 +198,15 @@ public class FollowupAgentService {
     private final TurnProgress turnProgress;
     private final MemoryStore memories;
     private final ConfirmationInteractionTool confirmationInteraction;
+    private final ClarificationInteractionTool clarificationInteraction;
+    /** 确认凭据与待确认操作登记的唯一出处；本类只负责「什么时候问老人要凭据」。 */
+    private final ConfirmationService confirmations;
+    /**
+     * 确认通过之后的业务执行：按签发时定下的 {@code Kind} 交给对应执行器。
+     * 本类只负责「什么时候问老人要凭据」，具体写库与各自的事务都在执行器与业务工具里。
+     */
+    private final ConfirmationDispatcher dispatcher;
+    private final BusinessClock clock;
     private final String defaultUserId;
     private final Map<String, ConversationState> sessions = new ConcurrentHashMap<>();
     /** 工具循环中的中间响应不能写入对话，也不能提前再调用一次回答模型。 */
@@ -220,6 +247,10 @@ public class FollowupAgentService {
             TurnProgress turnProgress,
             MemoryStore memories,
             ConfirmationInteractionTool confirmationInteraction,
+            ClarificationInteractionTool clarificationInteraction,
+            ConfirmationService confirmations,
+            ConfirmationDispatcher dispatcher,
+            BusinessClock clock,
             @Value("${demo.user-id:user-001}") String defaultUserId) {
         this.appointmentTool = appointmentTool;
         this.careGuideTool = careGuideTool;
@@ -255,6 +286,10 @@ public class FollowupAgentService {
         this.turnProgress = turnProgress;
         this.memories = memories;
         this.confirmationInteraction = confirmationInteraction;
+        this.clarificationInteraction = clarificationInteraction;
+        this.confirmations = confirmations;
+        this.dispatcher = dispatcher;
+        this.clock = clock;
         this.defaultUserId = defaultUserId;
     }
 
@@ -456,7 +491,7 @@ public class FollowupAgentService {
             }
         }
         AgentContext context = new AgentContext(state.stage.name(), knownFacts(state),
-                LocalDate.now(), conversations.recentMessages(state.id), identityOf(state),
+                clock.today(), conversations.recentMessages(state.id), identityOf(state),
                 conversations.recentVision(state.id));
         // 「把图上的字念一遍」不走模型：这种问题只要求逐字照抄，让语言模型过一手反而可能
         // 把规格、文号、日期改写掉。识别结果本身就是权威的，直接念。
@@ -512,8 +547,6 @@ public class FollowupAgentService {
         }
         AgentOrchestrator.Route route = outcome.route();
         CancellationSelection structuredCancellation = modelCancellationSelection(outcome);
-        boolean structuredConfirmationCall = outcome.modelDriven()
-                && outcome.actionType() == PlannerActionType.CALL_CONFIRMATION_TOOL;
         if (outcome.modelDriven()) prepareModelIntentState(state, outcome.intent());
         if (stopped(state) && !allowedWhenStopped(route)) return stoppedResponse(state);
         // 模型模式下的备忘 / 健康数值 / 发周报：模型只认出“这句话属于这三件事”，
@@ -525,7 +558,10 @@ public class FollowupAgentService {
         }
         AgentTurnResponse entityConfirmation = handlePendingEntityConfirmation(state, value, facts);
         if (entityConfirmation != null) return entityConfirmation;
-        if ("CANCEL_EXISTING_APPOINTMENT".equals(state.sideTask) && !structuredConfirmationCall) {
+        // 模型这一轮给出的是<b>合法</b>工具调用时，下面的关键词兜底整段不跑：它的意图已经由调用本身
+        // 说清楚了，不能再用原句里的「都取消」「最近」把范围改回来。判断依据是「参数过了契约校验」，
+        // 不是「动作类型长得像确认」——模型调一个只读工具（比如 appointment.queryMine）同样算数。
+        if ("CANCEL_EXISTING_APPOINTMENT".equals(state.sideTask) && !outcome.hasContractCheckedToolCall()) {
             // “都取消 / 9月12日前的都取消”是在承接上一轮预约列表，不应重新掉回意图识别，
             // 也不能被单条候选解析抢先消费；这里只生成整组确认卡，仍不直接写库。
             if (state.stage != ConversationState.Stage.AWAITING_CONFIRMATION
@@ -872,6 +908,7 @@ public class FollowupAgentService {
             case REMIND_ELDER -> remindElder(state, value);
             // 模型点名了一个执行不了的工具，intent 也归不到任何业务链路。绝不复用它的 replyDraft，
             // 也不走 DIRECT_ANSWER（那条路会暂停正在办理的任务）：由 Java 明确回绝，任务状态原地不动。
+            case ASK_CLARIFICATION -> askClarification(state, outcome);
             case REFUSE_UNSUPPORTED_TOOL -> respondWithoutModel(state,
                     "抱歉，这个操作我没办法直接执行。您可以换一种说法，或者让我先帮您查一下已确认的预约。",
                     modelSuggestedReplies(state));
@@ -882,6 +919,33 @@ public class FollowupAgentService {
     }
 
     /**
+     * 澄清交互的出口：模型问的那句话 + Java 从真实工具取回的候选。
+     *
+     * <p><b>澄清不是确认</b>：这里不建卡、不发 {@code confirmationId}、不改任务状态，只把问题和一个
+     * 能干下去的分支摆出来。凭据是全部写操作的唯一钥匙，澄清碰不到它，所以「模型问了一句」
+     * 变不出任何执行授权——老人下一步仍然要在真实候选里选一条，再由 Java 生成确认卡。
+     */
+    private AgentTurnResponse askClarification(ConversationState state, AgentRuntime.Outcome outcome) {
+        String question = outcome.proposedTools() == null || outcome.proposedTools().isEmpty()
+                ? null : outcome.proposedTools().get(0).arguments().get("question");
+        String candidateTool = outcome.proposedTools() == null || outcome.proposedTools().isEmpty()
+                ? "appointment.queryMine"
+                : outcome.proposedTools().get(0).arguments()
+                        .getOrDefault("candidateTool", "appointment.queryMine");
+        // 候选永远来自真实工具。枚举目前只有一条取值，将来扩别的对象（比如备忘、材料）时在这里加分支，
+        // 加不到的就是空候选，落成「没查到」而不是拿模型的话顶上。
+        List<AppointmentSummary> candidates = switch (candidateTool) {
+            case "appointment.queryMine" -> myAppointmentTool.search(state.id, state.userId, null, null, null);
+            default -> List.of();
+        };
+        // 承接取消支线：老人接下来无论是点按钮还是直接说“9月10日那条”，都还在同一件事上。
+        rememberInterruptedTask(state, "CANCEL_EXISTING_APPOINTMENT");
+        ClarificationInteractionTool.Prompt prompt = clarificationInteraction.askWhichAppointmentToCancel(
+                state.id, candidates, question, "您想取消的是哪一条预约？可以从下面的真实预约里直接选一条。");
+        return respondWithoutModel(state, prompt.reply(), prompt.choices());
+    }
+
+    /**
      * 模型主导的有界只读工具循环。现有异常处理方法仍负责查询真实数据、更新权威草稿并
      * 生成合法按钮；中间结果不会直接发给用户，而是作为结构化证据回到同一个主模型。
      */
@@ -889,6 +953,7 @@ public class FollowupAgentService {
                                                AgentRuntime.Outcome initial) {
         AgentRuntime.Outcome current = initial;
         AgentTurnResponse latestToolResponse = null;
+        ToolOutcome.Step latestOutcome = null;
         Set<String> executed = new LinkedHashSet<>();
 
         for (int round = 1; round <= MAX_MODEL_TOOL_ROUNDS; round++) {
@@ -913,23 +978,28 @@ public class FollowupAgentService {
             turnProgress.toolProposed(state.id, freshCalls);
             AgentRuntime.Outcome executable = withToolCalls(current, freshCalls);
             deferFinalization.set(true);
+            AgentToolStep step;
             try {
-                latestToolResponse = dispatchOutcome(state, originalMessage, executable);
+                step = dispatchToolStep(state, originalMessage, executable);
             } finally {
                 deferFinalization.remove();
             }
+            latestToolResponse = step.response();
+            latestOutcome = step.outcome();
 
-            // 确认卡、完成卡和安全暂停都是业务终点，不能为了措辞再让模型改变动作。
+            // 确认卡、澄清问题、完成卡和安全暂停都是业务终点，不能为了措辞再让模型改变动作。
+            // 澄清尤其不能：候选按钮是按 Java 那份回复生成的，让模型换个说法问，文字就和按钮对不上了。
             if (latestToolResponse.confirmation() != null
+                    || latestOutcome.kind() == ToolOutcome.Kind.NEEDS_CLARIFICATION
                     || state.stage == ConversationState.Stage.EMERGENCY_PAUSED
                     || state.stage == ConversationState.Stage.COMPLETED
                     || state.stage == ConversationState.Stage.PARTIAL) {
                 return finalizeToolEvidence(state, latestToolResponse, latestToolResponse.reply());
             }
 
-            String evidence = toolLoopEvidence(round, freshCalls, latestToolResponse);
+            String evidence = toolLoopEvidence(round, freshCalls, latestToolResponse, latestOutcome);
             AgentContext nextContext = new AgentContext(state.stage.name(), knownFacts(state),
-                    LocalDate.now(), conversations.recentMessages(state.id), identityOf(state),
+                    clock.today(), conversations.recentMessages(state.id), identityOf(state),
                     conversations.recentVision(state.id));
             turnProgress.mark(state.id, TurnProgress.Kind.PLANNING);
             current = agentRuntime.continueAfterTools(originalMessage, nextContext, state, evidence);
@@ -944,6 +1014,39 @@ public class FollowupAgentService {
 
         return finalizeToolEvidence(state, latestToolResponse,
                 "我已经完成当前查询。为避免重复查询，请从现有结果中选择，或告诉我想修改哪项条件。");
+    }
+
+    /**
+     * 工具循环里的一步：响应本身，加上「这一步是哪类结果」。
+     *
+     * <p>分类只在两个地方产生，不靠读中文反推：取消支线自己知道（{@link CancellationStep}），
+     * 其余的看响应形状——带确认卡就是等确认，阶段真的走到 COMPLETED 就是状态变了，剩下算成功。
+     * 判不出来时说成功，比编一个错的结果类型要好。
+     */
+    private record AgentToolStep(AgentTurnResponse response, ToolOutcome.Step outcome) { }
+
+    private AgentToolStep dispatchToolStep(ConversationState state, String value,
+                                           AgentRuntime.Outcome outcome) {
+        String tool = outcome.proposedTool() == null ? "" : outcome.proposedTool();
+        // 取消支线的结果类型只有它自己知道（摆的是卡、是候选、还是没查到），所以单独接一遍。
+        // 目前只读工具的映射落不到这条路由，这一段是分类口径的兜底，不是某条必经之路。
+        if (outcome.route() == AgentOrchestrator.Route.CANCEL_EXISTING_APPOINTMENT) {
+            CancellationStep step = beginCancellationStep(state, outcome.facts(), value,
+                    outcome.modelDriven() ? outcome.replyDraft() : null,
+                    modelCancellationSelection(outcome));
+            return new AgentToolStep(step.response(),
+                    new ToolOutcome.Step(step.kind(), tool, step.detail()));
+        }
+        AgentTurnResponse response = dispatchOutcome(state, value, outcome);
+        ToolOutcome.Kind kind;
+        if (response.confirmation() != null) {
+            kind = ToolOutcome.Kind.NEEDS_CONFIRMATION;
+        } else if (ConversationState.Stage.COMPLETED.name().equals(response.stage())) {
+            kind = ToolOutcome.Kind.STATE_CHANGED;
+        } else {
+            kind = ToolOutcome.Kind.SUCCESS;
+        }
+        return new AgentToolStep(response, new ToolOutcome.Step(kind, tool, response.stage()));
     }
 
     private AgentTurnResponse finishToolLoopDecision(ConversationState state, String originalMessage,
@@ -1022,10 +1125,16 @@ public class FollowupAgentService {
     }
 
     private String toolLoopEvidence(int round, List<PlannerToolCall> calls,
-                                    AgentTurnResponse response) {
+                                    AgentTurnResponse response, ToolOutcome.Step outcome) {
         Map<String, Object> value = new LinkedHashMap<>();
         value.put("round", round);
         value.put("status", response.stage());
+        // 这一步是哪类结果，说给模型听：SUCCESS/NO_RESULT/MISSING_INFO/NEEDS_CLARIFICATION/
+        // NEEDS_CONFIRMATION/STATE_CHANGED/FAILURE。有了它，模型不必从中文里猜「是没查到还是参数不够」。
+        if (outcome != null) {
+            value.put("outcomeKind", outcome.kind().name());
+            value.put("outcomeDetail", outcome.detail());
+        }
         value.put("executedTools", calls.stream().map(call -> Map.of(
                 "name", call.toolName(), "arguments", call.arguments())).toList());
         value.put("authoritativeResult", response.reply());
@@ -1245,8 +1354,8 @@ public class FollowupAgentService {
             return respond(state, "当前有一项重要操作等待确认。请明确选择确认或返回修改。", List.of());
         }
         discardInterruption(state);
-        if (facts.date() != null && (facts.date().isBefore(LocalDate.now())
-                || facts.date().isAfter(LocalDate.now().plusMonths(1)))) {
+        if (facts.date() != null && (facts.date().isBefore(clock.today())
+                || facts.date().isAfter(clock.today().plusMonths(1)))) {
             return respond(state, "目前可以查询今天到一个月后的模拟号源，请在这个日期范围内重新选择。",
                     List.of(q("查看可预约日期", "SHOW_AVAILABLE_DATES", ""),
                             q("我自己说日期", "ASK_HUMAN_INPUT", "")));
@@ -1393,7 +1502,10 @@ public class FollowupAgentService {
             return respondWithPlan(state, "原预约仍然有效。请修改草稿，确认新方案后才会变更原预约。",
                     List.of(q("修改日期", "CHANGE_DATE", ""), q("修改医院", "CHANGE_HOSPITAL", "")));
         }
+        // 选一条候选、往后翻一页，都是「接着处理这次取消」，不能因为这个人名下已经有一份预约
+        // 就被拦成「已有预约已保留，请选择下一步」——那正好是取消入口，拦住它等于没有出口。
         if (state.appointmentId != null && !List.of("CANCEL_APPOINTMENT", "QUERY_APPOINTMENTS",
+                "SELECT_APPOINTMENT_TO_CANCEL", "MORE_CANCEL_CANDIDATES",
                 "OPEN_TASKS", "NEW_BOOKING", "CONTACT_HUMAN", "CANCEL_TASK",
                 "RETRY_EXECUTION", "EDIT_BOOKING").contains(action))
             return respondWithPlan(state, "已有预约已保留，请选择下一步。", bookedActions(state));
@@ -1442,6 +1554,7 @@ public class FollowupAgentService {
             case "QUERY_CARE_TIMELINE" -> { return showCareTimeline(state); }
             case "QUERY_CARE_NOTIFICATIONS" -> { return showCareNotifications(state); }
             case "SELECT_APPOINTMENT_TO_CANCEL" -> { return prepareExistingCancellation(state, safeValue); }
+            case "MORE_CANCEL_CANDIDATES" -> { return showCancellationCandidatesPage(state, safeValue); }
             case "SELECT_TRAVEL_APPOINTMENT" -> { return selectTravelAppointment(state, safeValue); }
             case "CANCEL_TASK" -> { return cancelTask(state); }
             case "RESUME_INTERRUPTED" -> { return resumeInterruptedTask(state); }
@@ -1492,122 +1605,17 @@ public class FollowupAgentService {
         if (closed(state)) return closedResponse(state);
         reactivateIfExpired(state);
         if (stopped(state)) return stoppedResponse(state);
-        if (state.stage != ConversationState.Stage.AWAITING_CONFIRMATION || confirmationId == null
-                || !confirmationId.equals(state.confirmationId)) {
+        // 凭据的校验与消费都在 ConfirmationService 里，这里只认它给的裁决：不通过就什么都不动，
+        // 他还能按原来那个按钮重来一次；通过则凭据当场作废，同一把钥匙用不了第二回。
+        ConfirmationService.Decision decision = confirmations.consume(state, confirmationId);
+        if (!decision.accepted()) {
             return respondWithPlan(state, "这份确认已经失效或已办理，请查看当前计划后重新确认。",
                     state.appointmentId == null ? List.of(q("检查计划", "START_PLAN", "")) : bookedActions(state));
         }
-        state.confirmationId = null;
         conversations.addMessage(state.id, "user", approved ? "[确认] 执行操作" : "[确认] 暂不执行");
-
-        if ("MEMO".equals(state.pendingAction)) {
-            return confirmMemo(state, approved);
-        }
-
-        if ("CANCEL_MANAGED".equals(state.pendingAction)) {
-            return confirmManagedCancel(state, approved);
-        }
-
-        if (!approved) {
-            if ("CANCEL".equals(state.pendingAction) || "CANCEL_EXISTING".equals(state.pendingAction)) {
-                state.pendingAction = "CREATE";
-                state.pendingAppointmentId = null;
-                state.pendingAppointmentIds = List.of();
-                if (state.interruptedStage != null) {
-                    state.stage = state.interruptedStage;
-                    return respond(state, "好的，原预约已经保留。您要继续刚才的复诊办理吗？",
-                            resumeReplies(state));
-                }
-                state.stage = ConversationState.Stage.COMPLETED;
-                state.taskStatus = ConversationState.TaskStatus.COMPLETED;
-                return respond(state, "好的，原预约已经保留，没有执行取消操作。",
-                        List.of(q("查询我的预约", "QUERY_APPOINTMENTS", ""), q("重新办理", "NEW_BOOKING", "")));
-            }
-            state.pendingAction = "CREATE";
-            state.stage = state.appointmentId == null ? ConversationState.Stage.READY_TO_PLAN
-                    : (state.materialReminderDone && (!Boolean.TRUE.equals(state.needTravel) || state.departureReminderDone)
-                    && (!Boolean.TRUE.equals(state.notifyFamily) || state.notificationDone)
-                    ? ConversationState.Stage.COMPLETED : ConversationState.Stage.PARTIAL);
-            state.taskStatus = state.appointmentId == null
-                    ? ConversationState.TaskStatus.ACTIVE : ConversationState.TaskStatus.COMPLETED;
-            return respondWithPlan(state, "没有执行本次操作，已有预约保留。您可以返回修改。",
-                    state.appointmentId == null ? List.of(q("修改日期", "CHANGE_DATE", ""), q("修改偏好", "EDIT_PREFERENCES", ""), q("检查计划", "START_PLAN", "")) : bookedActions(state));
-        }
-        try {
-            // 代他人办理走照护端那条真实链路。老人端下面这段会把预约直接建到 state.userId 名下，
-            // 既不写 arranged_by 也不跑协同通知，老人端就看不出这份安排是别人代约的。
-            if (state.caregiving()) return executeCaregiverBooking(state);
-            if ("CANCEL".equals(state.pendingAction) || "CANCEL_EXISTING".equals(state.pendingAction)) {
-                List<String> targetIds = pendingCancellationIds(state);
-                appointmentTool.cancelAll(state.id, targetIds, state.userId);
-                state.pendingAction = "CREATE";
-                state.pendingAppointmentId = null;
-                state.pendingAppointmentIds = List.of();
-                if (state.appointmentId != null && targetIds.contains(state.appointmentId)) state.appointmentId = null;
-                String cancelled = targetIds.size() == 1 ? "这条已确认预约" : "这" + targetIds.size() + "条已确认预约";
-                if (state.interruptedStage != null) {
-                    state.stage = state.interruptedStage;
-                    return respond(state, cancelled + "已经取消，原模拟号源已释放。要继续刚才未完成的办理吗？",
-                            resumeReplies(state));
-                }
-                state.stage = ConversationState.Stage.CANCELLED;
-                state.taskStatus = ConversationState.TaskStatus.CANCELLED;
-                return respond(state, cancelled + "已经取消，原模拟号源已经释放。",
-                        List.of(q("查询我的预约", "QUERY_APPOINTMENTS", ""), q("重新办理", "NEW_BOOKING", "")));
-            }
-            if (!ready(state) || !state.scheduleChecked || state.travelPlan == null) {
-                state.stage = ConversationState.Stage.READY_TO_PLAN;
-                return advance(state, ExtractedFacts.empty());
-            }
-            if (state.appointmentId == null) {
-                state.appointmentId = state.originalAppointmentId == null
-                        ? appointmentTool.submit(state.id, state.selectedSlot.id(), state.userId)
-                        : appointmentTool.reschedule(state.id, state.originalAppointmentId, state.selectedSlot.id(), state.userId);
-                state.originalAppointmentId = null;
-                conversations.save(state, null);
-                rememberBookingPreferences(state);
-            }
-            LocalDateTime at = LocalDateTime.of(state.selectedSlot.date(), state.selectedSlot.time());
-            if (!state.materialReminderDone) {
-                callTool(state, "schedule.createReminder", Map.of("title", "复诊材料准备提醒", "remindAt", at.minusDays(1)),
-                        () -> scheduleTool.createReminder(state.id, state.userId, "复诊材料准备提醒", at.minusDays(1)));
-                state.materialReminderDone = true;
-                conversations.save(state, null);
-            }
-            if (Boolean.TRUE.equals(state.needTravel) && !state.departureReminderDone) {
-                callTool(state, "schedule.createReminder", Map.of("title", "复诊出发提醒", "remindAt", state.travelPlan.departureAt().minusMinutes(10)),
-                        () -> scheduleTool.createReminder(state.id, state.userId, "复诊出发提醒", state.travelPlan.departureAt().minusMinutes(10)));
-                state.departureReminderDone = true;
-                conversations.save(state, null);
-            }
-            if (Boolean.TRUE.equals(state.notifyFamily) && !state.notificationDone) {
-                callTool(state, "family.notify", Map.of("contactId", state.contact.id(), "message", notificationMessage(state)),
-                        () -> familyTool.notify(state.id, state.contact.id(), notificationMessage(state)));
-                state.notificationDone = true;
-                conversations.save(state, null);
-            }
-            materialPreparationTool.initialize(state.id, state.appointmentId, state.department, state.materials);
-            // 老人把“由安排者约好的复诊”改期成功 → 通知安排者
-            if (state.arrangedArrangerId != null && state.appointmentId != null && state.selectedSlot != null) {
-                careBooking.notifyCaregiver(state.arrangedArrangerId, state.userId,
-                        arrangerRescheduleMessage(state), "reschedule");
-                state.arrangedArrangerId = null;
-            }
-            state.stage = ConversationState.Stage.COMPLETED;
-            state.taskStatus = ConversationState.TaskStatus.COMPLETED;
-            return completionResult(state);
-        } catch (RuntimeException error) {
-            return toolError(state, error);
-        }
-    }
-
-    private List<String> pendingCancellationIds(ConversationState state) {
-        if (state.pendingAppointmentIds != null && !state.pendingAppointmentIds.isEmpty()) {
-            return state.pendingAppointmentIds.stream().distinct().toList();
-        }
-        String target = state.pendingAppointmentId != null ? state.pendingAppointmentId : state.appointmentId;
-        if (target == null || target.isBlank()) throw new IllegalStateException("当前确认卡没有可取消的预约");
-        return List.of(target);
+        // 这一轮到底要执行哪件事，由凭据上的登记说了算：动作类型与完整目标集合在签发时就冻在
+        // PendingOperation 里，此后任何会话字段怎么变都影响不了它。分派见 ConfirmationDispatcher。
+        return dispatcher.dispatch(state, decision.operation(), approved, this);
     }
 
     private AgentTurnResponse executionResult(ConversationState state, String message) {
@@ -1619,7 +1627,8 @@ public class FollowupAgentService {
     /**
      * 预约完成路径：口播与文字全部由权威 ResultCard 字段确定性拼接，不经过回答模型改写，避免关键事实被压缩或变形。
      */
-    private AgentTurnResponse completionResult(ConversationState state) {
+    @Override
+    AgentTurnResponse completionResult(ConversationState state) {
         ResultCard card = recordResult(state);
         String narration = completionNarration(card);
         List<QuickReply> actions = new ArrayList<>();
@@ -1630,75 +1639,6 @@ public class FollowupAgentService {
         return finishWithoutModel(state, response);
     }
 
-    /**
-     * 家属/志愿者确认后，替长辈把这次复诊落到真实数据里。
-     *
-     * <p>交给 {@link CareBookingService} 而不是在这里重写一遍：它本来就带归属校验、真实号源、
-     * 防重复预约、给老人的提醒，以及代约结果对家属/志愿者的协同通知。
-     * 自己再走一遍老人端的执行，等于让同一个业务有两条会逐渐走散的实现。
-     */
-    private AgentTurnResponse executeCaregiverBooking(ConversationState state) {
-        String subject = elderName(state.userId);
-        try {
-            if ("CANCEL".equals(state.pendingAction) || "CANCEL_EXISTING".equals(state.pendingAction)) {
-                careBooking.cancelUpcoming(state.actorUserId, state.userId);
-                state.pendingAction = "CREATE";
-                state.pendingAppointmentId = null;
-                state.pendingAppointmentIds = List.of();
-                state.appointmentId = null;
-                state.stage = ConversationState.Stage.CANCELLED;
-                state.taskStatus = ConversationState.TaskStatus.CANCELLED;
-                conversations.save(state, null);
-                return respondWithoutModel(state, "已取消" + subject + "的这次复诊，号源已经释放。"
-                                + "如果这张预约原本是别的照护者安排的，对方也会收到通知。",
-                        List.of(q("重新安排", "NEW_BOOKING", ""),
-                                q("查看" + subject + "的复诊安排", "QUERY_APPOINTMENTS", "")));
-            }
-            if (!ready(state)) {
-                state.stage = ConversationState.Stage.READY_TO_PLAN;
-                return advance(state, ExtractedFacts.empty());
-            }
-            CareBookingService.BookingRequest request = new CareBookingService.BookingRequest(
-                    state.hospitalId, state.departmentId, state.date.toString(), state.selectedSlot.id(),
-                    state.needTravel, state.transport, state.needCompanion);
-            // 改期走 modify（原位换号源、不停旧记录）；新约才走 book。
-            AppointmentRecordStore.AppointmentView booked = state.originalAppointmentId == null
-                    ? careBooking.book(state.actorUserId, state.userId, request)
-                    : careBooking.modify(state.actorUserId, state.userId, request);
-            state.appointmentId = booked.appointmentId();
-            state.originalAppointmentId = null;
-            // 提醒、材料与协同通知都已由 CareBookingService 落库，这里只把会话状态对齐，
-            // 免得界面上继续显示“未完成”。
-            state.materialReminderDone = true;
-            state.departureReminderDone = Boolean.TRUE.equals(state.needTravel);
-            state.notificationDone = true;
-            state.stage = ConversationState.Stage.COMPLETED;
-            state.taskStatus = ConversationState.TaskStatus.COMPLETED;
-            conversations.save(state, null);
-            String reply = "已经替" + subject + "安排好复诊：" + managedShort(booked)
-                    + "。复诊提醒已经建好，" + subject + "下次打开助手就会看到这次安排。";
-            // 结果卡直接取 CareBookingService 写好的那条记录：它已经写明了代约人和陪同人，
-            // 再走一遍老人端的 recordResult 会把这两项覆盖成“不通知家属”那套口径。
-            ResultCard result = new ResultCard(booked.appointmentId(), booked.hospital(), booked.department(),
-                    booked.date().format(DATE_LABEL), booked.time().format(TIME_LABEL),
-                    state.materials.isEmpty() ? booked.materials() : state.materials,
-                    booked.departureAt() == null ? "未提供出发建议（路线或时间信息不足）"
-                            : booked.departureAt().format(TIME_LABEL),
-                    booked.reminderStatus(), booked.familyStatus());
-            return finishWithoutModel(state, new AgentTurnResponse(state.id, state.stage.name(), reply,
-                    caregiverBookedActions(subject), plan(state), null, result,
-                    traces.findByConversation(state.id), null, reply, null));
-        } catch (IllegalArgumentException error) {
-            // 号源已失效、已有进行中的预约、关系被撤销——这些都是用户听得懂也改得动的，
-            // 原样报出来，不要裹成一句“办理遇到问题”。
-            state.stage = ConversationState.Stage.READY_TO_PLAN;
-            return respondWithoutModel(state, error.getMessage(),
-                    List.of(q("先取消已有预约", "CANCEL_APPOINTMENT", ""),
-                            q("重新选择时间", "CHANGE_DATE", ""), q("联系人工帮助", "CONTACT_HUMAN", "")));
-        } catch (RuntimeException error) {
-            return toolError(state, error);
-        }
-    }
 
     private ResultCard recordResult(ConversationState state) {
         String reminders = reminderStatusLabel(state);
@@ -1751,13 +1691,15 @@ public class FollowupAgentService {
         return minute == 0 ? prefix : prefix + minute + "分";
     }
 
-    private List<QuickReply> bookedActions(ConversationState state) {
+    @Override
+    List<QuickReply> bookedActions(ConversationState state) {
         return List.of(q("查看事项", "OPEN_TASKS", ""),
                 state.stage == ConversationState.Stage.PARTIAL ? q("补办未完成事项", "RETRY_EXECUTION", "") : q("修改预约", "EDIT_BOOKING", ""),
                 q("取消预约", "CANCEL_APPOINTMENT", ""), q("新建办理", "NEW_BOOKING", ""));
     }
 
-    private <T> T callTool(ConversationState state, String name, Map<String, ?> parameters, java.util.function.Supplier<T> operation) {
+    @Override
+    <T> T callTool(ConversationState state, String name, Map<String, ?> parameters, java.util.function.Supplier<T> operation) {
         try { return operation.get(); }
         catch (RuntimeException error) {
             traces.record(state.id, name, parameters, Map.of("error", String.valueOf(error.getMessage())), false);
@@ -1765,8 +1707,9 @@ public class FollowupAgentService {
         }
     }
 
-    private AgentTurnResponse toolError(ConversationState state, RuntimeException error) {
-        state.confirmationId = null;
+    @Override
+    AgentTurnResponse toolError(ConversationState state, RuntimeException error) {
+        confirmations.clear(state);
         traces.record(state.id, "workflow.error", Map.of("stage", state.stage.name()), Map.of("error", String.valueOf(error.getMessage())), false);
         if (state.appointmentId != null) {
             if ("CANCEL".equals(state.pendingAction)) {
@@ -1783,6 +1726,62 @@ public class FollowupAgentService {
         state.taskStatus = ConversationState.TaskStatus.ACTIVE;
         return respondWithPlan(state, "本步骤未完成：" + error.getMessage() + "。已保留信息，请重试或修改。",
                 List.of(q("重试检查", "START_PLAN", ""), q("修改日期", "CHANGE_DATE", ""), q("人工帮助", "CONTACT_HUMAN", "")));
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // ConfirmationSupport：确认执行器执行完之后，交回编排层做收尾的那几个口子。
+    //
+    // 这里全是转接，不新增任何判断——每个方法都对应本类里一个已有的出口。之所以要开这个口子、
+    // 以及为什么是包级私有的抽象类而不是接口，见 ConfirmationSupport 的类注释。
+    // ---------------------------------------------------------------------------------------
+
+    /** 草稿信息是否齐全（执行器读它决定「能不能照这份草稿写下去」）。 */
+    @Override
+    boolean draftComplete(ConversationState state) {
+        return ready(state);
+    }
+
+    /**
+     * 这张卡是不是「照草稿开新预约」、而且草稿里那个时段已经过去了。
+     *
+     * <p>只挡「照着草稿开新预约」这一条路（pendingAction 为 CREATE 或未设）。完成过的会话仍然
+     * 留着当初那份 selectedSlot，取消的是老预约、跟这个时段没关系，拿它去拦会让老人越等越
+     * 取消不了，只能重新选日期。
+     */
+    @Override
+    boolean draftSlotExpired(ConversationState state) {
+        return booksFromDraft(state) && ready(state) && slotAlreadyPassed(state.selectedSlot);
+    }
+
+    /** 被打断过的那件事的「继续办理」按钮。 */
+    @Override
+    List<QuickReply> resumeInterruptedReplies(ConversationState state) {
+        return resumeReplies(state);
+    }
+
+    /** 本会话到目前为止的工具调用记录。 */
+    @Override
+    List<AgentTurnResponse.ToolTrace> traceList(ConversationState state) {
+        return traces.findByConversation(state.id);
+    }
+
+    /** 备忘落库成功后的回读话术。 */
+    @Override
+    String memoRecordedReply(String text, LocalDateTime at, String repeatRule) {
+        return memoSavedReply(text, at, repeatRule);
+    }
+
+    /** 业务执行器自己接住异常时，把这次失败记下来。 */
+    @Override
+    void recordToolFailure(ConversationState state, RuntimeException error) {
+        traces.record(state.id, "workflow.error", Map.of("stage", state.stage.name()),
+                Map.of("error", String.valueOf(error.getMessage())), false);
+    }
+
+    /** 交回漏斗继续下一步（信息不齐时）。 */
+    @Override
+    AgentTurnResponse advance(ConversationState state) {
+        return advance(state, ExtractedFacts.empty());
     }
 
     private boolean stopped(ConversationState state) {
@@ -1827,7 +1826,7 @@ public class FollowupAgentService {
     }
 
     private AgentTurnResponse emergency(ConversationState state) {
-        state.confirmationId = null;
+        confirmations.clear(state);
         if (state.taskStatus == ConversationState.TaskStatus.ACTIVE) {
             state.taskStatus = ConversationState.TaskStatus.PAUSED;
         }
@@ -1860,7 +1859,7 @@ public class FollowupAgentService {
     }
 
     private void invalidate(ConversationState state) {
-        state.confirmationId = null;
+        confirmations.clear(state);
         state.pendingAppointmentIds = List.of();
         state.scheduleChecked = false;
         state.travelPlan = null;
@@ -1926,7 +1925,8 @@ public class FollowupAgentService {
         return missing;
     }
 
-    private String notificationMessage(ConversationState state) {
+    @Override
+    String notificationMessage(ConversationState state) {
         return "复诊安排：" + state.hospital + " " + state.department + "，" + state.date.format(DATE_LABEL)
                 + " " + state.selectedSlot.time().format(TIME_LABEL) + (Boolean.TRUE.equals(state.needCompanion) ? "，需要陪同。" : "，不需要陪同。");
     }
@@ -1968,44 +1968,99 @@ public class FollowupAgentService {
     private AgentTurnResponse beginCancelExistingAppointment(ConversationState state, ExtractedFacts facts,
                                                              String originalMessage, String modelDraft,
                                                              CancellationSelection structuredSelection) {
+        return beginCancellationStep(state, facts, originalMessage, modelDraft, structuredSelection).response();
+    }
+
+    private CancellationStep beginCancellationStep(ConversationState state, ExtractedFacts facts,
+                                                   String originalMessage, String modelDraft,
+                                                   CancellationSelection structuredSelection) {
         if (structuredSelection != null && state.stage == ConversationState.Stage.AWAITING_CONFIRMATION
                 && ("CANCEL_EXISTING".equals(state.pendingAction) || "CANCEL".equals(state.pendingAction))) {
-            retireCancellationConfirmationForRevision(state);
+            confirmations.retire(state);
         }
         rememberInterruptedTask(state, "CANCEL_EXISTING_APPOINTMENT");
         if (structuredSelection != null && !structuredSelection.valid()) {
-            return cancellationCandidateList(state,
-                    myAppointmentTool.search(state.id, state.userId, null, null, null),
-                    "我还不能确定您想取消哪些预约，请从真实预约中选择，或重新说明范围。");
+            // 参数缺项或取值不合法：这次调用根本不够用，绝不能顺手当成「都取消」。
+            // 仍然把真实候选摆出来让老人点，但类型是「缺少信息」，和「对象不唯一」分得开。
+            return clarifyCancellationTargets(state, structuredSelection.rejection(), null);
         }
         List<AppointmentSummary> rows = structuredSelection == null
                 ? cancellationCandidates(state, facts, originalMessage)
                 : cancellationCandidates(state, structuredSelection);
         if (rows.isEmpty()) {
             state.sideTask = null;
-            return respond(state, "没有找到符合条件的已确认预约，所以没有执行取消。",
-                    resumeReplies(state, q("查询我的预约", "QUERY_APPOINTMENTS", "")));
+            // 没查到既不是出错也不是要澄清：把事实说清楚，再给一个能往下走的入口。
+            return new CancellationStep(ToolOutcome.Kind.NO_RESULT,
+                    respond(state, "没有找到符合条件的已确认预约，所以没有执行取消。",
+                            resumeReplies(state, q("查询我的预约", "QUERY_APPOINTMENTS", ""))),
+                    "库里没有符合条件的已确认预约");
         }
-        if (rows.size() == 1) return prepareExistingCancellation(state, List.of(rows.get(0)), modelDraft);
+        if (rows.size() == 1) {
+            return new CancellationStep(ToolOutcome.Kind.NEEDS_CONFIRMATION,
+                    prepareExistingCancellation(state, List.of(rows.get(0)), modelDraft),
+                    "已生成确认卡，等待老人确认");
+        }
 
         // “都取消 / 某日前的”已经明确圈定了一组对象：展示整组确认卡，一次确认后原子取消。
         // 普通“取消预约”没有圈定范围，仍只展示候选，不替老人猜。
         boolean batch = structuredSelection == null
                 ? isBatchCancellationRequest(originalMessage) : structuredSelection.batch();
         if (!state.caregiving() && batch) {
-            return prepareExistingCancellation(state, rows, modelDraft);
+            return new CancellationStep(ToolOutcome.Kind.NEEDS_CONFIRMATION,
+                    prepareExistingCancellation(state, rows, modelDraft),
+                    "已生成整组确认卡，等待老人确认");
         }
-        return cancellationCandidateList(state, rows, "我查到多条已确认预约。为防止取消错，请选择要取消的那一条。");
+        return clarifyCancellationTargets(state, null, rows);
     }
 
-    private AgentTurnResponse cancellationCandidateList(ConversationState state, List<AppointmentSummary> rows,
-                                                        String message) {
-        List<QuickReply> choices = rows.stream()
-                .map(item -> q(item.date().format(DATE_LABEL) + " " + item.time().format(TIME_LABEL)
-                                + " " + item.hospital(),
-                        "SELECT_APPOINTMENT_TO_CANCEL", item.appointmentId()))
-                .toList();
-        return respond(state, message, choices);
+    /**
+     * 取消对象不唯一（或参数不够用）时问「您说的是哪一条」。
+     *
+     * <p>问题可以来自模型，候选永远来自数据库：{@code rows} 是调用方刚用真实工具筛出来的，
+     * 传空则在 {@link ClarificationInteractionTool} 里从 {@code appointment.queryMine} 现取。
+     * 走到这里不会建卡、不会发 {@code confirmationId}——老人点选之后仍然要过那张确认卡。
+     */
+    private CancellationStep clarifyCancellationTargets(ConversationState state,
+                                                        ToolContract.Rejection rejection,
+                                                        List<AppointmentSummary> rows) {
+        List<AppointmentSummary> candidates = rows != null ? rows
+                : myAppointmentTool.search(state.id, state.userId, null, null, null);
+        boolean missingInfo = rejection != null;
+        ClarificationInteractionTool.Prompt prompt = clarificationInteraction.askWhichAppointmentToCancel(
+                state.id, candidates, null,
+                missingInfo
+                        ? "我还需要知道取消的范围，才能确定要取消哪几条预约。您可以从下面的真实预约里直接选一条。"
+                        : "我查到多条已确认预约。为防止取消错，请选择要取消的那一条。");
+        // 「一条都没有」盖过「缺参数」：没对象可选时，说清没查到比追问范围更有用。
+        ToolOutcome.Kind kind = missingInfo && prompt.kind() == ToolOutcome.Kind.NEEDS_CLARIFICATION
+                ? ToolOutcome.Kind.MISSING_INFO : prompt.kind();
+        String detail = missingInfo ? rejection.detail()
+                : prompt.kind() == ToolOutcome.Kind.NO_RESULT ? "库里没有可取消的已确认预约"
+                : "候选 " + candidates.size() + " 条，等老人点选或说出是哪一条";
+        // 候选列表同时是要念出来的话，所以这份回复不再交给模型润色：按钮是按它生成的那几条，
+        // 文字被改写就会出现「问的和按钮对不上」。
+        return new CancellationStep(kind,
+                respondWithoutModel(state, prompt.reply(), prompt.choices()), detail);
+    }
+
+    /**
+     * 澄清候选翻页：只是「再看几条」，不动任何业务状态。
+     *
+     * <p>候选每一页都从数据库现取，所以翻页看到的永远是真的；页码由按钮自己带过来（越界由工具夹回
+     * 有效范围），往前往后都到得了，候选不会再因为「只摆得下四条」而有一条谁都点不到。
+     */
+    private AgentTurnResponse showCancellationCandidatesPage(ConversationState state, String pageValue) {
+        int page = 0;
+        try {
+            page = Integer.parseInt(pageValue == null ? "" : pageValue.trim());
+        } catch (NumberFormatException ignored) {
+            // 页码读不出来就回到第一页：翻页是展示动作，不该因为一个脏参数把人卡住。
+        }
+        rememberInterruptedTask(state, "CANCEL_EXISTING_APPOINTMENT");
+        ClarificationInteractionTool.Prompt prompt = clarificationInteraction.askWhichAppointmentToCancel(
+                state.id, myAppointmentTool.search(state.id, state.userId, null, null, null), null,
+                "您想取消的是哪一条？可以从下面的真实预约里直接选一条。", page);
+        return respondWithoutModel(state, prompt.reply(), prompt.choices());
     }
 
     /** 模型模式只消费结构化工具参数，不再从中文原句的关键词推断取消范围。 */
@@ -2041,51 +2096,37 @@ public class FollowupAgentService {
             return List.of(rows.stream().min(Comparator.comparing(this::appointmentAt)).orElseThrow());
         }
         if (rows.size() > 1 && "NEAREST".equals(selection.position())) {
-            LocalDateTime now = LocalDateTime.now();
+            LocalDateTime now = clock.now();
             return List.of(rows.stream().min(Comparator.comparingLong(item ->
                     Math.abs(java.time.Duration.between(now, appointmentAt(item)).toMinutes()))).orElseThrow());
         }
         return rows;
     }
 
+    /**
+     * 把模型给的结构化参数读成取消范围。
+     *
+     * <p>参数读的是 {@link AgentRuntime#acceptedArguments} 归一化之后的那份：只留工具声明过的字段，
+     * 枚举补大写，空串当没给。模型硬塞的 {@code appointmentId} 不在声明里，读到这一步就已经没了——
+     * 「模型不得指定取消哪一条」这条约束靠的就是它，不是靠提示词里的一句叮嘱。
+     *
+     * <p>「这次调用够不够用」由 {@link ToolContract} 判，这里不另写一套范围检查。
+     */
     private CancellationSelection modelCancellationSelection(AgentRuntime.Outcome outcome) {
         if (!outcome.modelDriven() || outcome.actionType() != PlannerActionType.CALL_CONFIRMATION_TOOL
                 || outcome.proposedTools() == null || outcome.proposedTools().size() != 1
                 || !"interaction.requestConfirmation".equals(outcome.proposedTools().get(0).toolName())) {
             return null;
         }
-        Map<String, String> args = outcome.proposedTools().get(0).arguments();
+        PlannerToolCall call = outcome.proposedTools().get(0);
+        ToolContract.Rejection rejection = agentRuntime.rejection(call.toolName(), call);
+        Map<String, String> args = agentRuntime.acceptedArguments(call.toolName(), call);
         String scope = upper(args.get("scope"));
-        LocalDate date = parseIsoDate(args.get("date"));
-        LocalTime time = parseIsoTime(args.get("time"));
-        String direction = upper(args.get("direction"));
-        String period = upper(args.get("period"));
-        String position = upper(args.get("position"));
-        boolean knownScope = List.of("ALL", "DATE_RANGE", "SINGLE_FILTER", "AMBIGUOUS").contains(scope);
-        boolean valid = knownScope;
-        if ("DATE_RANGE".equals(scope)) {
-            valid = date != null && List.of("BEFORE", "ON_OR_BEFORE", "AFTER", "ON_OR_AFTER").contains(direction);
-        } else if ("SINGLE_FILTER".equals(scope)) {
-            valid = date != null || time != null || List.of("MORNING", "AFTERNOON").contains(period)
-                    || List.of("NEAREST", "EARLIEST").contains(position)
-                    || notBlank(args.get("hospital")) || notBlank(args.get("department"));
-        }
-        return new CancellationSelection(valid, scope, date, direction, time, period, position,
-                blankToNull(args.get("hospital")), blankToNull(args.get("department")));
-    }
-
-    private void retireCancellationConfirmationForRevision(ConversationState state) {
-        state.confirmationId = null;
-        state.pendingAppointmentId = null;
-        state.pendingAppointmentIds = List.of();
-        state.pendingAction = "CREATE";
-        if (state.interruptedStage != null) {
-            state.stage = state.interruptedStage;
-            state.taskStatus = ConversationState.TaskStatus.ACTIVE;
-        } else {
-            state.stage = ConversationState.Stage.COMPLETED;
-            state.taskStatus = ConversationState.TaskStatus.COMPLETED;
-        }
+        return new CancellationSelection(rejection == null, scope,
+                ToolContract.parseDate(args.get("date")), upper(args.get("direction")),
+                ToolContract.parseTime(args.get("time")), upper(args.get("period")),
+                upper(args.get("position")), blankToNull(args.get("hospital")),
+                blankToNull(args.get("department")), rejection);
     }
 
     private List<AppointmentSummary> cancellationCandidates(ConversationState state, ExtractedFacts facts,
@@ -2142,9 +2183,9 @@ public class FollowupAgentService {
         Matcher matcher = CANCELLATION_DATE.matcher(message == null ? "" : message);
         if (!matcher.find()) return modelDate;
         try {
-            // 这里筛的是数据库里已经存在的预约，过去两天也可能仍是 CONFIRMED。
-            // 因此“9月10日”按今年理解，不能套新建预约的“过去日期顺延到明年”规则。
-            return LocalDate.of(LocalDate.now().getYear(), Integer.parseInt(matcher.group(1)),
+            // 这里筛的是数据库里已经存在的预约，过去两天也可能仍是 CONFIRMED，
+            // 所以“9月10日”一律按今年理解，只按业务时区的今天取年份。
+            return LocalDate.of(clock.today().getYear(), Integer.parseInt(matcher.group(1)),
                     Integer.parseInt(matcher.group(2)));
         } catch (RuntimeException ignored) {
             return modelDate;
@@ -2191,7 +2232,7 @@ public class FollowupAgentService {
                     resumeReplies(state, q("查询我的预约", "QUERY_APPOINTMENTS", "")));
         }
         if (candidates.size() > 1 && latest) {
-            LocalDateTime now = LocalDateTime.now();
+            LocalDateTime now = clock.now();
             candidates = List.of(candidates.stream().min(Comparator.comparingLong(item ->
                     Math.abs(java.time.Duration.between(now, appointmentAt(item)).toMinutes()))).orElseThrow());
         } else if (candidates.size() > 1 && earliest) {
@@ -2212,7 +2253,7 @@ public class FollowupAgentService {
         Matcher matcher = SPOKEN_DATE.matcher(message);
         if (!matcher.find()) return null;
         try {
-            return LocalDate.of(LocalDate.now().getYear(), Integer.parseInt(matcher.group(1)),
+            return LocalDate.of(clock.today().getYear(), Integer.parseInt(matcher.group(1)),
                     Integer.parseInt(matcher.group(2)));
         } catch (RuntimeException ignored) {
             return null;
@@ -2241,11 +2282,21 @@ public class FollowupAgentService {
         state.pendingAppointmentId = target.appointmentId();
         state.pendingAppointmentIds = targets.stream().map(AppointmentSummary::appointmentId).distinct().toList();
         state.sideTask = "CANCEL_EXISTING_APPOINTMENT";
-        state.confirmationId = UUID.randomUUID().toString();
-        state.stage = ConversationState.Stage.AWAITING_CONFIRMATION;
+        // 授权范围与凭据一起交给 ConfirmationService：这一步之后，「这张卡对哪几条生效」就不再是
+        // 一个谁也说不准的问题——它和凭据绑在一起（一起进快照、一起作废），重启也不会缩水。
+        // 类型由这里给死：本方法建的就是取消预约的卡，不看 pendingAction 现算。
+        //
+        // 「谁的业务链路来取消」也一起给死：本人自办走老人端那批原子取消，代他人办理走
+        // CareBookingService（它会一并通知其他照护者）。这两个取值是两类动作，不是同一个类型
+        // 加一个执行时再看一眼的开关——那一眼用的又是可变状态，等于把已经冻在凭据里的事重新交还回去。
+        String confirmationId = confirmations.issue(state,
+                state.caregiving()
+                        ? ConfirmationService.PendingOperation.Kind.CANCEL_APPOINTMENTS_CAREGIVER
+                        : ConfirmationService.PendingOperation.Kind.CANCEL_APPOINTMENTS,
+                state.pendingAppointmentIds);
         state.taskStatus = ConversationState.TaskStatus.AWAITING_CONFIRMATION;
         ConfirmationInteractionTool.Prompt prompt = confirmationInteraction.requestCancellation(
-                state.id, state.confirmationId, targets, modelDraft);
+                state.id, confirmationId, targets, modelDraft);
         return finishWithoutModel(state, new AgentTurnResponse(state.id, state.stage.name(),
                 prompt.reply(), List.of(), null, prompt.card(), targets.size() == 1 ? resultCard(target) : null,
                 traces.findByConversation(state.id), null, prompt.speechText(), null));
@@ -2307,7 +2358,7 @@ public class FollowupAgentService {
         discardInterruption(state);
         resetAfterDate(state);
         if (facts.date() == null) return askDate(state, "好的，请告诉我新的复诊日期。");
-        if (facts.date().isBefore(LocalDate.now()) || facts.date().isAfter(LocalDate.now().plusMonths(1))) {
+        if (facts.date().isBefore(clock.today()) || facts.date().isAfter(clock.today().plusMonths(1))) {
             return respond(state, "目前可以查询今天到一个月后的模拟号源，请重新选择日期。",
                     List.of(q("查看可预约日期", "SHOW_AVAILABLE_DATES", "")));
         }
@@ -2682,7 +2733,7 @@ public class FollowupAgentService {
         }
         if (referenced && rows.size() > 1) {
             // “上次 / 最近”本身就是筛选条件：按离现在最近的一条收敛，仍然只认数据库里的真实记录。
-            LocalDateTime now = LocalDateTime.now();
+            LocalDateTime now = clock.now();
             rows = List.of(rows.stream().min(Comparator.comparingLong(
                     item -> Math.abs(Duration.between(now, appointmentAt(item)).toMinutes()))).orElseThrow());
         }
@@ -2826,7 +2877,7 @@ public class FollowupAgentService {
     private String latestEffectiveAppointmentId(ConversationState state) {
         List<AppointmentSummary> rows = myAppointmentTool.search(state.id, state.userId, null, null, null);
         if (rows.isEmpty()) return null;
-        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime now = clock.now();
         List<AppointmentSummary> upcoming = rows.stream()
                 .filter(item -> !appointmentAt(item).isBefore(now))
                 .sorted(Comparator.comparing(this::appointmentAt)).toList();
@@ -3041,7 +3092,7 @@ public class FollowupAgentService {
 
     private AgentTurnResponse querySlots(ConversationState state) {
         if (state.hospitalId == null || state.department == null || state.date == null) return advance(state, ExtractedFacts.empty());
-        if (state.date.isBefore(LocalDate.now())) { resetAfterDate(state); return askDate(state, "这个日期已经过去，请重新选择复诊日期。"); }
+        if (state.date.isBefore(clock.today())) { resetAfterDate(state); return askDate(state, "这个日期已经过去，请重新选择复诊日期。"); }
         List<Slot> slots = callTool(state, "appointment.querySlots", Map.of("hospitalId", state.hospitalId, "department", state.department, "date", state.date),
                 () -> appointmentTool.queryAvailableSlots(state.id, state.hospitalId, state.department, state.date));
         state.selectedSlot = null;
@@ -3103,12 +3154,12 @@ public class FollowupAgentService {
         if (state.department == null) {
             return askDepartment(state, "要查询号源，还需要先选择复诊科室。");
         }
-        if (state.date != null && !state.date.isBefore(LocalDate.now())
-                && !state.date.isAfter(LocalDate.now().plusMonths(1))) {
+        if (state.date != null && !state.date.isBefore(clock.today())
+                && !state.date.isAfter(clock.today().plusMonths(1))) {
             return querySlots(state);
         }
 
-        LocalDate from = LocalDate.now();
+        LocalDate from = clock.today();
         LocalDate to = from.plusMonths(1);
         List<Slot> slots = appointmentTool.queryUpcomingSlots(
                 state.id, state.hospitalId, state.department, from, to);
@@ -3310,6 +3361,9 @@ public class FollowupAgentService {
 
     private AgentTurnResponse buildConfirmation(ConversationState state) {
         if (!ready(state)) return advance(state, ExtractedFacts.empty());
+        // 选号那一刻可能就在今天早上，走到这一步已经是下午：先把已经过去的时段挡在外面，
+        // 不能让一张写着「今天 09:00」的确认卡发到老人手上。
+        if (slotAlreadyPassed(state.selectedSlot)) return reaskAfterPassedSlot(state);
         LocalDateTime at = LocalDateTime.of(state.selectedSlot.date(), state.selectedSlot.time());
         if (state.travelPlan == null) {
             state.travelPlan = callTool(state, "travel.plan", Map.of("hospital", state.hospital, "appointmentAt", at, "transport", state.transport),
@@ -3317,7 +3371,19 @@ public class FollowupAgentService {
         }
         // 重述待确认内容（例如用户在确认卡前说“打开地图”）时保留原确认凭据，
         // 避免确认卡看似被刷新、旧按钮突然失效。
-        if (state.confirmationId == null) state.confirmationId = UUID.randomUUID().toString();
+        // 但保留的前提是「手上那份就是这张卡」：类型得是开新预约、目标得是同一批。这里是
+        // booking 卡，若手上那份是上一轮那张取消卡的凭据（类型不同），这里会换一把新钥匙，
+        // 旧凭据当场作废——否则老人对着这张「确认办理」点头，执行出来的是上一轮那次取消。
+        // 手上那份读不出来（旧快照）时同样换新的，否则它会一路带到确认那一步才作废。
+        //
+        // 「谁在办」也进类型：本人自办与代他人办理是两条不同的业务链路（后者要写代约归属、
+        // 通知其他照护者），签发时就得定下来是哪一个。合并成一个类型、执行时再看 caregiving()，
+        // 就等于让一个可变状态决定这次确认要动谁的业务。
+        confirmations.ensureIssued(state,
+                state.caregiving()
+                        ? ConfirmationService.PendingOperation.Kind.BOOKING_CAREGIVER
+                        : ConfirmationService.PendingOperation.Kind.BOOKING,
+                List.of());
         state.stage = ConversationState.Stage.AWAITING_CONFIRMATION;
         state.taskStatus = ConversationState.TaskStatus.AWAITING_CONFIRMATION;
         ConfirmationCard card = confirmationCard(state, at);
@@ -3412,7 +3478,8 @@ public class FollowupAgentService {
     }
 
     /** 不带计划卡的纯文本回复（用于“家属代约计划”等已有预约的开场与管理话术）。 */
-    private AgentTurnResponse respondSimple(ConversationState state, String reply, List<QuickReply> quickReplies) {
+    @Override
+    AgentTurnResponse respondSimple(ConversationState state, String reply, List<QuickReply> quickReplies) {
         return finish(state, AgentTurnResponse.message(state.id, state.stage.name(), reply, quickReplies));
     }
 
@@ -3420,7 +3487,7 @@ public class FollowupAgentService {
     private java.util.Optional<AppointmentRecordStore.AppointmentView> upcomingArranged(ConversationState state) {
         return appointmentRecords.allFor(state.userId).stream()
                 .filter(row -> "CONFIRMED".equals(row.status()))
-                .filter(row -> !row.date().isBefore(LocalDate.now()))
+                .filter(row -> !row.date().isBefore(clock.today()))
                 .filter(row -> row.arrangedBy() != null)
                 .findFirst();
     }
@@ -3429,12 +3496,13 @@ public class FollowupAgentService {
     private java.util.Optional<AppointmentRecordStore.AppointmentView> upcomingOwn(ConversationState state) {
         return appointmentRecords.allFor(state.userId).stream()
                 .filter(row -> "CONFIRMED".equals(row.status()))
-                .filter(row -> !row.date().isBefore(LocalDate.now()))
+                .filter(row -> !row.date().isBefore(clock.today()))
                 .filter(row -> row.arrangedBy() == null)
                 .findFirst();
     }
 
-    private String managedShort(AppointmentRecordStore.AppointmentView plan) {
+    @Override
+    String managedShort(AppointmentRecordStore.AppointmentView plan) {
         return plan.date().format(DATE_LABEL) + " " + plan.time().format(TIME_LABEL)
                 + "，" + plan.hospital() + " " + plan.department();
     }
@@ -3480,7 +3548,8 @@ public class FollowupAgentService {
     }
 
     /** 代约完成后的按钮。 */
-    private List<QuickReply> caregiverBookedActions(String subjectName) {
+    @Override
+    List<QuickReply> caregiverBookedActions(String subjectName) {
         return List.of(
                 q("查看" + subjectName + "的复诊安排", "QUERY_APPOINTMENTS", ""),
                 q("最近的复诊动态", "QUERY_CARE_TIMELINE", ""),
@@ -3528,7 +3597,7 @@ public class FollowupAgentService {
                     List.of(q("记一条提醒", "CONTINUE", "")));
         }
         String subject = elderName(state.userId);
-        MemoParser.MemoIntent intent = MemoParser.detect(value);
+        MemoParser.MemoIntent intent = MemoParser.detect(value, clock.now());
         String text = intent == null || intent.text() == null || intent.text().isBlank()
                 ? value.trim() : intent.text().trim();
         if (text.isBlank()) {
@@ -3566,7 +3635,8 @@ public class FollowupAgentService {
                 caregiverActions(elderName(state.userId)));
     }
 
-    private String elderName(String userId) {
+    @Override
+    String elderName(String userId) {
         return catalog.user(userId).map(CareCatalogRepository.UserProfile::name).orElse(userId);
     }
 
@@ -3601,51 +3671,22 @@ public class FollowupAgentService {
                     List.of(q("查看事项", "OPEN_TASKS", "")));
         }
         state.pendingAction = "CANCEL_MANAGED";
-        state.stage = ConversationState.Stage.AWAITING_CONFIRMATION;
-        state.confirmationId = UUID.randomUUID().toString();
+        // 要取消的是哪一条，就在这一刻<b>写死</b>进凭据：`plan` 是查出来的那一条，卡片上写的也是它。
+        // 以前这里传的是空列表，执行时再按「当前那份代约安排」现找一遍——多一套口径就多一次
+        // 「卡上写 A、实际取消 B」的机会（这中间别人又代约了一条更早的，现找就会找错）。
+        String confirmationId = confirmations.issue(state,
+                ConfirmationService.PendingOperation.Kind.CANCEL_MANAGED,
+                List.of(plan.appointmentId()));
         ConfirmationCard card = new ConfirmationCard(
                 "确认取消这次由" + plan.arrangedLabel() + "约好的复诊吗？",
                 List.of("医院科室：" + plan.hospital() + " · " + plan.department(),
                         "复诊时间：" + plan.date().format(DATE_LABEL) + " " + plan.time().format(TIME_LABEL),
                         "释放号源并停用关联提醒",
                         "取消后会自动通知安排者" + plan.arrangedLabel()),
-                "确认后取消预约；返回则保留原安排。", "确认取消预约", "保留预约", state.confirmationId);
+                "确认后取消预约；返回则保留原安排。", "确认取消预约", "保留预约", confirmationId);
         return finish(state, new AgentTurnResponse(state.id, state.stage.name(),
                 "取消这次安排需要明确确认。", List.of(), null, card, null,
                 traces.findByConversation(state.id)));
-    }
-
-    private AgentTurnResponse confirmManagedCancel(ConversationState state, boolean approved) {
-        AppointmentRecordStore.AppointmentView plan = upcomingArranged(state).orElse(null);
-        state.pendingAction = "CREATE";
-        if (!approved) {
-            state.stage = ConversationState.Stage.COMPLETED;
-            return respondSimple(state, "好的，没有取消，这次安排仍然保留。",
-                    plan == null ? List.of(q("办理复诊", "CONTINUE", ""))
-                            : List.of(q("查看这次安排", "VIEW_MANAGED", ""),
-                                    q("临时改期或取消", "MANAGE_MANAGED", ""),
-                                    q("查看事项", "OPEN_TASKS", "")));
-        }
-        if (plan == null) {
-            state.stage = ConversationState.Stage.COMPLETED;
-            return respondSimple(state, "没有找到可取消的安排，可能已改期或取消。",
-                    List.of(q("查看事项", "OPEN_TASKS", "")));
-        }
-        try {
-            appointmentTool.cancel(state.id, plan.appointmentId(), state.userId);
-        } catch (RuntimeException error) {
-            traces.record(state.id, "workflow.error", Map.of("stage", state.stage.name()),
-                    Map.of("error", String.valueOf(error.getMessage())), false);
-            state.stage = ConversationState.Stage.COMPLETED;
-            return respondSimple(state, "取消没有成功，原预约保留：" + error.getMessage(),
-                    List.of(q("联系人工帮助", "CONTACT_HUMAN", ""), q("查看事项", "OPEN_TASKS", "")));
-        }
-        careBooking.notifyCaregiver(plan.arrangedBy(), state.userId,
-                "取消通知：" + elderName(state.userId) + "已取消您代约的复诊：" + managedShort(plan) + "。预约与关联提醒已失效。",
-                "cancel");
-        state.stage = ConversationState.Stage.CANCELLED;
-        return respondSimple(state, "已取消这次由" + plan.arrangedLabel() + "约好的复诊，并已通知" + plan.arrangedLabel() + "。号源已释放。",
-                List.of(q("新建办理", "NEW_BOOKING", ""), q("查看事项", "OPEN_TASKS", "")));
     }
 
     /**
@@ -3697,7 +3738,7 @@ public class FollowupAgentService {
 
     /** 备忘识别：识别不到返回 null 走原链路；时间不明确先追问钟点；显式托付直接记，隐式先给确认卡。 */
     private AgentTurnResponse memoReply(ConversationState state, String value) {
-        MemoParser.MemoIntent memo = MemoParser.detect(value);
+        MemoParser.MemoIntent memo = MemoParser.detect(value, clock.now());
         if (memo == null) return null;
         state.pendingMemoDay = null;
         // “每周提醒我量血压”这种没说周几/几号的，趁早问清楚：照原样存下来只会是一条永远不响的备忘
@@ -3723,8 +3764,8 @@ public class FollowupAgentService {
         state.memoReturnStage = state.stage;
         state.pendingAction = "MEMO_DAY";
         state.stage = ConversationState.Stage.MEMO_TIME;
-        state.confirmationId = null;
-        LocalDate past = MemoParser.pastWeekdayDate(memo.text());
+        confirmations.clear(state);
+        LocalDate past = MemoParser.pastWeekdayDate(memo.text(), clock.today());
         String nextWeek = MemoParser.nextWeekdayWord(memo.text());
         return respond(state, "您说的“" + (past == null ? "那天" : memoDayLabel(past)) + "”已经过去了。"
                         + "您是指哪一天呢？可以告诉我“" + nextWeek + "”，或者直接说个日期，比如“9月16号”。"
@@ -3779,7 +3820,7 @@ public class FollowupAgentService {
         state.memoReturnStage = state.stage;
         state.pendingAction = "MEMO_REPEAT_DAY";
         state.stage = ConversationState.Stage.MEMO_TIME;
-        state.confirmationId = null;
+        confirmations.clear(state);
         boolean weekly = !"MONTHLY".equals(memo.repeatRule());
         String ask = weekly
                 ? "您想每周几提醒呢？比如说“每周三”"
@@ -3808,12 +3849,12 @@ public class FollowupAgentService {
             if (state.stage == ConversationState.Stage.MEMO_TIME) state.stage = ConversationState.Stage.READY_TO_PLAN;
             return writeMemo(state, text, null, null);
         }
-        LocalDate day = MemoParser.resolveRepeatAnchor(state.pendingMemoRepeat, value);
+        LocalDate day = MemoParser.resolveRepeatAnchor(state.pendingMemoRepeat, value, clock.today());
         if (day == null) {
             return respond(state, "没听清是哪一天。请再说一次，比如“每周三”或“每月15号”；不需要提醒就说“不用提醒，只记下”。",
                     memoNoTimeReply("MEMO_REPEAT_DAY"));
         }
-        LocalDateTime at = MemoParser.resolveRemindAt(state.pendingMemoText, value, day);
+        LocalDateTime at = MemoParser.resolveRemindAt(state.pendingMemoText, value, day, clock.now());
         if (at == null) {
             // 锚点听懂了、还差钟点：带着这一天接着问几点
             state.pendingMemoDay = day;
@@ -3949,7 +3990,7 @@ public class FollowupAgentService {
     private AgentTurnResponse askMemoEditTime(ConversationState state, MemoStore.MemoView memo) {
         state.pendingMemoId = memo.id();
         state.pendingAction = "MEMO_EDIT_TIME";
-        state.confirmationId = null;
+        confirmations.clear(state);
         return respond(state, "要把「" + memo.text() + "」的提醒改到什么时候？可以说“明天早上八点”，"
                 + "也可以说“改成每周三下午三点”；不想再提醒就说“不用提醒了”。", memoStopRemindReply());
     }
@@ -3979,7 +4020,7 @@ public class FollowupAgentService {
         String repeat = MemoParser.repeatRuleIn(value);
         LocalDate anchor = null;
         if (repeat != null && !"DAILY".equals(repeat)) {
-            anchor = MemoParser.resolveRepeatAnchor(repeat, value);
+            anchor = MemoParser.resolveRepeatAnchor(repeat, value, clock.today());
             // 只说“每周/每月”没说周几/几号：接着问，不能存一条永远不响的重复提醒
             if (anchor == null) {
                 return respond(state, "没听清是每周几还是每月几号。请再说一次，比如“改成每周三下午三点”。",
@@ -3988,7 +4029,7 @@ public class FollowupAgentService {
         }
         // 算时间仍用原话：老人只说“改成每周三”时，钟点要沿用正文里那个（“每天八点”的八点），
         // 否则会说“没听清”再问一遍，而且第二轮答钟点时把每周三这个周期丢掉
-        LocalDateTime at = MemoParser.resolveRemindAt(memo.text(), value, anchor);
+        LocalDateTime at = MemoParser.resolveRemindAt(memo.text(), value, anchor, clock.now());
         if (at == null) {
             return respond(state, "没听清要改成什么时候。请再说一个时间，比如“明天早上八点”；不想再提醒就说“不用提醒了”。",
                     memoStopRemindReply());
@@ -4005,7 +4046,7 @@ public class FollowupAgentService {
     private AgentTurnResponse askMemoDelete(ConversationState state, MemoStore.MemoView memo) {
         state.pendingMemoId = memo.id();
         state.pendingAction = "MEMO_DELETE_CONFIRM";
-        state.confirmationId = null;
+        confirmations.clear(state);
         return respond(state, "要删掉「" + memoLine(memo) + "」这条备忘吗？删掉就找不回来了。", memoDeleteReplies());
     }
 
@@ -4064,7 +4105,7 @@ public class FollowupAgentService {
         state.memoReturnStage = state.stage;
         state.pendingAction = "MEMO_TIME";
         state.stage = ConversationState.Stage.MEMO_TIME;
-        state.confirmationId = null;
+        confirmations.clear(state);
         String hint = MemoParser.timeHintOf(memo.text());
         // “每天提醒我量血压”里没有任何日期词，回显“当天”会让老人莫名其妙；重复的就说重复周期
         if ("当天".equals(hint) && memo.repeatRule() != null) hint = repeatLabel(memo.repeatRule());
@@ -4078,8 +4119,8 @@ public class FollowupAgentService {
     /** 备忘确认卡（复用预约确认门）。隐式备忘在老人点头后才落库。 */
     private AgentTurnResponse memoConfirmCard(ConversationState state) {
         state.pendingAction = "MEMO";
-        state.stage = ConversationState.Stage.AWAITING_CONFIRMATION;
-        state.confirmationId = UUID.randomUUID().toString();
+        String confirmationId = confirmations.issue(state,
+                ConfirmationService.PendingOperation.Kind.MEMO, List.of());
         String text = state.pendingMemoText;
         LocalDateTime at = state.pendingMemoAt;
         List<String> operations = new ArrayList<>();
@@ -4088,7 +4129,7 @@ public class FollowupAgentService {
                 : "提醒：" + memoRepeatLabel(at, state.pendingMemoRepeat) + "，到点打开应用会提醒您");
         ConfirmationCard card = new ConfirmationCard("帮您记下这条健康备忘吗？", operations,
                 "只记录健康/复诊相关事项；确认后写入首页“健康备忘”，可随时查看、标记完成或删除。",
-                "确认记下", "先不用", state.confirmationId);
+                "确认记下", "先不用", confirmationId);
         return finish(state, new AgentTurnResponse(state.id, state.stage.name(),
                 "您说的这件健康事项，我可以帮您记下来并按时提醒。需要我记下吗？", List.of(),
                 null, card, null, traces.findByConversation(state.id)));
@@ -4099,41 +4140,14 @@ public class FollowupAgentService {
         return writeMemo(state, memo.text(), memo.remindAt(), memo.repeatRule());
     }
 
-    /** 落库一条备忘并回到原办理上下文（显式直写、以及追问后落库共用）。 */
+    /**
+     * 备忘的落库入口（显式托付直写、追问补齐之后落库）。
+     *
+     * <p>它和确认卡那条路落到同一个执行器：三条路写的是同一条库、回读的是同一套话术，
+     * 在服务里再留一份，两边迟早在「正文要不要摘掉时间」这类细节上走散。
+     */
     private AgentTurnResponse writeMemo(ConversationState state, String text, LocalDateTime at, String repeatRule) {
-        String repeat = MemoStore.normalizeRepeat(repeatRule);
-        // 正文只留“事项”，时间只由“提醒”那一行负责。不摘的话首页会变成
-        // “明早八点提醒我吃药 / 提醒：明天 08:00”，同一件事说两遍，改过时间的旧备忘
-        // 又是另一种长相。没有提醒的长期备忘不能摘——“9月20号家人来接我”里的日期
-        // 是内容本身，不是提醒，摘掉就把事记残了。
-        String saved = at == null ? text : MemoParser.stripSchedule(text);
-        MemoStore.MemoView created = callTool(state, "memo.create",
-                Map.of("text", saved, "remindAt", at == null ? "长期" : at.toString(),
-                        "repeat", repeat == null ? "仅一次" : repeat),
-                () -> memoTool.create(state.id, state.userId, saved, at, repeat));
-        state.pendingMemoRepeat = null;
-        state.pendingMemoDay = null;
-        return memoHandoff(state, memoSavedReply(created.text(), at, repeat));
-    }
-
-    /** 隐式备忘的确认结果（复用预约确认门）。 */
-    private AgentTurnResponse confirmMemo(ConversationState state, boolean approved) {
-        state.pendingAction = "CREATE";
-        state.stage = state.memoReturnStage == null ? ConversationState.Stage.READY_TO_PLAN : state.memoReturnStage;
-        state.memoReturnStage = null;
-        state.memoNeedsApproval = false;
-        String text = state.pendingMemoText;
-        LocalDateTime at = state.pendingMemoAt;
-        String repeat = state.pendingMemoRepeat;
-        state.pendingMemoText = null;
-        state.pendingMemoAt = null;
-        state.pendingMemoRepeat = null;
-        state.pendingMemoDay = null;
-        if (!approved) return memoHandoff(state, "好的，这条没有记下。");
-        if (text == null || text.isBlank()) {
-            return memoHandoff(state, "这条备忘内容已失效，请重新对我说一遍。");
-        }
-        return writeMemo(state, text, at, repeat);
+        return dispatcher.writeMemo(state, text, at, repeatRule, this);
     }
 
     /** 老人回答“几点”的入口：可打字（聊天）也可点快捷回复（动作 MEMO_TIME）。 */
@@ -4159,9 +4173,9 @@ public class FollowupAgentService {
                     List.of(q("重新办理复诊", "CONTINUE", "")));
         }
         boolean keepStanding = containsAny(value, MEMO_NO_TIME);
-        LocalDate answeredDay = keepStanding ? null : MemoParser.resolveDay(value);
+        LocalDate answeredDay = keepStanding ? null : MemoParser.resolveDay(value, clock.today());
         LocalDateTime at = keepStanding ? null
-                : MemoParser.resolveRemindAt(state.pendingMemoText, value, state.pendingMemoDay);
+                : MemoParser.resolveRemindAt(state.pendingMemoText, value, state.pendingMemoDay, clock.now());
         if (!keepStanding && at == null) {
             // 日子听懂了（“下周三”）但还差钟点：接着问几点，别把刚听懂的日子又丢掉，
             // 也不能回一句“没听清是哪一天”——老人明明已经说清楚了
@@ -4203,7 +4217,7 @@ public class FollowupAgentService {
         state.pendingMemoDay = null;
         state.memoNeedsApproval = false;
         state.memoReturnStage = null;
-        state.confirmationId = null;
+        confirmations.clear(state);
         state.pendingAction = "CREATE";
         if (state.stage == ConversationState.Stage.MEMO_TIME) {
             state.stage = ConversationState.Stage.READY_TO_PLAN;
@@ -4253,7 +4267,8 @@ public class FollowupAgentService {
     }
 
     /** 记完备忘/健康数值后把话头交回原来的办理上下文，不打断复诊办理。 */
-    private AgentTurnResponse memoHandoff(ConversationState state, String note) {
+    @Override
+    AgentTurnResponse memoHandoff(ConversationState state, String note) {
         if (state.appointmentId != null) {
             return respondWithPlan(state, note, bookedActions(state));
         }
@@ -4318,7 +4333,7 @@ public class FollowupAgentService {
     /** 真往库里写一条实测值；回读记下了什么，老人才能发现听错了数。 */
     private AgentTurnResponse recordValue(ConversationState state, HealthRecordParser.RecordIntent intent,
                                           String raw) {
-        LocalDateTime at = MemoParser.nowInDemoZone();
+        LocalDateTime at = clock.now();
         HealthRecordStore.RecordView created = callTool(state, "healthRecord.create",
                 Map.of("item", intent.item(), "value", intent.valueText(), "unit", intent.unit()),
                 () -> healthRecordTool.create(state.id, state.userId, intent.item(), intent.valueNum(),
@@ -4469,15 +4484,8 @@ public class FollowupAgentService {
         return askDate(state, "原来的安排（" + managedShort(plan) + "）会保留到确认新方案后才变更。请问想改到哪一天复诊？");
     }
 
-    /** 老人改期成功后通知原安排者（kind=reschedule，消息里带新的时间）。 */
-    private String arrangerRescheduleMessage(ConversationState state) {
-        return "改期通知：" + elderName(state.userId) + "已将复诊改期至"
-                + state.selectedSlot.date().format(DATE_LABEL) + " " + state.selectedSlot.time().format(TIME_LABEL)
-                + "（" + state.hospital + " " + state.department + "）。相关提醒已按新安排更新。";
-    }
-
     private AgentTurnResponse cancelTask(ConversationState state) {
-        state.confirmationId = null;
+        confirmations.clear(state);
         if (state.appointmentId != null) {
             state.stage = ConversationState.Stage.CANCELLED;
             state.taskStatus = ConversationState.TaskStatus.CANCELLED;
@@ -4515,7 +4523,7 @@ public class FollowupAgentService {
         state.taskStatus = ConversationState.TaskStatus.ACTIVE;
         state.stage = ConversationState.Stage.ASK_DATE;
         List<QuickReply> choices = new ArrayList<>(catalog.availableDates(
-                        state.hospitalId, state.department, LocalDate.now(), 3).stream()
+                        state.hospitalId, state.department, clock.today(), 3).stream()
                 .map(date -> q(date.format(DATE_LABEL), "SET_DATE", date.toString())).toList());
         choices.add(q("我自己说日期", "ASK_HUMAN_INPUT", ""));
         return respond(state, message, choices);
@@ -4626,13 +4634,15 @@ public class FollowupAgentService {
                 plan(state), null, null, traces.findByConversation(state.id)));
     }
 
-    private AgentTurnResponse respondWithPlan(ConversationState state, String reply, List<QuickReply> quickReplies) {
+    @Override
+    AgentTurnResponse respondWithPlan(ConversationState state, String reply, List<QuickReply> quickReplies) {
         return finish(state, new AgentTurnResponse(state.id, state.stage.name(), reply, quickReplies,
                 plan(state), null, null, traces.findByConversation(state.id)));
     }
 
-    private AgentTurnResponse respondWithoutModel(ConversationState state, String reply,
-                                                  List<QuickReply> quickReplies) {
+    @Override
+    AgentTurnResponse respondWithoutModel(ConversationState state, String reply,
+                                          List<QuickReply> quickReplies) {
         return respondWithoutModel(state, reply, quickReplies, null);
     }
 
@@ -4662,6 +4672,7 @@ public class FollowupAgentService {
 
     private AgentTurnResponse finish(ConversationState state, AgentTurnResponse response) {
         if (Boolean.TRUE.equals(deferFinalization.get())) return response;
+        response = confirmations.reconcile(state, response);
         turnProgress.mark(state.id, TurnProgress.Kind.ANSWERING);
         ReplyContext context = replyContextBuilder.build(state, response, knownFacts(state),
                 conversations.recentMessages(state.id));
@@ -4684,8 +4695,10 @@ public class FollowupAgentService {
         return speech;
     }
 
-    private AgentTurnResponse finishWithoutModel(ConversationState state, AgentTurnResponse response) {
+    @Override
+    AgentTurnResponse finishWithoutModel(ConversationState state, AgentTurnResponse response) {
         if (Boolean.TRUE.equals(deferFinalization.get())) return response;
+        response = confirmations.reconcile(state, response);
         AgentTurnResponse finalized = new AgentTurnResponse(response.conversationId(), response.stage(), response.reply(),
                 response.quickReplies(), response.plan(), response.confirmation(), response.result(),
                 response.toolTraces(), taskProgress(state), authoritativeSpeech(response, response.reply()),
@@ -4842,7 +4855,7 @@ public class FollowupAgentService {
         state.appointmentId = null;
         state.pendingAppointmentId = null;
         state.pendingAppointmentIds = List.of();
-        state.confirmationId = null;
+        confirmations.clear(state);
         state.originalAppointmentId = null;
         state.materialReminderDone = false;
         state.departureReminderDone = false;
@@ -4863,10 +4876,6 @@ public class FollowupAgentService {
 
     private List<QuickReply> slotReplies(List<Slot> slots) {
         return slots.stream().map(slot -> q(slotLabel(slot), "SELECT_SLOT", slot.id())).toList();
-    }
-
-    private QuickReply q(String label, String action, String value) {
-        return new QuickReply(label, action, value);
     }
 
     private String acknowledgement(ExtractedFacts facts, String fallback) {
@@ -4898,7 +4907,8 @@ public class FollowupAgentService {
      * <p>时段按号源的实际时间归纳成上午/下午。记「上午」而不是「9:30」：
      * 号源是时刻，偏好是习惯，把时刻当成习惯下次会去推一个并不合适的具体时间。
      */
-    private void rememberBookingPreferences(ConversationState state) {
+    @Override
+    void rememberBookingPreferences(ConversationState state) {
         Slot slot = state.selectedSlot;
         if (slot == null) return;
         memories.remember(state.userId, MEMORY_HOSPITAL, "HABIT",
@@ -5036,10 +5046,12 @@ public class FollowupAgentService {
 
     private TaskProgress taskProgress(ConversationState state) {
         boolean active = taskInProgress(state);
+        // 日期用 DATE_LABEL（2026年9月15日），与 plan.date / result.date 及全站其他地方一致。
+        // 老人端助手页把这一行原样当「当前复诊办理」的摘要显示，ISO 写法（2026-09-15）太像编号。
         String summary = state.hospital == null ? "复诊办理尚未选择医院"
                 : state.department == null ? state.hospital + " · 待选择科室"
                 : state.date == null ? state.hospital + " · " + state.department + " · 待选择日期"
-                : state.hospital + " · " + state.department + " · " + state.date;
+                : state.hospital + " · " + state.department + " · " + state.date.format(DATE_LABEL);
         return new TaskProgress(active, state.taskStatus.name(), state.stage.name(), summary, missingField(state));
     }
 
@@ -5129,5 +5141,45 @@ public class FollowupAgentService {
 
     private String slotLabel(Slot slot) {
         return slot == null ? "待选择" : slot.date().format(DATE_LABEL) + " " + slot.time().format(TIME_LABEL);
+    }
+
+    /**
+     * 这个号源是不是已经过去了。
+     *
+     * <p>按业务时区判断，不用服务器默认时区：开发容器是 UTC，北京时间凌晨那八小时
+     * 服务器眼里的「现在」还停在昨天，会把刚过去的时段算成还没到。
+     *
+     * <p>号源查询本身就只返回此刻之后的时段，所以这里只兜「草稿或确认卡生成之后时间又过去了」
+     * 这一种情况——它恰恰是最容易漏的：确认卡上没有时间闸门，老人停多久都行。
+     *
+     * <p>「正好等于此刻」算已过去：号源查询的口径是 {@code appointment_time > 当前时间}，
+     * 差一毫秒都算过点。这里跟它对齐，否则 09:00 整点确认时能约到一条查询永远查不出来的时段。
+     */
+    private boolean slotAlreadyPassed(Slot slot) {
+        return slot != null && !LocalDateTime.of(slot.date(), slot.time()).isAfter(clock.now());
+    }
+
+    /**
+     * 这次确认是不是「照草稿开新预约」（建新预约或改期）。
+     *
+     * <p>取消类 pendingAction 一律不算——取消针对的是库里已有的预约，草稿里那份 selectedSlot
+     * 只是上次办理留下的残留，过期与否都不该拦取消。
+     */
+    private boolean booksFromDraft(ConversationState state) {
+        return state.pendingAction == null || "CREATE".equals(state.pendingAction);
+    }
+
+    /**
+     * 时间已经过去的时段一律作废，退回重选日期。
+     *
+     * <p>只清「时间」这一格不够用：真正过去的是那一天里的时段，重新问一次日期最省事，
+     * 也跟「日期已经过去」那条既有处理保持一致（{@code querySlots} 就是这么做的）。
+     * 医院、科室、陪同、出行这些已经问过的信息都留着，老人不用重说一遍。
+     */
+    @Override
+    AgentTurnResponse reaskAfterPassedSlot(ConversationState state) {
+        String passed = slotLabel(state.selectedSlot);
+        resetAfterDate(state);
+        return askDate(state, "您选的" + passed + "已经过去了，这个时间不能再约，请重新选择复诊日期。");
     }
 }

@@ -100,6 +100,14 @@ public class RuleFactExtractor implements FactExtractor {
         return "PROVIDE_INFORMATION";
     }
 
+    /**
+     * 从这句话里解出日期。{@code today} 是业务时区的今天，由调用方传进来（测试可固定）。
+     *
+     * <p><b>不擅自顺延年份。</b>“3月5日”一律按 {@code today} 所在的这一年理解，算出来已经过去
+     * 就是已经过去，原样返回，由上层按“只查今天到一个月后”的规则请老人重新说——模型那边也被
+     * 明确要求复述后请老人确认。以前这里会把明显过去的日期悄悄推到明年：老人想说的是不是明年，
+     * 系统并不知道，替他定下来就是把一次询问换成了八个月的错约。
+     */
     private LocalDate parseDate(String message, LocalDate today) {
         if (message.contains("后天")) return today.plusDays(2);
         if (message.contains("明天")) return today.plusDays(1);
@@ -117,19 +125,11 @@ public class RuleFactExtractor implements FactExtractor {
         if (iso.find()) return safeDate(Integer.parseInt(iso.group(1)), Integer.parseInt(iso.group(2)), Integer.parseInt(iso.group(3)));
         Matcher shortDate = SHORT_DATE.matcher(message);
         if (shortDate.find()) {
-            int month = Integer.parseInt(shortDate.group(1));
-            int day = Integer.parseInt(shortDate.group(2));
-            LocalDate candidate = safeDate(today.getYear(), month, day);
-            if (candidate != null && candidate.isBefore(today.minusDays(1))) candidate = safeDate(today.getYear() + 1, month, day);
-            return candidate;
+            return safeDate(today.getYear(), Integer.parseInt(shortDate.group(1)), Integer.parseInt(shortDate.group(2)));
         }
         Matcher cn = CN_DATE.matcher(message);
         if (!cn.find()) return null;
-        int month = Integer.parseInt(cn.group(1));
-        int day = Integer.parseInt(cn.group(2));
-        LocalDate candidate = safeDate(today.getYear(), month, day);
-        if (candidate != null && candidate.isBefore(today.minusDays(1))) candidate = safeDate(today.getYear() + 1, month, day);
-        return candidate;
+        return safeDate(today.getYear(), Integer.parseInt(cn.group(1)), Integer.parseInt(cn.group(2)));
     }
 
     private LocalTime parseTime(String message) {

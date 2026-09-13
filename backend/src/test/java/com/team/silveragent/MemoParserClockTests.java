@@ -245,6 +245,34 @@ class MemoParserClockTests {
         assertThat(MemoParser.timeHintOf("饭后半小时提醒我吃药")).isEqualTo("饭后半小时");
     }
 
+    /**
+     * 传进去的业务时间锚点说了算，不是系统时钟。
+     *
+     * <p>生产路径（FollowupAgentService）每次都把 BusinessClock 的 now/today 传进来，所以配置改
+     * {@code business.time.zone} 备忘推算跟着一起改。这里钉一个跟真实「今天」无关的锚点：如果哪天
+     * 又退回读系统时钟，这几个断言立刻变红。
+     */
+    @Test
+    void explicitAnchorDecidesTheDayInsteadOfTheSystemClock() {
+        // 锚在 2026-09-14（周一）：这一周的周三 09-16 还没到。
+        java.time.LocalDateTime monday = java.time.LocalDateTime.of(2026, 9, 14, 8, 0);
+        assertThat(MemoParser.detect("这个星期三提醒我量血压", monday).needsDay()).isFalse();
+        assertThat(MemoParser.resolveDay("明天", monday.toLocalDate()))
+                .isEqualTo(java.time.LocalDate.of(2026, 9, 15));
+        assertThat(MemoParser.resolveRepeatAnchor("WEEKLY", "每周三", monday.toLocalDate()))
+                .isEqualTo(java.time.LocalDate.of(2026, 9, 16));
+
+        // 锚在 2026-09-17（周四）：这一周的周三已经过去了，要追问是哪一天。
+        java.time.LocalDateTime thursday = java.time.LocalDateTime.of(2026, 9, 17, 8, 0);
+        assertThat(MemoParser.detect("这个星期三提醒我量血压", thursday).needsDay()).isTrue();
+        assertThat(MemoParser.pastWeekdayDate("这个星期三提醒我量血压", thursday.toLocalDate()))
+                .isEqualTo(java.time.LocalDate.of(2026, 9, 16));
+        // 锚点当天 09:00 说“八点吃药”：已经过点，顺延到 09-18（不是系统时钟里的明天）。
+        assertThat(MemoParser.resolveRemindAt("八点吃药", "八点", null,
+                java.time.LocalDateTime.of(2026, 9, 17, 9, 0)))
+                .isEqualTo(java.time.LocalDateTime.of(2026, 9, 18, 8, 0));
+    }
+
     @Test
     void timeAnswerMergeUsesChineseHour() {
         java.time.LocalDateTime at = MemoParser.resolveRemindAt("明早提醒我量血压", "七点");

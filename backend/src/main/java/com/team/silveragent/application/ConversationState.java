@@ -94,7 +94,31 @@ final class ConversationState {
     String pendingEntityRaw;
     /** 地图候选支线选中的方向：true=院内指引，false=院外路线。与取消支线互不共用。 */
     boolean travelInside;
+    /** 待确认写操作的唯一钥匙。与下面两项同生共死：一起签、一起清（见 {@code ConfirmationService}）。 */
     String confirmationId;
+    /**
+     * 确认凭据（{@code confirmationId}）授权执行的是哪一类动作，取值为
+     * {@code ConfirmationService.PendingOperation.Kind} 的名字。
+     *
+     * <p><b>签发时定下，之后不再变动</b>，并且随快照一起持久化。刻意存名字而不是枚举：
+     * 快照里出现一个认不出来的名字时必须能发现（见 {@code Kind.stored}），
+     * 存成枚举则反序列化直接抛异常，两处都不是「静默当成默认值」——那正是要避免的。
+     *
+     * <p>null＝这份凭据不可信（旧快照写的、或已被消费/废止）：一律当无效，要求重新确认。
+     */
+    String confirmationKind;
+    /**
+     * 这份凭据签发时锁定的那一批目标（目前只有取消族用得到），随快照持久化。
+     *
+     * <p>与 {@link #pendingAppointmentIds} 的分工：那个字段是「当前草稿想取消哪几条」，
+     * 范围修订会改写它；这个是「这张卡已经向老人承诺过取消哪几条」，签发之后就冻住了。
+     * 恢复时读的是这一份，所以重启不会把一批缩成一条。
+     *
+     * <p>null＝还原不出完整的目标集合（旧快照），一律作废凭据、要求重新确认，
+     * <b>绝不按剩下的一部分执行</b>。空列表是另一个意思：这份凭据确实没有目标对象
+     * （开新预约、备忘、代约取消都不针对已有预约号）。
+     */
+    List<String> confirmationTargetIds;
     String originalAppointmentId;
     /** 当前会话正在变更的“由家属/志愿者代约”的安排者 id；变更完成后用于回写通知，null=自己约的。 */
     String arrangedArrangerId;

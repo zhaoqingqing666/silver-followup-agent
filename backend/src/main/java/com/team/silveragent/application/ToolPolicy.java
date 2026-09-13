@@ -32,4 +32,18 @@ final class ToolPolicy {
         if (!"CONFIRMATION_ONLY".equals(tool.definition().risk())) return Decision.DENY_SIDE_EFFECT;
         return Decision.ALLOW;
     }
+
+    /**
+     * 澄清工具有第三条独立通道，而且是最窄的一条：只问一句、摆出候选，不建卡、不发凭据。
+     *
+     * <p>刻意<b>不</b>复用确认通道：两者都挂着 CALL_CONFIRMATION_TOOL 这个动作类型，
+     * 一旦共用入口，「澄清」就能顺手拿到一张确认卡和 {@code confirmationId}，
+     * 而凭据正是全部写操作的唯一钥匙——那等于给澄清发了执行授权。
+     */
+    Decision evaluateClarification(AgentRole role, ToolRegistry.RegisteredTool tool) {
+        if (tool == null) return Decision.DENY_UNKNOWN_TOOL;
+        if (!tool.visibleTo(role)) return Decision.DENY_ROLE;
+        if (!"CLARIFICATION_ONLY".equals(tool.definition().risk())) return Decision.DENY_SIDE_EFFECT;
+        return Decision.ALLOW;
+    }
 }

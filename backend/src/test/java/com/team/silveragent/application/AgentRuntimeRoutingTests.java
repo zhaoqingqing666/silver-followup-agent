@@ -91,22 +91,57 @@ class AgentRuntimeRoutingTests {
         assertThat(outcome.proposedTool()).isEqualTo("hospital.search");
     }
 
+    /**
+     * 模型把确认交互误写成只读调用时，后果必须和写对了完全一样：一样的路由，
+     * 而且**参数要原样带到取消链路上**。
+     *
+     * <p>这里曾经把 {@code proposedTools} 清空、只留下一个路由——那是本阶段要堵的第二个洞：
+     * 参数一丢，取消链路就只能退回 Java 中文词表按原句关键词重猜范围，而那条路没走过任何
+     * 契约校验。模型说了 {@code scope=DATE_RANGE} 却因为标签写错被当成「都取消」，就是这么来的。
+     */
     @Test
-    void confirmationOnlyToolMistakenForAReadCallStillEntersTheConfirmationWorkflow() {
+    void confirmationOnlyToolMistakenForAReadCallKeepsItsStructuredArguments() {
         ConversationPlanner planner = mock(ConversationPlanner.class);
         when(planner.mode()).thenReturn("MODEL_PLANNER_WITH_RULE_FALLBACK");
         when(planner.plan(any(), any(), any())).thenReturn(new PlannerDecision(
                 PlannerActionType.CALL_READ_TOOL, "CANCEL_APPOINTMENT", "interaction.requestConfirmation",
-                Map.of(), "请确认是否取消这次预约？", "FOLLOWUP_FLOW",
+                Map.of("scope", "DATE_RANGE", "date", "2026-09-12", "direction", "BEFORE"),
+                "请确认是否取消这次预约？", "FOLLOWUP_FLOW",
                 facts("CANCEL_APPOINTMENT"), "MODEL_PLANNER"));
 
-        AgentRuntime.Outcome outcome = runtime(planner).plan("取消这次预约", context(),
+        AgentRuntime.Outcome outcome = runtime(planner).plan("12号之前的都取消", context(),
                 new ConversationState("conversation", "user-001"));
 
         assertThat(outcome.route()).isEqualTo(AgentOrchestrator.Route.CANCEL_EXISTING_APPOINTMENT);
         assertThat(outcome.route()).isNotEqualTo(AgentOrchestrator.Route.DIRECT_ANSWER);
         assertThat(outcome.proposedTool()).isEqualTo("interaction.requestConfirmation");
-        assertThat(outcome.proposedTools()).isEmpty();
+        // 动作类型归位成 CALL_CONFIRMATION_TOOL：这一轮该怎么走由它点名的工具决定，不由标签决定。
+        assertThat(outcome.actionType()).isEqualTo(PlannerActionType.CALL_CONFIRMATION_TOOL);
+        assertThat(outcome.hasContractCheckedToolCall()).isTrue();
+        assertThat(outcome.proposedTools()).singleElement().satisfies(call -> {
+            assertThat(call.toolName()).isEqualTo("interaction.requestConfirmation");
+            assertThat(call.arguments()).containsEntry("scope", "DATE_RANGE")
+                    .containsEntry("direction", "BEFORE");
+        });
+    }
+
+    /** 误写的澄清调用同样走澄清通道，不因为动作类型写错就变成只读查询或一段没有按钮的回答。 */
+    @Test
+    void clarificationMistakenForAReadCallStillEntersTheClarificationRoute() {
+        ConversationPlanner planner = mock(ConversationPlanner.class);
+        when(planner.mode()).thenReturn("MODEL_PLANNER_WITH_RULE_FALLBACK");
+        when(planner.plan(any(), any(), any())).thenReturn(new PlannerDecision(
+                PlannerActionType.CALL_READ_TOOL, "CANCEL_APPOINTMENT", "interaction.askClarification",
+                Map.of("candidateTool", "appointment.queryMine", "question", "您想取消的是哪一条？"),
+                null, "FOLLOWUP_FLOW", facts("CANCEL_APPOINTMENT"), "MODEL_PLANNER"));
+
+        AgentRuntime.Outcome outcome = runtime(planner).plan("那些都不要了", context(),
+                new ConversationState("conversation", "user-001"));
+
+        assertThat(outcome.route()).isEqualTo(AgentOrchestrator.Route.ASK_CLARIFICATION);
+        assertThat(outcome.actionType()).isEqualTo(PlannerActionType.CALL_CONFIRMATION_TOOL);
+        // 澄清仍然不发凭据：候选要靠 Java 现查，这一轮不建卡。
+        assertThat(outcome.proposedTools()).hasSize(1);
     }
 
     @Test
@@ -131,6 +166,92 @@ class AgentRuntimeRoutingTests {
             assertThat(call.arguments()).containsEntry("scope", "DATE_RANGE")
                     .containsEntry("direction", "BEFORE");
         });
+    }
+
+    /**
+     * 确认回答的参数也要过同一份契约：{@code decision} 只能是 CONFIRM 或 DENY。
+     *
+     * <p>这条钉的是<b>结果</b>：不合法的确认回答一律回绝，永远不许落到 CONFIRM_PENDING 上。
+     * 回绝本来就是这个结果，所以测试守的不是一次行为变更，而是这个不变量——尤其是挡住那个看着
+     * 很自然、其实很危险的「统一」改法：这条路上「判罚之后回哪去」和澄清<b>必须不一样</b>。
+     * 澄清参数不成立时是按 intent 回既有工作流的；这里照搬就会出事——intent 是
+     * {@code CONFIRM_ACTION}、会话又停在等待确认上，{@code modelRoute} 会把它接成
+     * CONFIRM_PENDING，那等于「一次参数写错的调用换来一次真的执行」。凭据原地不动才对，
+     * 他按原来那个按钮重来一次就行。
+     */
+    @Test
+    void aConfirmationResponseWithAnUnknownDecisionIsRefusedInsteadOfExecuting() {
+        ConversationPlanner planner = mock(ConversationPlanner.class);
+        when(planner.mode()).thenReturn("MODEL_PLANNER_WITH_RULE_FALLBACK");
+        when(planner.plan(any(), any(), any())).thenReturn(new PlannerDecision(
+                PlannerActionType.CALL_CONFIRMATION_TOOL, "CONFIRM_ACTION",
+                "interaction.respondConfirmation", Map.of("decision", "MAYBE"),
+                null, "FOLLOWUP_FLOW", facts("CONFIRM_ACTION"), "MODEL_PLANNER"));
+
+        ConversationState state = new ConversationState("conversation", "user-001");
+        state.stage = ConversationState.Stage.AWAITING_CONFIRMATION;
+        state.confirmationId = "java-owned-id";
+
+        AgentRuntime.Outcome outcome = runtime(planner).plan("嗯……", context(), state);
+
+        assertThat(outcome.route()).isEqualTo(AgentOrchestrator.Route.REFUSE_UNSUPPORTED_TOOL);
+        assertThat(outcome.route()).isNotEqualTo(AgentOrchestrator.Route.CONFIRM_PENDING);
+        assertThat(outcome.proposedTools()).isEmpty();
+    }
+
+    /** 连 decision 都没给：同上，明确回绝，绝不当成一次确认。 */
+    @Test
+    void aConfirmationResponseWithoutADecisionIsRefused() {
+        ConversationPlanner planner = mock(ConversationPlanner.class);
+        when(planner.mode()).thenReturn("MODEL_PLANNER_WITH_RULE_FALLBACK");
+        when(planner.plan(any(), any(), any())).thenReturn(new PlannerDecision(
+                PlannerActionType.CALL_CONFIRMATION_TOOL, "CONFIRM_ACTION",
+                "interaction.respondConfirmation", Map.of(),
+                null, "FOLLOWUP_FLOW", facts("CONFIRM_ACTION"), "MODEL_PLANNER"));
+
+        ConversationState state = new ConversationState("conversation", "user-001");
+        state.stage = ConversationState.Stage.AWAITING_CONFIRMATION;
+        state.confirmationId = "java-owned-id";
+
+        AgentRuntime.Outcome outcome = runtime(planner).plan("那个", context(), state);
+
+        assertThat(outcome.route()).isEqualTo(AgentOrchestrator.Route.REFUSE_UNSUPPORTED_TOOL);
+        assertThat(outcome.proposedTools()).isEmpty();
+    }
+
+    /** 大小写由契约那一处统一归一化，模型写 confirm / deny 一样认。 */
+    @Test
+    void aConfirmationDecisionIsNormalizedBeforeItIsTurnedIntoARoute() {
+        for (String decision : List.of("confirm", "Confirm", "CONFIRM")) {
+            ConversationPlanner planner = mock(ConversationPlanner.class);
+            when(planner.mode()).thenReturn("MODEL_PLANNER_WITH_RULE_FALLBACK");
+            when(planner.plan(any(), any(), any())).thenReturn(new PlannerDecision(
+                    PlannerActionType.CALL_CONFIRMATION_TOOL, "CONFIRM_ACTION",
+                    "interaction.respondConfirmation", Map.of("decision", decision),
+                    null, "FOLLOWUP_FLOW", facts("CONFIRM_ACTION"), "MODEL_PLANNER"));
+
+            ConversationState state = new ConversationState("conversation", "user-001");
+            state.stage = ConversationState.Stage.AWAITING_CONFIRMATION;
+            state.confirmationId = "java-owned-id";
+
+            assertThat(runtime(planner).plan("确认", context(), state).route())
+                    .as(decision).isEqualTo(AgentOrchestrator.Route.CONFIRM_PENDING);
+        }
+        for (String decision : List.of("deny", "DENY")) {
+            ConversationPlanner planner = mock(ConversationPlanner.class);
+            when(planner.mode()).thenReturn("MODEL_PLANNER_WITH_RULE_FALLBACK");
+            when(planner.plan(any(), any(), any())).thenReturn(new PlannerDecision(
+                    PlannerActionType.CALL_CONFIRMATION_TOOL, "DENY_ACTION",
+                    "interaction.respondConfirmation", Map.of("decision", decision),
+                    null, "FOLLOWUP_FLOW", facts("DENY_ACTION"), "MODEL_PLANNER"));
+
+            ConversationState state = new ConversationState("conversation", "user-001");
+            state.stage = ConversationState.Stage.AWAITING_CONFIRMATION;
+            state.confirmationId = "java-owned-id";
+
+            assertThat(runtime(planner).plan("先不要", context(), state).route())
+                    .as(decision).isEqualTo(AgentOrchestrator.Route.DENY_PENDING);
+        }
     }
 
     @Test

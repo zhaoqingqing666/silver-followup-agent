@@ -296,7 +296,14 @@ public class ConversationStore {
             String interruptedPendingAction, String interruptedPendingAppointmentId,
             String sideTask, String returnPolicy,
             String pendingEntityType, String pendingEntityId, String pendingEntityName, String pendingEntityRaw,
-            String confirmationId, String originalAppointmentId,
+            String confirmationId, String confirmationKind, List<String> confirmationTargetIds,
+            String originalAppointmentId,
+            // 备忘确认卡要写的那条草稿。它不在授权三样里，但同样是"签发那一刻定下的内容"：
+            // 不进快照的话，重启之后这张卡就只能对着一个 null 正文执行，或者按会话里别的什么凑
+            // 一段出来——两条路都是"写进去一条他从来没在卡上看到过的备忘"。
+            // 缺了这一段（更早版本写下的快照）由 ConfirmationService 判成凭据不可信，整份作废。
+            String pendingMemoText, LocalDateTime pendingMemoAt, String pendingMemoRepeat,
+            LocalDate pendingMemoDay, ConversationState.Stage memoReturnStage, boolean memoNeedsApproval,
             boolean materialReminderDone, boolean departureReminderDone,
             boolean notificationDone, boolean scheduleChecked
     ) {
@@ -313,7 +320,10 @@ public class ConversationStore {
                     state.interruptedPendingAction, state.interruptedPendingAppointmentId,
                     state.sideTask, state.returnPolicy,
                     state.pendingEntityType, state.pendingEntityId, state.pendingEntityName, state.pendingEntityRaw,
-                    state.confirmationId, state.originalAppointmentId,
+                    state.confirmationId, state.confirmationKind, state.confirmationTargetIds,
+                    state.originalAppointmentId,
+                    state.pendingMemoText, state.pendingMemoAt, state.pendingMemoRepeat,
+                    state.pendingMemoDay, state.memoReturnStage, state.memoNeedsApproval,
                     state.materialReminderDone, state.departureReminderDone,
                     state.notificationDone, state.scheduleChecked);
         }
@@ -360,7 +370,20 @@ public class ConversationStore {
             state.pendingEntityName = pendingEntityName;
             state.pendingEntityRaw = pendingEntityRaw;
             state.confirmationId = confirmationId;
+            // 授权范围与目标集合随凭据一起恢复。旧快照没有这两个字段（缺省 null），
+            // 那正是「这份凭据不可信」的标记——由 ConfirmationService 判成无效、要求重新确认，
+            // 而不是在这里猜一个默认值出来。刻意不做任何回填。
+            state.confirmationKind = confirmationKind;
+            state.confirmationTargetIds = confirmationTargetIds;
             state.originalAppointmentId = originalAppointmentId;
+            // 备忘草稿同理：原样恢复、不回填。旧快照读出来是 null，由 ConfirmationService
+            // 的 payloadIntact 判成凭据不可信（绝不拿一个 null 正文去写库）。
+            state.pendingMemoText = pendingMemoText;
+            state.pendingMemoAt = pendingMemoAt;
+            state.pendingMemoRepeat = pendingMemoRepeat;
+            state.pendingMemoDay = pendingMemoDay;
+            state.memoReturnStage = memoReturnStage;
+            state.memoNeedsApproval = memoNeedsApproval;
             state.materialReminderDone = materialReminderDone;
             state.departureReminderDone = departureReminderDone;
             state.notificationDone = notificationDone;

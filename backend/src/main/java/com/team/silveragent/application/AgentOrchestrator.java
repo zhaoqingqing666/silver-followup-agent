@@ -53,6 +53,9 @@ final class AgentOrchestrator {
         // 由 Java 明确回绝，不用模型的话术。单独成一个路由，是因为 DIRECT_ANSWER 会 pauseActiveTask，
         // 把正在办理的预约流程停掉；这里只是“这条工具我不认”，不该动任务状态。
         REFUSE_UNSUPPORTED_TOOL,
+        // 澄清交互：模型问一句，候选由 Java 从真实工具结果里补上。它不是确认——不发凭据、不建卡，
+        // 所以单独一个路由，绝不能落进 CONFIRM_PENDING/CANCEL_EXISTING_APPOINTMENT 那些会写库的支线。
+        ASK_CLARIFICATION,
         CURRENT_FLOW
     }
 

@@ -1,6 +1,7 @@
 package com.team.silveragent.application.demo;
 
 import com.team.silveragent.application.FollowupAgentService;
+import com.team.silveragent.application.time.BusinessClock;
 
 import com.team.silveragent.domain.model.AgentTurnResponse;
 import com.team.silveragent.domain.model.DemoScenarioResponse;
@@ -44,14 +45,17 @@ public class DemoScenarioService {
     private final FollowupAgentService agent;
     private final RollingAppointmentSlotInitializer slots;
     private final RollingUserScheduleInitializer schedules;
+    private final BusinessClock clock;
 
     public DemoScenarioService(JdbcTemplate jdbc, FollowupAgentService agent,
                                RollingAppointmentSlotInitializer slots,
-                               RollingUserScheduleInitializer schedules) {
+                               RollingUserScheduleInitializer schedules,
+                               BusinessClock clock) {
         this.jdbc = jdbc;
         this.agent = agent;
         this.slots = slots;
         this.schedules = schedules;
+        this.clock = clock;
     }
 
     /**
@@ -116,13 +120,19 @@ public class DemoScenarioService {
         };
     }
 
-    /** 体检那天（下周三）：冲突场景与正常办理都在这一天。 */
+    /**
+     * 体检那天（下周三）：冲突场景与正常办理都在这一天。
+     *
+     * <p>用注入的业务时钟取「今天」，不调 {@code RollingUserScheduleInitializer} 的无参静态版——
+     * 静态版钉在 {@code BusinessClock.DEFAULT_ZONE} 上，改了 {@code business.time.zone} 之后
+     * 这里显示的日期会和 {@code schedules.seed()} 真正排进去的日程对不上。
+     */
     private String checkupDate() {
-        return RollingUserScheduleInitializer.checkupDate().format(DATE_LABEL);
+        return RollingUserScheduleInitializer.checkupDate(clock.today()).format(DATE_LABEL);
     }
 
     /** 「和家人吃饭」那天（下周六）：周末没有号源，天然就是「指定日期无号」的现场。 */
     private String weekendDate() {
-        return RollingUserScheduleInitializer.dinnerDate().format(DATE_LABEL);
+        return RollingUserScheduleInitializer.dinnerDate(clock.today()).format(DATE_LABEL);
     }
 }

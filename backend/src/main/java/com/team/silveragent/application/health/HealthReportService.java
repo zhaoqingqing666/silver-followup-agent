@@ -1,6 +1,6 @@
 package com.team.silveragent.application.health;
 
-import com.team.silveragent.application.memo.MemoParser;
+import com.team.silveragent.application.time.BusinessClock;
 
 import com.team.silveragent.domain.model.ToolModels.Contact;
 import com.team.silveragent.domain.tool.FamilyNotificationTool;
@@ -50,11 +50,14 @@ public class HealthReportService {
     private final HealthRecordStore records;
     private final FamilyNotificationTool familyTool;
     private final JdbcTemplate jdbc;
+    private final BusinessClock clock;
 
-    public HealthReportService(HealthRecordStore records, FamilyNotificationTool familyTool, JdbcTemplate jdbc) {
+    public HealthReportService(HealthRecordStore records, FamilyNotificationTool familyTool, JdbcTemplate jdbc,
+                               BusinessClock clock) {
         this.records = records;
         this.familyTool = familyTool;
         this.jdbc = jdbc;
+        this.clock = clock;
     }
 
     /**
@@ -109,13 +112,17 @@ public class HealthReportService {
      * 靠这个判断“补过了没”，所以同一周里重启多少次都只发一条。
      */
     public boolean weeklySentThisWeek(String userId) {
-        LocalDate today = MemoParser.nowInDemoZone().toLocalDate();
+        LocalDate today = clock.today();
         LocalDateTime monday = today.minusDays(today.getDayOfWeek().getValue() - 1L).atStartOfDay();
+        // 「本周一零点」是业务钟面（北京时间），family_notifications.created_at 是审计钟面
+        // （JVM 默认时区写进去的）。两个钟面的值直接比大小会差出一个时区：这里先把业务钟面的
+        // 那一刻换算成审计钟面的写法再比较。反过来把 created_at 改成业务钟面是不行的——
+        // 库里已有的行会凭空老八小时。
         Integer count = jdbc.queryForObject("""
                 SELECT COUNT(*) FROM family_notifications n
                 JOIN family_contacts fc ON fc.id = n.contact_id
                 WHERE fc.user_id=? AND n.content LIKE ? AND n.created_at>=?
-                """, Integer.class, userId, WEEKLY_TITLE + "%", Timestamp.valueOf(monday));
+                """, Integer.class, userId, WEEKLY_TITLE + "%", Timestamp.valueOf(clock.toAuditClock(monday)));
         return count != null && count > 0;
     }
 
@@ -135,7 +142,7 @@ public class HealthReportService {
 
     /** 把一段时间内的记录汇总成一段话；这段时间一条都没有时 {@code text} 为 null。 */
     public Report summarize(String userId, HealthReportParser.Window window, String item, String title) {
-        LocalDateTime to = MemoParser.nowInDemoZone();
+        LocalDateTime to = clock.now();
         LocalDateTime from = to.minusDays(window.days());
         String rangeLabel = from.format(DAY_LABEL) + "至" + to.format(DAY_LABEL);
         List<HealthRecordStore.RecordView> rows = records.inWindow(userId, item, from, to, MAX_SAMPLES);

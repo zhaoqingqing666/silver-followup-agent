@@ -67,6 +67,31 @@ function fmtRepeat(iso: string, repeat: string): string {
   return `每月${at.getDate()}号 ${time}`;
 }
 
+/** 取消范围的读法。范围由模型给结构化参数、Java 守门禁，这里只把它说成人话。 */
+function describeCancelScope(req: Rec): string {
+  const scope = str(get(req, 'scope'));
+  const direction: Record<string, string> = {
+    BEFORE: '之前', ON_OR_BEFORE: '及之前', AFTER: '之后', ON_OR_AFTER: '及之后',
+  };
+  if (scope === 'ALL') return '范围：全部已确认预约';
+  if (scope === 'DATE_RANGE') {
+    return `范围：${fmtDate(get(req, 'date'))}${direction[str(get(req, 'direction'))] ?? ''}的已确认预约`;
+  }
+  if (scope === 'SINGLE_FILTER') {
+    const conditions = [
+      str(get(req, 'date')) ? fmtDate(get(req, 'date')) : '',
+      str(get(req, 'time')),
+      str(get(req, 'period')) === 'MORNING' ? '上午' : str(get(req, 'period')) === 'AFTERNOON' ? '下午' : '',
+      str(get(req, 'position')) === 'NEAREST' ? '最近一次' : str(get(req, 'position')) === 'EARLIEST' ? '最早一次' : '',
+      str(get(req, 'hospital')),
+      str(get(req, 'department')),
+    ].filter(Boolean);
+    return conditions.length ? `范围：${conditions.join(' · ')}` : '范围：还没有可用的筛选条件';
+  }
+  if (scope === 'AMBIGUOUS') return '范围：老人自己也说不清，需要先从真实候选里选一条';
+  return `范围：${scope || '未提供'}`;
+}
+
 export function describeTrace(trace: ToolTrace): { label: string; note: string } {
   const req = asRec(parse(trace.parameters));
   const res = parse(trace.result);
@@ -148,6 +173,20 @@ export function describeTrace(trace: ToolTrace): { label: string; note: string }
       const duration = str(get(resRec, 'durationMinutes'));
       const transport = str(get(resRec, 'transport')) || str(get(req, 'transport'));
       return { label: '出行 · 规划路线', note: duration ? `乘${transport}约 ${duration} 分钟，建议 ${fmtDateTime(resRec.departureAt)} 出发` : '生成路线指引' };
+    }
+    case 'interaction.requestConfirmation':
+      return { label: '取消预约 · 生成确认卡', note: describeCancelScope(req) };
+    case 'interaction.respondConfirmation':
+      return {
+        label: '取消预约 · 处理确认卡',
+        note: str(get(req, 'decision')) === 'DENY' ? '老人选择保留，没有执行取消' : '老人已确认，按确认卡执行',
+      };
+    case 'interaction.askClarification': {
+      // 澄清只提问：这里必须读得像“还在问”，不能写得像“已经办了”。
+      const count = str(get(resRec, 'candidateCount'));
+      const outcome = str(get(resRec, 'outcome'));
+      if (outcome === 'NO_RESULT') return { label: '取消预约 · 没有可取消的预约', note: '没有查到已确认预约，未执行任何取消' };
+      return { label: '取消预约 · 请老人选择要取消哪条', note: count ? `已列出 ${count} 条真实候选，等老人选择` : '等老人从真实候选中选择' };
     }
     case 'workflow.error':
       return { label: '办理中断', note: `需要修改或重试：${str(resRec.error) || str(get(req, 'error'))}` };

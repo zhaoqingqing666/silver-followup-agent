@@ -11,6 +11,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 一轮智能体运行时：调用规划模型，执行工具白名单和回答权限检查，再交给工作流。
@@ -21,7 +22,23 @@ final class AgentRuntime {
     record Outcome(AgentOrchestrator.Route route, ExtractedFacts facts, String replyDraft,
                    String dialogueMode, String plannerSource, String proposedTool,
                    List<PlannerToolCall> proposedTools, PlannerActionType actionType,
-                   String intent, boolean modelDriven) { }
+                   String intent, boolean modelDriven) {
+        /**
+         * 这一轮有一个<b>过了契约校验</b>的工具调用，可以照它的意思办。
+         *
+         * <p>名字说的是「契约查过了」，不只是「有东西」。差别很要紧：调用方拿它决定要不要再跑一遍
+         * 关键词兜底，而兜底会按原句里的「都取消」「最近」重猜一次范围——所以只有在
+         * 「参数已经判过一遍、这次调用确实能用」的时候才允许跳过兜底。
+         *
+         * <p>「非空 ⇒ 已校验」是产品路径给的性质，不是这个 record 自己保证的：只有
+         * {@link #modelProposal} 会往 {@code proposedTools} 里放东西，而它放之前必须过
+         * {@link ToolContract}——三条交互通道（只读 / 确认 / 澄清）各查一次，写错标签的
+         * 那条也一样查。所以这里读「非空」就是在读「已校验」。
+         */
+        boolean hasContractCheckedToolCall() {
+            return modelDriven && proposedTools != null && !proposedTools.isEmpty();
+        }
+    }
 
     private final ConversationPlanner planner;
     private final ToolRegistry registry;
@@ -172,31 +189,9 @@ final class AgentRuntime {
         ExtractedFacts facts = proposal.facts();
         if (proposal.actionType() == PlannerActionType.CALL_CONFIRMATION_TOOL) {
             if (proposal.toolCalls().size() != 1) {
-                return outcome(AgentOrchestrator.Route.REFUSE_UNSUPPORTED_TOOL, proposal, null,
-                        List.of(), true);
+                return refuse(proposal);
             }
-            PlannerToolCall call = proposal.toolCalls().get(0);
-            ToolRegistry.RegisteredTool tool = registry.find(call.toolName()).orElse(null);
-            if (toolPolicy.evaluateConfirmation(state.actorRole, tool) != ToolPolicy.Decision.ALLOW) {
-                return outcome(AgentOrchestrator.Route.REFUSE_UNSUPPORTED_TOOL, proposal, null,
-                        List.of(), true);
-            }
-            if ("interaction.requestConfirmation".equals(call.toolName())) {
-                return outcome(tool.route(), proposal, call.toolName(), List.of(call), true);
-            }
-            if ("interaction.respondConfirmation".equals(call.toolName())) {
-                String decision = call.arguments().getOrDefault("decision", "").trim().toUpperCase();
-                if ("CONFIRM".equals(decision)) {
-                    return outcome(AgentOrchestrator.Route.CONFIRM_PENDING, proposal,
-                            call.toolName(), List.of(call), true);
-                }
-                if ("DENY".equals(decision)) {
-                    return outcome(AgentOrchestrator.Route.DENY_PENDING, proposal,
-                            call.toolName(), List.of(call), true);
-                }
-            }
-            return outcome(AgentOrchestrator.Route.REFUSE_UNSUPPORTED_TOOL, proposal, null,
-                    List.of(), true);
+            return interactionProposal(proposal, state, proposal.toolCalls().get(0));
         }
         // 确认回答优先于普通 ANSWER/ASK_USER：模型已经结合确认卡理解为同意或拒绝时，
         // 不能只把 replyDraft 说给用户听而不推进 confirmationId。
@@ -216,12 +211,18 @@ final class AgentRuntime {
                 ToolRegistry.RegisteredTool tool = registry.find(call.toolName()).orElse(null);
                 ToolPolicy.Decision decision = toolPolicy.evaluate(state.actorRole, tool);
                 if (decision == ToolPolicy.Decision.ALLOW) {
+                    // 类型、必填、枚举、字段组合在这里统一判一次。参数缺项或取值非法就不执行这次调用——
+                    // 拿一份缺字段的参数去查库，只会得到一份看起来像「没查到」的假结果。
+                    // 也绝不替它猜补：按它自己给的 intent 回到既有 Java 工作流。
+                    if (ToolContract.check(tool, call).isPresent()) return rejectedByIntent(proposal, state);
                     approved.add(call);
-                } else if (decision == ToolPolicy.Decision.DENY_SIDE_EFFECT && tool != null
-                        && "CONFIRMATION_ONLY".equals(tool.definition().risk())) {
-                    // 模型偶尔会把确认交互误写成 CALL_READ_TOOL。它仍然不能自动执行，
-                    // 但应降级为“进入 Java 确认流程”，不能静默变成一段没有卡片的回答。
-                    return outcome(tool.route(), proposal, call.toolName(), List.of(), true);
+                } else if (decision == ToolPolicy.Decision.DENY_SIDE_EFFECT && tool != null) {
+                    // 模型偶尔会把确认 / 澄清交互误写成 CALL_READ_TOOL。它仍然不能自动执行——上面那次
+                    // evaluate 只认 READ_ONLY，这一步没变；但也不能静默变成一段没有卡片的回答，
+                    // 更不能因为动作类型写错就把这次调用丢掉：丢掉了，取消链路就只能退回 Java
+                    // 中文词表按原句关键词重猜范围——那是一条没走过任何契约校验的路，正好绕开
+                    // 这一轮本该判的东西。按它真正点名的工具走同一条交互通道，参数原样带上。
+                    return interactionProposal(proposal, state, call);
                 } else {
                     rejectedTool = true;
                 }
@@ -243,17 +244,7 @@ final class AgentRuntime {
                 return outcome(registry.find(first.toolName()).orElseThrow().route(), proposal,
                         first.toolName(), List.of(first), true);
             }
-            if (rejectedTool) {
-                // 模型编了一个执行不了的工具（没注册、角色没权限，或者是个写工具）：绝不执行它，
-                // 也绝不能静默降成一段没有卡片的回答。先忽略工具名，按它自己给的 intent 回到既有
-                // Java 工作流——写操作在那里仍会被翻译成确认卡，而不是被这里直接执行。
-                AgentOrchestrator.Route byIntent = dailyRoute(proposal.intent());
-                if (byIntent == null) byIntent = modelRoute(proposal.intent(), state);
-                if (byIntent != null) return outcome(byIntent, proposal, null, List.of(), true);
-                // intent 也不可信（UNKNOWN 或没映射）时明确回绝，不复用模型话术、不动任务状态。
-                return outcome(AgentOrchestrator.Route.REFUSE_UNSUPPORTED_TOOL, proposal, null,
-                        List.of(), true);
-            }
+            if (rejectedTool) return rejectedByIntent(proposal, state);
             return outcome(AgentOrchestrator.Route.DIRECT_ANSWER, proposal, null, List.of(), true);
         }
 
@@ -281,6 +272,94 @@ final class AgentRuntime {
         if (workflowRoute != null) return outcome(workflowRoute, proposal, null, List.of(), true);
         // 模型未给可用回答时只进入草稿更新，不再运行第二套关键词意图判断。
         return outcome(AgentOrchestrator.Route.CURRENT_FLOW, proposal, null, List.of(), true);
+    }
+
+    /**
+     * 一次交互工具调用（确认卡 / 澄清）该怎么走。两条通道各有自己的判罚入口，不能互相借。
+     *
+     * <p>模型把这类工具误写成 {@code CALL_READ_TOOL} 时走的也是这里：动作类型是它写错的标签，
+     * 工具名和参数才是真的，所以两边的后果必须一致——路由、参数、判罚都不因为写错而改变。
+     *
+     * <p>{@code requestConfirmation} 的参数够不够用<b>不在这里判</b>：取消链路拿的是同一份
+     * {@link ToolContract} 判罚（{@link #rejection}），它要靠那条判罚决定「转为澄清」还是
+     * 「照范围出卡」。判两次就会有两套口径，而「范围说不清」正好是这两套口径最容易分叉的地方。
+     *
+     * <p>{@code respondConfirmation} 反过来，<b>必须在这里判</b>：它没有下游可依赖——它直接翻成
+     * 确认或拒绝，再往下就是执行。所以三条通道里只有它在这里查参数，而且查完只回绝、不回退。
+     */
+    private Outcome interactionProposal(PlannerDecision proposal, ConversationState state,
+                                        PlannerToolCall call) {
+        ToolRegistry.RegisteredTool tool = registry.find(call.toolName()).orElse(null);
+        if ("interaction.askClarification".equals(call.toolName())) {
+            // 澄清走最窄的第三条通道：不自动执行，也拿不到确认凭据。判罚和确认通道分开，
+            // 免得「问一句」顺手借到一张卡和 confirmationId——那是全部写操作的唯一钥匙。
+            if (toolPolicy.evaluateClarification(state.actorRole, tool) != ToolPolicy.Decision.ALLOW) {
+                return refuse(proposal);
+            }
+            if (ToolContract.check(tool, call).isPresent()) {
+                // 参数不成立就不算一次澄清，按 intent 回既有工作流，不猜补、不执行。
+                return rejectedByIntent(proposal, state);
+            }
+            return asInteraction(tool.route(), proposal, call.toolName(), List.of(call));
+        }
+        if (toolPolicy.evaluateConfirmation(state.actorRole, tool) != ToolPolicy.Decision.ALLOW) {
+            return refuse(proposal);
+        }
+        if ("interaction.requestConfirmation".equals(call.toolName())) {
+            return asInteraction(tool.route(), proposal, call.toolName(), List.of(call));
+        }
+        if ("interaction.respondConfirmation".equals(call.toolName())) {
+            // 和另外两条通道同一份判罚：decision 只能是 CONFIRM 或 DENY，缺了、写成别的值都是
+            // 「这次调用用不了」。归一化也走同一处（模型写 confirm 也认），不再手写 toUpperCase。
+            if (ToolContract.check(tool, call).isPresent()) {
+                // 但这里**不能**像澄清那样按 intent 回退。intent 是 CONFIRM_ACTION 时，
+                // 回退会被 modelRoute 接成 CONFIRM_PENDING ——那等于「一次参数写错的调用，
+                // 换来一次真的执行」。参数不成立就明确回绝，凭据还在，他按原来那个按钮重来一次
+                // 就行；一次写坏的调用不该产生任何执行后果。
+                return refuse(proposal);
+            }
+            // 上面那次校验已经保证 decision 只会是这两个值之一，这里只是把它翻成路由。
+            String decision = ToolContract.normalize(tool.definition().arguments(), call.arguments())
+                    .getOrDefault("decision", "");
+            AgentOrchestrator.Route route = "CONFIRM".equals(decision)
+                    ? AgentOrchestrator.Route.CONFIRM_PENDING
+                    : AgentOrchestrator.Route.DENY_PENDING;
+            return asInteraction(route, proposal, call.toolName(), List.of(call));
+        }
+        return refuse(proposal);
+    }
+
+    private Outcome refuse(PlannerDecision proposal) {
+        return outcome(AgentOrchestrator.Route.REFUSE_UNSUPPORTED_TOOL, proposal, null, List.of(), true);
+    }
+
+    /**
+     * 交互工具调用的统一出口。
+     *
+     * <p>这里把 {@code actionType} 归成 {@link PlannerActionType#CALL_CONFIRMATION_TOOL}：
+     * 模型若把它写成了 {@code CALL_READ_TOOL}，那是标签写错了——这一轮该怎么走由**它点名的工具**
+     * 决定，不由标签决定。归位之后，「这一轮是不是一次交互调用」在下游只有一处判据
+     * （取消链路与只读工具循环各看一次），不会出现「同一个调用在两处被判成两种东西」。
+     */
+    private Outcome asInteraction(AgentOrchestrator.Route route, PlannerDecision proposal,
+                                  String tool, List<PlannerToolCall> tools) {
+        return new Outcome(route, proposal.facts(), proposal.replyDraft(),
+                normalizeDialogueMode(proposal.dialogueMode()), proposal.source(), tool, tools,
+                PlannerActionType.CALL_CONFIRMATION_TOOL, proposal.intent(), true);
+    }
+
+    /**
+     * 模型这个工具调用用不了（没注册、角色没权限、是个写工具，或者参数过不了契约校验）时的统一出口。
+     *
+     * <p>绝不执行它，也绝不静默降成一段没有卡片的回答：先忽略工具名，按它自己给的 intent 回到既有
+     * Java 工作流——写操作在那里仍会被翻译成确认卡，而不是被这里直接执行。intent 也不可信
+     * （UNKNOWN 或没映射）时明确回绝，不复用模型话术、不动任务状态。
+     */
+    private Outcome rejectedByIntent(PlannerDecision proposal, ConversationState state) {
+        AgentOrchestrator.Route byIntent = dailyRoute(proposal.intent());
+        if (byIntent == null) byIntent = modelRoute(proposal.intent(), state);
+        if (byIntent != null) return outcome(byIntent, proposal, null, List.of(), true);
+        return outcome(AgentOrchestrator.Route.REFUSE_UNSUPPORTED_TOOL, proposal, null, List.of(), true);
     }
 
     /** 复诊预约流程之外的日常三类：备忘、健康数值、把记录发给家属。 */
@@ -374,6 +453,24 @@ final class AgentRuntime {
     private boolean containsAny(String value, String... words) {
         for (String word : words) if (value.contains(word)) return true;
         return false;
+    }
+
+    /**
+     * 取消链路复用同一份判据：模型这次调用过不过契约，不过就返回第一条判罚。
+     *
+     * <p>刻意不在这里另写一套「scope 认不认识」的检查——判据只有一份，取消链路读的是
+     * {@link #acceptedArguments} 归一化之后的参数，未声明的字段（比如模型硬塞的
+     * {@code appointmentId}）在这里就已经没了。
+     */
+    ToolContract.Rejection rejection(String toolName, PlannerToolCall call) {
+        return ToolContract.check(registry.find(toolName).orElse(null), call).orElse(null);
+    }
+
+    /** 契约归一化之后的参数：只留声明过的字段，枚举补大写，空串当没给。 */
+    Map<String, String> acceptedArguments(String toolName, PlannerToolCall call) {
+        ToolRegistry.RegisteredTool tool = registry.find(toolName).orElse(null);
+        if (tool == null || call == null) return Map.of();
+        return ToolContract.normalize(tool.definition().arguments(), call.arguments());
     }
 
     String mode() { return planner.mode(); }

@@ -194,6 +194,83 @@ class CancelScopeTests {
         assertThat(confirmedAppointments()).isEqualTo(2);
     }
 
+    /**
+     * 同一张卡不能确认两次：第一次已经执行、凭据当场作废，第二回必须被挡在门外。
+     *
+     * <p>这是「重复确认防重」那条性质。挂在这里的重放是真实会发生的——老人连点两下、
+     * 网络重发、或者旧页面留着那个按钮。放过去就是同一批预约被取消两遍。
+     */
+    @Test
+    void aConsumedCredentialCannotBeReplayed() {
+        seedAppointment("replay-a", LocalDate.of(2026, 9, 10), "09:00");
+        seedAppointment("replay-b", LocalDate.of(2026, 9, 14), "14:00");
+        when(planner.mode()).thenReturn("MODEL_PLANNER_WITH_RULE_FALLBACK");
+        when(planner.plan(any(), any(), any())).thenReturn(new PlannerDecision(
+                PlannerActionType.CALL_CONFIRMATION_TOOL, "CANCEL_APPOINTMENT",
+                "interaction.requestConfirmation", Map.of("scope", "ALL"),
+                "好的，我再和您确认一下。", "FOLLOWUP_FLOW",
+                facts("CANCEL_APPOINTMENT", null), "MODEL_PLANNER"));
+
+        String conversationId = service.start().conversationId();
+        AgentTurnResponse card = service.chat(conversationId, "我想取消预约");
+        String confirmationId = card.confirmation().confirmationId();
+
+        AgentTurnResponse first = service.confirm(conversationId, true, confirmationId);
+        assertThat(first.reply()).as(first.reply()).contains("2条已确认预约已经取消");
+        assertThat(confirmedAppointments()).isZero();
+
+        AgentTurnResponse replay = service.confirm(conversationId, true, confirmationId);
+
+        // 第二回一条都没再动，也没有把「已经取消完了」翻回别的状态。这一轮先撞上的是
+        // 「任务已经结束」，不是凭据校验——凭据当场作废、同一把钥匙用不了第二回，由
+        // ConfirmationServiceTests 直接盯着；这里钉的是端到端结果：重放不会执行第二遍。
+        assertThat(replay.reply()).as(replay.reply()).doesNotContain("已经取消");
+        assertThat(confirmedAppointments()).isZero();
+        assertThat(replay.stage()).isNotEqualTo("AWAITING_CONFIRMATION");
+    }
+
+    /**
+     * 模型把一句话回成一次<b>不合法</b>的确认回答时，什么都别发生。
+     *
+     * <p>要同时成立三件事：库里一条都没动；会话仍然停在等待确认上；那张卡<b>还能用</b>——
+     * 也就是凭据没有被这次无效请求消费掉。少了最后一条，老人说了一句模型没听懂的话，
+     * 屏幕上那个还好好的按钮就再按不动了，而他完全不知道自己哪儿做错了。
+     */
+    @Test
+    void anInvalidConfirmationResponseExecutesNothingAndLeavesTheCardUsable() {
+        seedAppointment("invalid-a", LocalDate.of(2026, 9, 10), "09:00");
+        when(planner.mode()).thenReturn("MODEL_PLANNER_WITH_RULE_FALLBACK");
+        when(planner.plan(any(), any(), any())).thenAnswer(call -> {
+            String message = call.getArgument(0);
+            if ("嗯……".equals(message)) {
+                // 模型把老人的含糊话硬当成一次回答，但 decision 根本不是合法取值。
+                return new PlannerDecision(PlannerActionType.CALL_CONFIRMATION_TOOL, "CONFIRM_ACTION",
+                        "interaction.respondConfirmation", Map.of("decision", "MAYBE"),
+                        null, "FOLLOWUP_FLOW", facts("CONFIRM_ACTION", null), "MODEL_PLANNER");
+            }
+            return new PlannerDecision(PlannerActionType.CALL_CONFIRMATION_TOOL,
+                    "CANCEL_APPOINTMENT", "interaction.requestConfirmation", Map.of("scope", "ALL"),
+                    "好的，我再和您确认一下。", "FOLLOWUP_FLOW",
+                    facts("CANCEL_APPOINTMENT", null), "MODEL_PLANNER");
+        });
+
+        String conversationId = service.start().conversationId();
+        AgentTurnResponse card = service.chat(conversationId, "我想取消预约");
+        String confirmationId = card.confirmation().confirmationId();
+
+        AgentTurnResponse refused = service.chat(conversationId, "嗯……");
+
+        assertThat(confirmedAppointments()).isEqualTo(1);
+        assertThat(refused.stage()).isEqualTo("AWAITING_CONFIRMATION");
+        assertThat(refused.confirmation()).isNotNull();
+        assertThat(refused.confirmation().confirmationId()).isEqualTo(confirmationId);
+
+        // 凭据还在，老人接着按那个按钮就该正常执行。
+        AgentTurnResponse executed = service.confirm(conversationId, true, confirmationId);
+        assertThat(executed.reply()).contains("已经取消");
+        assertThat(confirmedAppointments()).isZero();
+    }
+
     private void seedAppointment(String id, LocalDate date, String time) {
         String slotId = id + "-slot";
         jdbc.update("""

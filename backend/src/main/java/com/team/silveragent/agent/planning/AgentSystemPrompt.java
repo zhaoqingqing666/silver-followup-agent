@@ -1,7 +1,13 @@
 package com.team.silveragent.agent.planning;
 
 import com.team.silveragent.agent.AgentContext;
+import com.team.silveragent.application.time.BusinessClock;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
+
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 
 /**
  * 单一主智能体提示词。规划、工具调用后的回答都复用同一份角色、记忆和行为约束，
@@ -11,15 +17,47 @@ import org.springframework.stereotype.Component;
 public class AgentSystemPrompt {
     /** 塞进提示词的 OCR 上限：够覆盖一张化验单，又不至于每轮都灌满上下文。 */
     private static final int VISION_OCR_PROMPT_LIMIT = 1500;
+    private static final DateTimeFormatter DATE_LABEL = DateTimeFormatter.ofPattern("yyyy年M月d日");
+    private static final DateTimeFormatter TIME_LABEL = DateTimeFormatter.ofPattern("HH:mm");
 
+    private final BusinessClock clock;
+
+    @Autowired
+    public AgentSystemPrompt(BusinessClock clock) {
+        this.clock = clock;
+    }
+
+    /** 兼容不启动 Spring 的单元测试和外部适配代码：按业务时区的系统时钟取「现在」。 */
+    public AgentSystemPrompt() {
+        this(BusinessClock.systemDefault());
+    }
+
+    /**
+     * 规划提示词。
+     *
+     * <p>每轮都把真实的当前日期、星期、时刻和时区交给模型：模型负责理解“明天”“下周三”说的是
+     * 哪一天，Java 负责把日期算实并检查合法性。不给时间，模型只能靠猜，跨月跨年必错。
+     * 日期取 {@code context.currentDate()}（它就是业务时钟给的），时刻取同一个业务时钟——
+     * 两边同源，不会出现“提示词说今天是 9 号、Java 按 8 号校验”的错位。
+     */
     public String planning(AgentContext context, String toolsJson) {
+        LocalDate today = context.currentDate();
+        LocalDateTime now = clock.now();
         return core() + roleSection(context) + visionSection(context) + """
 
                 【本轮运行信息】
-                当前日期：%s
+                当前日期：%s（%s），ISO 写法 %s
+                现在时间：%s
+                时区：%s（%s）
                 当前预约草稿和会话状态：%s
                 兼容显示阶段（只能参考，不能据此机械重复问题）：%s
                 可调用工具：%s
+
+                【相对日期怎么算】
+                “明天”“后天”“下周三”“这周五”“下个月”一律以上面的当前日期和现在时间为基准自己推算，
+                facts.date 用 YYYY-MM-DD。算出来的日期已经过去时（例如今天说“昨天那个号”），
+                不要自己把年份往后推，也不要猜成明年：用 ASK_USER 把算出来的那一天复述一遍，请老人确认。
+                今天已经过去的时段不是可预约时间，要重新查询真实号源，不要直接推荐。
 
                 【本轮输出】
                 只输出一个 JSON 对象，不要 Markdown：
@@ -67,7 +105,35 @@ public class AgentSystemPrompt {
                 用 CALL_READ_TOOL 调 drug.queryKnowledge，drugName 填老人说的药名。这类问题的药名、规格、用途、
                 用药提醒必须全部来自工具返回，不得凭记忆编造；工具没查到就如实说知识库里没有这条，
                 并建议问药师或开药的医生，不要补充任何工具里没有的说明，也不要判断该不该吃、不要建议换药加量。
-                """.formatted(context.currentDate(), context.knownFacts(), context.stage(), toolsJson);
+
+                【工具参数是怎么声明的】
+                上面「可调用工具」里每条工具都带着逐参数声明：type（string/date/time/enum/boolean）、required、
+                enum 的候选值，以及字段之间的组合约束。这份声明就是判罚依据，Java 会逐条检查：
+                必填没给、日期或时刻写法不是日期时刻、枚举取值不在候选里、组合约束不满足（例如按日期范围
+                取消却只给了日期没给方向），这次调用都<b>不会执行</b>，也不会写任何数据，Java 会请你说清缺的那项。
+                没声明的参数一律忽略：不要塞 appointmentId、confirmationId 这类由 Java 注入的字段，塞了也传不进去；
+                空字符串等于没给。
+
+                【工具结果的七种情形】
+                每轮工具结果都会带回 outcomeKind，你必须按它说话，不能一律当成成功：
+                - SUCCESS：查到了，按真实结果回答。
+                - NO_RESULT：查询成功但没有符合条件的记录，如实说没查到，不要编。
+                - MISSING_INFO：参数缺失或不合法，这次没有执行，用一句话追问缺的那项。
+                - NEEDS_CLARIFICATION：参数合法但对象不唯一，需要你追问一句（见下一段）。
+                - NEEDS_CONFIRMATION：确认卡已经生成，等老人明确确认，你不得说已经完成。
+                - STATE_CHANGED：状态确实变了，按返回的事实复述。
+                - FAILURE：工具失败，如实说明并给出重试、换条件或人工帮助。
+
+                【范围说不清时先问，不要硬填】
+                取消范围本来就说不清时（“把那些都取消了吧”但真实数据里有好几条），不要用 scope=AMBIGUOUS 硬凑一张卡，
+                也不要自己列出预约——你看不到数据库。改用 CALL_CONFIRMATION_TOOL 调 interaction.askClarification：
+                candidateTool 点名 appointment.queryMine，question 写一句自然的追问（不超过80字，不要出现任何数字，
+                不要带完成态说法）。真实候选由 Java 从工具结果里补上，并摆成老人可以点选的按钮。
+                这类追问只提问：它不建确认卡、不生成执行授权，所以问完不等于要执行什么；
+                老人选完之后仍然要走 interaction.requestConfirmation 那一环，并且明确确认才会真正取消。
+                """.formatted(today.format(DATE_LABEL), clock.weekdayLabel(today), today,
+                now.format(TIME_LABEL), clock.zoneId(), clock.zoneLabel(),
+                context.knownFacts(), context.stage(), toolsJson);
     }
 
     /**

@@ -1,5 +1,7 @@
 package com.team.silveragent.application.memo;
 
+import com.team.silveragent.application.time.BusinessClock;
+
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
@@ -24,10 +26,16 @@ public final class MemoParser {
     private MemoParser() { }
 
     /**
-     * 演示按中国时区(Asia/Shanghai)起算“现在/今天”：备忘存的是无时区钟点，
-     * 中国时区浏览器按本地解析后与真实北京钟点一致（开发容器本身是 UTC）。
+     * 兜底时区：<b>只给没有业务时钟的调用方用（单元测试）</b>。
+     *
+     * <p>生产路径不读这个常量：`FollowupAgentService` 每个入口都把业务时钟的锚点
+     * （{@code BusinessClock.now()} / {@code today()}）当参数传进来，配置改了
+     * `business.time.zone`，备忘的「今天/现在」跟着一起改。见各方法带 now/today 的重载。
+     *
+     * <p>时区值只从 {@link BusinessClock#DEFAULT_ZONE} 取，不在这里另写一遍：
+     * 业务时区要改就得一起改，两个常量迟早只剩下一个是对的。
      */
-    private static final ZoneId DEMO_ZONE = ZoneId.of("Asia/Shanghai");
+    private static final ZoneId DEMO_ZONE = BusinessClock.DEFAULT_ZONE;
     /** memos.text 列上限(VARCHAR 300)，超出截断以免插库报错。 */
     private static final int MAX_TEXT = 300;
 
@@ -113,7 +121,16 @@ public final class MemoParser {
             "晚上", "傍晚", "中午", "下午", "上午", "早上", "早晨", "清晨"
     };
 
+    /** 没有业务时钟的调用方（单元测试）走这条；生产走 {@link #detect(String, LocalDateTime)}。 */
     public static MemoIntent detect(String message) {
+        return detect(message, nowInDemoZone());
+    }
+
+    /**
+     * @param now 业务时区的“现在”。判断“这周三已经过去了”“只给时刻、已过点就顺延明天”都用它，
+     *            所以配置改了 {@code business.time.zone} 备忘推算跟着一起改。
+     */
+    public static MemoIntent detect(String message, LocalDateTime now) {
         String raw = message == null ? "" : message.trim();
         if (raw.isEmpty()) return null;
         for (String word : QUERY_MEMO) if (raw.contains(word)) return null;
@@ -137,11 +154,11 @@ public final class MemoParser {
         }
         String text = trimToMax(cleanText(raw, explicit));
         // “这个星期三”但那天已经过去了：不猜上周还是下周，先追问哪一天
-        boolean needsDay = pastWeekdayMention(value);
+        boolean needsDay = pastWeekdayMention(value, now.toLocalDate());
         // “每周/每月”没说周几/几号：先追问锚点，否则这条重复提醒永远不到点
         String repeatGap = repeatDayGap(value);
         boolean askFirst = needsDay || repeatGap != null;
-        LocalDateTime remindAt = askFirst ? null : remindAtOf(value);
+        LocalDateTime remindAt = askFirst ? null : remindAtOf(value, now);
         // 提到了时间却算不出准时刻（“明早”“2分钟提醒我”“一会儿提醒我”“饭后半小时”）：追问几点，不默默记成长期备忘
         boolean needsTime = !askFirst && remindAt == null && timeMentioned;
         return new MemoIntent(text, remindAt, explicit, needsTime, repeatRule, needsDay, repeatGap);
@@ -278,21 +295,25 @@ public final class MemoParser {
     }
 
     /** “这周三/本周三”且那天已经过去了（如今天周四说“这周三”）。 */
-    private static boolean pastWeekdayMention(String value) {
+    private static boolean pastWeekdayMention(String value, LocalDate today) {
         Matcher week = WEEKDAY.matcher(value);
         if (!week.find()) return false;
         if (!"这".equals(week.group(1)) && !"本".equals(week.group(1))) return false;
         int target = dayNumber(week.group(2).charAt(0));
-        return target > 0 && target < LocalDate.now(DEMO_ZONE).getDayOfWeek().getValue();
+        return target > 0 && target < today.getDayOfWeek().getValue();
+    }
+
+    /** 没有业务时钟的调用方（单元测试）走这条；生产走 {@link #pastWeekdayDate(String, LocalDate)}。 */
+    public static LocalDate pastWeekdayDate(String value) {
+        return pastWeekdayDate(value, LocalDate.now(DEMO_ZONE));
     }
 
     /** 追问“是哪一天”时回显已过去的那天；取不到返回 null。 */
-    public static LocalDate pastWeekdayDate(String value) {
+    public static LocalDate pastWeekdayDate(String value, LocalDate today) {
         Matcher week = WEEKDAY.matcher(value);
         if (!week.find()) return null;
         int target = dayNumber(week.group(2).charAt(0));
         if (target < 0) return null;
-        LocalDate today = LocalDate.now(DEMO_ZONE);
         int forward = (target - today.getDayOfWeek().getValue() + 7) % 7;
         return today.minusDays((7 - forward) % 7L);
     }
@@ -325,6 +346,12 @@ public final class MemoParser {
      *                 再拿它当日期会把时间算到错的那一天。
      */
     public static LocalDateTime resolveRemindAt(String memoText, String timeAnswer, LocalDate knownDay) {
+        return resolveRemindAt(memoText, timeAnswer, knownDay, nowInDemoZone());
+    }
+
+    /** @param now 业务时区的“现在”：没给日期时按它取今天、已过点顺延到明天。 */
+    public static LocalDateTime resolveRemindAt(String memoText, String timeAnswer, LocalDate knownDay,
+                                                LocalDateTime now) {
         String memo = normalizePeriodWords(memoText == null ? "" : memoText);
         String answer = normalizePeriodWords(timeAnswer == null ? "" : timeAnswer);
         LocalTime time = clockTime(answer);
@@ -334,12 +361,13 @@ public final class MemoParser {
         if (time == null) time = periodFallbackTime(memo);
         if (time == null) return null;
         // 答句里的日期优先（“这个星期三”改成“下周三”时要听新的，不能还用原句那天）
-        LocalDate day = dayOf(answer);
+        LocalDate today = now.toLocalDate();
+        LocalDate day = dayOf(answer, today);
         if (day == null) day = knownDay;
-        if (day == null) day = dayOf(memo);
+        if (day == null) day = dayOf(memo, today);
         if (day != null) return LocalDateTime.of(day, time);
-        LocalDateTime candidate = LocalDateTime.of(LocalDate.now(DEMO_ZONE), time);
-        return candidate.isAfter(LocalDateTime.now(DEMO_ZONE)) ? candidate : candidate.plusDays(1);
+        LocalDateTime candidate = LocalDateTime.of(today, time);
+        return candidate.isAfter(now) ? candidate : candidate.plusDays(1);
     }
 
     /**
@@ -350,23 +378,36 @@ public final class MemoParser {
         return repeatRuleOf(normalizePeriodWords(value == null ? "" : value));
     }
 
-    /** 演示统一的“现在”（北京时间）：备忘到点、健康记录时间戳都用它，容器本身是 UTC。 */
+    /**
+     * 兜底的“现在”（业务时区）：<b>只给没有业务时钟的调用方用</b>。生产路径由
+     * {@code FollowupAgentService} 传 {@code BusinessClock.now()} 进来，不再走这里——
+     * 否则配置改了 {@code business.time.zone}，备忘推算还按老时区算。
+     */
     public static LocalDateTime nowInDemoZone() {
         return LocalDateTime.now(DEMO_ZONE);
     }
 
-    /** 取出句中说的是哪一天（“下周三”/“9月16号”/“明天”）；没给日期返回 null。 */
+    /** 没有业务时钟的调用方（单元测试）走这条；生产走 {@link #resolveDay(String, LocalDate)}。 */
     public static LocalDate resolveDay(String value) {
-        return dayOf(normalizePeriodWords(value == null ? "" : value));
+        return resolveDay(value, LocalDate.now(DEMO_ZONE));
+    }
+
+    /** 取出句中说的是哪一天（“下周三”/“9月16号”/“明天”）；没给日期返回 null。 */
+    public static LocalDate resolveDay(String value, LocalDate today) {
+        return dayOf(normalizePeriodWords(value == null ? "" : value), today);
+    }
+
+    /** 没有业务时钟的调用方（单元测试）走这条；生产走 {@link #resolveRepeatAnchor(String, String, LocalDate)}。 */
+    public static LocalDate resolveRepeatAnchor(String repeatRule, String answer) {
+        return resolveRepeatAnchor(repeatRule, answer, LocalDate.now(DEMO_ZONE));
     }
 
     /**
      * 老人回答“每周几/每月几号”后算出的重复锚点日期：本周/本月的这一天（已过则顺延一周/一月）。
      * 解析不出返回 null（说明还是没听清，得再问一次）。只认锚点词，不认“明天”这类相对日期。
      */
-    public static LocalDate resolveRepeatAnchor(String repeatRule, String answer) {
+    public static LocalDate resolveRepeatAnchor(String repeatRule, String answer, LocalDate today) {
         String value = normalizePeriodWords(answer == null ? "" : answer);
-        LocalDate today = LocalDate.now(DEMO_ZONE);
         if ("MONTHLY".equals(repeatRule)) {
             Matcher day = DAY_ONLY.matcher(value);
             if (!day.find()) return null;
@@ -433,26 +474,26 @@ public final class MemoParser {
     private static final Pattern RELATIVE = Pattern.compile(
             "(半|[0-9]{1,3}|[一二两三四五六七八九十]+)\\s*个?\\s*(分钟|小时|钟头)\\s*(?:之?后|以后)");
 
-    private static LocalDateTime remindAtOf(String value) {
+    private static LocalDateTime remindAtOf(String value, LocalDateTime now) {
         // 相对时间提醒（演示常用）：如“2分钟后提醒我量血压”“一分钟之后要吃药”“半小时后吃药”
         // “一个半小时后”这类带“个半”的说法算不准，跳过交给追问，别猜错时间
         Matcher relative = value.contains("个半") ? null : RELATIVE.matcher(value);
         if (relative != null && relative.find()) {
             int ahead = relativeMinutes(relative.group(1), relative.group(2));
-            if (ahead >= 1 && ahead <= 1440) return LocalDateTime.now(DEMO_ZONE).plusMinutes(ahead);
+            if (ahead >= 1 && ahead <= 1440) return now.plusMinutes(ahead);
         }
         LocalTime time = clockTime(value);
         if (time == null) time = periodFallbackTime(value);
         if (time == null) return null;
-        LocalDate day = dayOf(value);
+        LocalDate day = dayOf(value, now.toLocalDate());
         LocalDateTime candidate;
         if (day != null) {
             candidate = LocalDateTime.of(day, time);
             return candidate;
         }
-        candidate = LocalDateTime.of(LocalDate.now(DEMO_ZONE), time);
+        candidate = LocalDateTime.of(now.toLocalDate(), time);
         // 只给了时刻没给日期：已过点则顺延到明天（避免存一条过期的提醒）
-        if (!candidate.isAfter(LocalDateTime.now(DEMO_ZONE))) candidate = candidate.plusDays(1);
+        if (!candidate.isAfter(now)) candidate = candidate.plusDays(1);
         return candidate;
     }
 
@@ -467,8 +508,7 @@ public final class MemoParser {
     }
 
     /** 相对日期/星期 → 目标日期。 */
-    private static LocalDate dayOf(String value) {
-        LocalDate today = LocalDate.now(DEMO_ZONE);
+    private static LocalDate dayOf(String value, LocalDate today) {
         if (containsAny(value, "大后天")) return today.plusDays(3);
         if (value.contains("后天")) return today.plusDays(2);
         if (containsAny(value, "明天", "明早", "明晚", "明日")) return today.plusDays(1);
