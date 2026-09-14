@@ -507,3 +507,55 @@
   1. **澄清轮不改 `stage`**：这一轮沿用上一件事的 stage（冷会话下见过 `ASK_HOSPITAL`，也见过 `COMPLETED`）。前端只在 `turn?.task?.active` 为真时才显示阶段标签，目前看不出问题，但语义上仍然是「澄清不动状态」的副作用。
   2. **澄清 / 追问轮不下发仍有效的那张待确认卡**：见到的例子是「9月32号」那一轮 `stage` 报 `AWAITING_CONFIRMATION` 而 `confirmation` 为空，于是先前发出去的那张卡的按钮从这次响应里消失了。这与 DEC-016 给越界提示块修过的是同一类问题（回复另起一件事时，老人正要按的按钮不能跟着不见），值得下一阶段按同样思路处理。
 - 未提交、未推送。接口文档同步：`05-api-contracts.md` 新增「工具契约与通用澄清（2026-09-13）」，`INTERFACE_CHANGES.md` 同日一条，决定记在 DEC-020 / DEC-021，踩坑记在 PITFALLS 同日两条。等审查。
+
+## 2026-09-13 第五阶段 B：号源查询的参数执行一致性（查了就按查的算，查询不动草稿）
+
+- 范围：`appointment.querySlots` / `appointment.queryNearbySlots` 两个只读工具——**通过 `ToolContract` 校验的显式参数必须决定本次查询条件**；参数省略时才沿用会话里已有且明确的条件；显式参数非法、医院/科室不唯一或条件不足时停下澄清，不得退回旧条件查询后装作回答了本次问题。本轮不动健康记录、家属报告、通用澄清、预约历史排序、循环轮数与确认执行架构，不合并工具。
+- 改动（后端**两个主文件** + 一个新增测试文件；此前这条误写成「3 个文件」，实为同一文件列了两次，2026-09-14 更正）：
+  - `agent/planning/LlmConversationPlanner.java`：只读工具（`CALL_READ_TOOL(S)`）不再把 `arguments` 兜底成 facts。那段兼容是给办理/确认类动作写的（参数就是老人刚说的条件），对只读查询有害——老人问一句「市二院下周三有号吗」，参数里的医院和日期会被当成改草稿的意愿写进待办理的预约。
+  - `application/FollowupAgentService.java`：
+    - 号源查询条件解析整块（`SlotQuery` / `SlotQueryResolution` / `resolveSlotQuery` / `querySlotsFor` / `nearbySlotsFor` / `answerSlotQueryReadOnly` / `answerReadOnly` / `slotText`）：显式医院/科室必须唯一精确，日期经 `ToolContract.parseDate` 解析，过去的日期不拿去查，缺项就停下问；查询一律走「只读回答」——不推进阶段、不写候选、不碰确认卡。单工具与多工具路径共用同一套解析（`toolArguments` 按工具名取参数）。
+    - `queryNearbySlots` 删掉 `state.acceptAlternative = true`：查一次附近日期不等于老人答应了「可以换日期」。
+    - 工具循环：**模型发起的号源查询（`appointment.querySlots` / `appointment.queryNearbySlots`）只查不改**——每轮进业务流程前过一遍 `withoutDraftWrites(...)`（医院/科室/日期/时间/陪同/通知清空，致谢与情绪照旧），收口统一走 `finishToolLoopDecision`（只交付真实结果、模型那句回答或兜底说明，不写草稿、不重进业务流）。草稿只由两处改动：模型明确提出业务动作（`PROPOSE_WORKFLOW_ACTION`）的那一轮，以及完全不经过模型的按钮/规则流程。
+    - **审查后简化（2026-09-14）**：删掉 5B 初版的 `SlotQuery.conflictsWith`（按「查询条件与草稿冲不冲突」决定写不写草稿）、`applyExplicitQueryConditions`、`queriedConditions` + `draftFacts`（按参数名逐个剥 facts）、`restatesTheQueryJustDelivered`、`readOnlyAnswerDelivered` ThreadLocal 与 `withFacts`。判据从「冲突与否」换成一条结构性不变式，跨轮状态归零。
+- 新增测试：`application/SlotQueryArgumentTests.java` **16 项**——草稿无日期时按参数查且草稿日期仍为空、草稿已有 A 日时查 A 日或 B 日都不动草稿、显式医院科室压过草稿、`arguments.date` 与 `facts.date` 同时出现的只读调用不写草稿、续跑轮误标 `CHANGE_DATE` 也不改草稿、歧义医院不回退查旧条件（含「原草稿与确认卡都不变」一条）、下一轮明确改期仍生效且旧卡作废、非模型的按钮流程仍能把老人明确选择写进草稿、参数省略沿用草稿、过去日期不回退、附近日期不自动置 `acceptAlternative`、查询期间确认卡凭据与内容不变且不写库。
+- 验证：`mvn -o test` **491 项，490 通过，1 失败**——失败的是 `DemoSeedDataTests.spokenNextWednesdayLandsOnTheSeededCheckupDay`，**既有问题，不是本次回归**：容器时区还停在 09-13（算出「下周三」= 09-23），业务时钟（北京）已过午夜算 09-14（= 09-16，即 `DemoSeed.checkupDay()`）。基线复现证据：`git stash` 退回未改动的两个主文件后单跑 `DemoSeedDataTests`，**同样 6 项里 1 失败、报错逐字相同**（expected 2026-09-23 / but was 2026-09-16），随后 `git stash pop` 复原。本轮不顺手修，也不称「全量通过」。
+  - 注：`mvn -o clean test` 跑不了——`:8080` 上你跑着的实例占着 `target/classes`，clean 报 `Device or resource busy`，所以本次是清不了 target 的全量构建，如实记在这里。
+- 真实模型评测（deepseek-v4-flash，独立 8099 + 内存 H2，全程没碰你跑着的 :8080 / :3000）：
+  - 场景 A（草稿无日期，模型参数带日期）：模型给出 `{"hospital":"市第一医院","department":"心内科","date":"2026-09-16"}`，实际查的就是 09-16。**这一轮「草稿采纳」是当时 5B 的行为，审查后已按最终规则改为草稿日期保持为空**——真实模型未重跑，本轮只由 `SlotQueryArgumentTests` 的「草稿为空时查询 B 日，草稿日期仍为空」钉住。
+  - 场景 B（草稿是 9月19日，问「下周三有没有号」）：**连续 4 次**都是只查 09-16、草稿稳定保持 `2026年9月19日`、回复为模型原话、留痕里 `appointment.querySlots` 只有一次。修复前同一场景 3 次跑出 3 种坏结果（草稿被改成 09-16 / 草稿日期被 `resetAfterDate` 抹掉 / 回复没有按钮）。这条的行为与最终规则一致，仍然有效。
+  - 「参数省略」这一项真模型没被触发：模型每次都把三项参数写全，该项只有桩测试覆盖。
+- 未解决（按你的要求，按钮问题只记不改）：
+  1. `modelSuggestedReplies` 对 `SELECT_SLOT`、`ASK_DATE`、`ASK_HOSPITAL` 等阶段 `default -> List.of()`，Java 交付的答复可能一个按钮都没有（真模型下观察到 `stage=SELECT_SLOT, quickReplies=[]`）。**本轮不动**。
+  2. 只读轮里模型 facts 的写法仍不统一（有的模型把查询条件同时写进 `arguments` 和 `facts`）；现在靠「模型发起的号源查询不写草稿」这一条结构性规则兜住，提示词只是提醒，没有从根上让模型别这么写。
+- 下次从这里继续：② 按上面未解决项 1 处理按钮（提示词收口与文档同步已在同日收尾完成）。
+- 未提交、未推送，工作树停在 `zhaotingfang` 分支（`gitStatus` 里写的 `refactor/application-packages` 与实际 HEAD 不一致，以 `git rev-parse` 为准）。
+
+### 同日收尾（2026-09-14）：提示词收口 + 文档同步
+
+- 提示词收口（`agent/planning/AgentSystemPrompt.java`，新增一节，**JSON 规划格式、字段、工具清单一律不变，不新增工具**）：只读查询条件写对应工具的 `arguments`；`facts` 只表示用户明确要求写入或修改办理草稿的业务事实；用户只是询问别处医院/科室/日期/号源时不要同时写进 `facts`；查询结果不得被描述成已经预约、已经改期或已经取消。
+- 新增 `agent/planning/AgentSystemPromptQueryFactsTests.java` **4 项**，把上述四条规则与「JSON 骨架不变」钉在提示词文本上。
+- 文档同步：`docs/15-agent-flexibility-and-elder-ui-plan.md` 第五节新增「现状（2026-09-13 已实施 5B）」小节，并更正两处过期数字——工具总数 17 只读 + 2 确认 + 1 澄清（共 20，此前漏了 `interaction.askClarification`）、`FollowupAgentService` 5597 行（此前写 5173）；`records/DECISIONS.md` 新增 DEC-025。两处都写明「本轮只做了号源查询两个工具，不代表所有工具已完成参数改造」。
+- 核对结果：`records/PITFALLS.md` 同日两条与实现一致，无需改动；`records/PROGRESS.md` 5B 条目的「3 个文件」为笔误（同一文件列了两次），已更正为两个主文件 + 一个新增测试文件。其余文档（`03`/`04`/`05`/`11`/`设计思路报告`）里的「17 个只读工具」指的是只读工具数，仍然准确，未动。
+- 专项验证：`SlotQueryArgumentTests` 14 + `AgentSystemPromptQueryFactsTests` 4 + `AgentSystemPromptTimeTests` 3 + `AgentSystemPromptVisionTests` 5 + `AgentRuntimeRoutingTests` 17 + `LlmConversationPlannerTests` 6 = **49 项，0 失败 0 错误**。后端全量沿用 5B 的 **491 项 490 通过 1 失败**（失败为既有跨午夜用例），本轮不重复跑；真实模型 A/B 结果沿用，不重复消耗额度。
+- 本轮不处理：`modelSuggestedReplies` 空按钮、`DemoSeedDataTests` 跨午夜、健康记录与家属报告、SQL 分页与整轮超时、`ConfirmationService` 与执行器、其他工具的参数改造。
+
+### 同日审查后简化（2026-09-14）：把「冲突判据」换成一条结构性规则
+
+- 起因：审查认为 5B 的实现边界过重——用「查询条件与草稿冲不冲突」决定写不写草稿，引入了跨轮状态（`readOnlyAnswerDelivered` ThreadLocal）和四层剥离逻辑，判断点多、状态难跟。
+- 新规则（结构性，不再逐个判冲突）：**只要本轮是模型发起的号源查询（`appointment.querySlots` / `appointment.queryNearbySlots`），工具参数只用于这次查询，永远不写入预约草稿**；草稿为空就保持为空；要改草稿必须走既有业务动作，或下一轮老人的明确选择（并作废旧确认卡）；工具续跑轮不是新的用户输入，其 facts 不写草稿，没有新的合法工具调用时只交付查询结果/澄清/模型答复，不重进预约业务流；老人一句「先查，有号再改」时，本轮先查并问「要按这个来吗」，下一轮明确同意后再改。
+- 改动（`application/FollowupAgentService.java`）：删 `SlotQuery.conflictsWith` 与 `conflicts(...)`、`applyExplicitQueryConditions`、`queriedConditions` + `draftFacts`、`restatesTheQueryJustDelivered`、`readOnlyAnswerDelivered` ThreadLocal、仅作结果重建用的 `withFacts`；保留 `resolveSlotQuery`、严格实体解析、`answerSlotQueryReadOnly` 与不经过模型的既有预约流程。执行集中到两处——循环里一次 `withoutDraftWrites(...)`、`querySlotsFor` 空参数分支的 `!outcome.modelDriven()` 守卫；交付集中到 `finishToolLoopDecision`（去掉 `originalMessage` 参数，不再派发业务流）。
+- 行为变化：模型驱动的 `appointment.querySlots` 若带 `acceptAlternative:true`，不再串联 `appointment.queryAlternatives`（facts 已被剥离）；查询结果不再推进流程、不再写草稿；只读回答末尾改为征询「要按这个来吗？」。`VoiceFirstP1Tests` 的无号续跑用例按新规则重写（草稿日期保持「待确认」）。
+- 验证：专项批 99 项 0 失败 0 错误（`SlotQueryArgumentTests` 16、`AgentRuntimeRoutingTests` 17、`LlmConversationPlannerTests` 6、三个 `AgentSystemPrompt*` 4+3+5、`VoiceFirstP1Tests` 7、`VoiceFirstP0Tests` 17、`ClarificationFlowTests` 12、`DemoScenarioTests` 5、`MultimodalImageTurnTests` 7）；后端全量 `mvn -o test` **497 项 0 失败 0 错误 0 跳过，BUILD SUCCESS**。跨午夜用例这次也通过，属容器时钟越过边界的偶然，不是修复。
+- 本轮不处理（与前一轮一致）：`modelSuggestedReplies` 空按钮、`DemoSeedDataTests` 跨午夜、健康记录与家属报告、SQL 分页与整轮超时、`ConfirmationService` 与执行器、其他工具的参数改造。
+- 未提交、未推送，等审查。
+
+### 同日收尾（2026-09-14）：只读出口的分界从「参数给没给」改成「谁发起的」
+
+- 起因：审查发现上面那条简化留了个口子——分界写成了「**参数非空**才走只读出口」。模型只说了「帮我看看号」「还有别的时间吗」、把条件留给草稿，于是传 `arguments:{}`，`toolArguments` 取回空 Map，代码掉回 `showAvailableSlots` / `queryNearbySlots` 那条**会改状态**的旧路：阶段被推到 `NO_SLOT`、附近号源写进 `state.alternatives`、回复里带出代表草稿已推进的 `SELECT_SLOT` 按钮。
+- 改动（`application/FollowupAgentService.java`，只动两个入口的一句分界）：`querySlotsFor` / `nearbySlotsFor` 一律先看 `outcome.modelDriven()`。模型发起的（含 `arguments` 为空）都走 `resolveSlotQuery(state, arguments, ...)` —— 缺的项本来就从草稿里取；够用就 `answerSlotQueryReadOnly`，不够就追问；不推进阶段、不动 `alternatives` / `selectedSlot` / `acceptAlternative` / 确认卡。只有 `modelDriven()==false` 的按钮/规则流程才继续走 `showAvailableSlots` / `queryNearbySlots`。
+- 测试：改写把「`arguments={}` → `NO_SLOT` + `SELECT_SLOT` 按钮」当成正确行为的 `queryingNearbyDatesDoesNotClaimTheElderAcceptsOtherDates`，拆成 `modelQueryWithNoArgumentsUsesTheDraftConditionsAndMovesNothing`（querySlots 空参数：条件回草稿取、阶段与草稿不动、不出现代表草稿推进的选择按钮）与 `modelNearbyQueryWithNoArgumentsUsesTheDraftConditionsAndMovesNothing`（queryNearbySlots 空参数：`alternatives` / `acceptAlternative` / 阶段都不动）；`theButtonFlowStillWritesWhatTheElderExplicitlyChose` 加强成反面对照——非模型按钮流程仍要写草稿、仍要摆出 `SET_PERIOD`，选中的时段仍要落进 `selectedSlot`。`SlotQueryArgumentTests` 因此 16 → 17 项。
+- 措辞收窄（按审查要求）：代码注释与文档不再写「所有只读工具只查不改」，统一改成「**本轮完成 `appointment.querySlots` 与 `appointment.queryNearbySlots` 的模型调用只查不改**」；其余只读工具尚未逐个核对——`hospital.search` 仍可能更新会话里的解析状态。
+- 验证：`SlotQueryArgumentTests` 17 + `VoiceFirstP1Tests` 7 + `AgentRuntimeRoutingTests` 17 = **41 项 0 失败 0 错误**；邻近专项 `LlmConversationPlannerTests` 6 + `VoiceFirstP0Tests` 17 + `DemoScenarioTests` 5 + `ClarificationFlowTests` 12 + `MultimodalImageTurnTests` 7 + `AgentSystemPromptQueryFactsTests` 4 = **51 项 0 失败 0 错误**。按要求不跑全量、不跑真实模型、不修跨午夜用例、不处理按钮问题。
+- 环境备注：中途遇到一次 `TestEngine with ID 'junit-jupiter' failed to discover tests` / `NoClassDefFoundError: AgentTurnResponse`——`target/test-classes` 下的 `SlotQueryArgumentTests*.class` 是 IDE（ecj）以「Unresolved compilation problems」容错形态写出来的坏产物。删掉这几个 class 后 `mvn -o test` 正常，不是源码问题。`mvn -o clean` 仍不可用（`:8080` 上的实例占着 `target/classes`）。
+- 未提交、未推送，等审查。

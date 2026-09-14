@@ -96,7 +96,8 @@ public class LlmConversationPlanner implements ConversationPlanner {
         JsonNode factsNode = root.path("facts");
         Map<String, String> arguments = stringMap(root.path("arguments"));
         List<PlannerToolCall> toolCalls = toolCalls(root, arguments);
-        ExtractedFacts facts = facts(factsNode.isObject() ? factsNode : root, intent, arguments);
+        ExtractedFacts facts = facts(factsNode.isObject() ? factsNode : root, intent,
+                readTool(actionType) ? Map.of() : arguments);
         return new PlannerDecision(actionType, intent, nullableText(root, "toolName"), arguments,
                 nullableText(root, "replyDraft"), text(root, "dialogueMode", dialogueMode(intent)),
                 facts, source, toolCalls);
@@ -117,6 +118,20 @@ public class LlmConversationPlanner implements ConversationPlanner {
         String legacyName = nullableText(root, "toolName");
         if (result.isEmpty() && legacyName != null) result.add(new PlannerToolCall(legacyName, legacyArguments));
         return result;
+    }
+
+    /**
+     * 只读工具的参数是「这次要查什么」，不是「老人当场改动了草稿」。
+     *
+     * <p>下面 {@link #facts} 有一层兼容：模型把参数写在 {@code arguments} 而不是 {@code facts}
+     * 节点时，仍按老格式抽出来当事实。这层兼容对办理/确认类动作是必要的——那类动作的参数就是
+     * 老人刚说的条件；但对只读查询是有害的：老人问一句「市二院下周三有号吗」，参数里的医院和
+     * 日期会被当成改草稿的意愿写进待办理的预约，一次查询就顺手改掉了他手头正在办的那笔。
+     * 所以只读工具的参数只用于执行这次查询，事实只认 {@code facts} 节点。
+     */
+    private static boolean readTool(PlannerActionType actionType) {
+        return actionType == PlannerActionType.CALL_READ_TOOL
+                || actionType == PlannerActionType.CALL_READ_TOOLS;
     }
 
     private ExtractedFacts facts(JsonNode node, String intent, Map<String, String> arguments) {

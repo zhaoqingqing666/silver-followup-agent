@@ -880,12 +880,8 @@ public class FollowupAgentService extends ConfirmationSupport {
             case QUERY_HOSPITALS -> showHospitals(state, facts.hospital());
             case QUERY_DEPARTMENTS -> showDepartments(state, facts.hospital());
             case RECOMMEND_HOSPITAL -> recommendHospitals(state, facts.department());
-            case QUERY_AVAILABLE_SLOTS -> {
-                if (facts.date() != null) applyFacts(state, facts);
-                else clearSlotSelection(state, true);
-                yield showAvailableSlots(state);
-            }
-            case QUERY_NEARBY_SLOTS -> queryNearbySlots(state);
+            case QUERY_AVAILABLE_SLOTS -> querySlotsFor(state, facts, outcome);
+            case QUERY_NEARBY_SLOTS -> nearbySlotsFor(state, outcome);
             case CHECK_CONFLICT -> checkSchedule(state);
             case CHECK_DUPLICATE -> checkDuplicate(state);
             case ASK_MATERIALS -> showMaterials(state, facts);
@@ -958,7 +954,7 @@ public class FollowupAgentService extends ConfirmationSupport {
 
         for (int round = 1; round <= MAX_MODEL_TOOL_ROUNDS; round++) {
             if (!agentRuntime.isModelReadToolOutcome(current)) {
-                return finishToolLoopDecision(state, originalMessage, current, latestToolResponse);
+                return finishToolLoopDecision(state, current, latestToolResponse);
             }
 
             List<PlannerToolCall> freshCalls = current.proposedTools().stream()
@@ -969,14 +965,15 @@ public class FollowupAgentService extends ConfirmationSupport {
                         "我已经完成了这项查询。您可以根据上面的真实结果继续选择。");
             }
 
-            if (hasTaskFacts(current.facts()) && taskInProgress(state)) {
-                applyFacts(state, current.facts());
-                syncPresentationStage(state);
-            }
+            // 模型发起的号源查询（appointment.querySlots / appointment.queryNearbySlots）只查不改：
+            // 参数只决定这次查什么，这一轮的 facts 也不落到草稿上，交给业务流程的是「不写草稿的那一份」。
+            // 草稿只由两处改——模型明确提出业务动作（PROPOSE_WORKFLOW_ACTION）的那一轮，
+            // 以及完全不经过模型的既有办理流程。（其余只读工具尚未逐个按同一口径核对，
+            // 比如 hospital.search 仍可能更新会话里的解析状态，所以这里不宣称所有 READ_ONLY 工具都已收口。）
+            AgentRuntime.Outcome executable = withToolCalls(withoutDraftWrites(current), freshCalls);
             // 参数是模型这一步真实生成的，先原样记下来再执行——
             // 「参数由智能体生成」这件事只有在执行之前才看得见。
             turnProgress.toolProposed(state.id, freshCalls);
-            AgentRuntime.Outcome executable = withToolCalls(current, freshCalls);
             deferFinalization.set(true);
             AgentToolStep step;
             try {
@@ -1049,7 +1046,19 @@ public class FollowupAgentService extends ConfirmationSupport {
         return new AgentToolStep(response, new ToolOutcome.Step(kind, tool, response.stage()));
     }
 
-    private AgentTurnResponse finishToolLoopDecision(ConversationState state, String originalMessage,
+    /**
+     * 工具循环的收口：模型这一轮没有再提工具，接着说什么。
+     *
+     * <p>工具循环里的每一轮都是「模型看着真实工具结果作答」，包括第一轮——它是由老人的话触发的，
+     * 但模型选的是只读查询，不是业务动作。<b>所以这里不写草稿、也不重新进预约业务流</b>，
+     * 交付的只有三样：真实查询结果、模型那句回答、或一句兜底说明。
+     * 要改草稿，得由老人的下一句话走业务动作（{@code PROPOSE_WORKFLOW_ACTION}），那一轮不经过这里。
+     *
+     * <p>本轮的范围只到号源查询：{@code appointment.querySlots} 与 {@code appointment.queryNearbySlots}
+     * 的模型调用只查不改。其余只读工具（如 {@code hospital.search}）仍可能更新会话里的解析状态，
+     * 尚未逐个按同一口径核对。
+     */
+    private AgentTurnResponse finishToolLoopDecision(ConversationState state,
                                                      AgentRuntime.Outcome decision,
                                                      AgentTurnResponse latestToolResponse) {
         if (!decision.modelDriven() && latestToolResponse != null) {
@@ -1062,15 +1071,28 @@ public class FollowupAgentService extends ConfirmationSupport {
             return finalizeToolEvidence(state, latestToolResponse,
                     "查询已经完成。涉及预约、取消、提醒或通知的操作，还需要您查看确认内容后明确确认。");
         }
-        if (decision.route() == AgentOrchestrator.Route.DIRECT_ANSWER
-                && decision.replyDraft() != null && !decision.replyDraft().isBlank()) {
-            if (hasTaskFacts(decision.facts()) && taskInProgress(state)) {
-                applyFacts(state, decision.facts());
-                syncPresentationStage(state);
-            }
-            return finalizeToolEvidence(state, latestToolResponse, decision.replyDraft());
-        }
-        return dispatchOutcome(state, originalMessage, decision);
+        String reply = decision.replyDraft() == null || decision.replyDraft().isBlank()
+                ? "我已经完成了这项查询。您可以根据上面的真实结果继续选择。"
+                : decision.replyDraft();
+        return finalizeToolEvidence(state, latestToolResponse, reply);
+    }
+
+    /**
+     * 拿掉会落到草稿上的那几项，只留不属于「办理条件」的事实。
+     *
+     * <p>模型发起这一轮的 facts 不是老人的新说法：模型常把「这次要查哪家医院、哪一天」同时写进
+     * 工具参数和 facts 节点，续跑轮还会原样带一遍。带着它进业务流程，就会出现「老人问一句
+     * 市二院下周三有号吗，手头正办的那笔预约跟着改了日期」。所以医院、科室、日期、时间、陪同、
+     * 通知这些一概拿掉；致谢、情绪和关切照旧。
+     */
+    private static AgentRuntime.Outcome withoutDraftWrites(AgentRuntime.Outcome outcome) {
+        ExtractedFacts facts = outcome.facts();
+        if (facts == null) return outcome;
+        return new AgentRuntime.Outcome(outcome.route(),
+                new ExtractedFacts(facts.intent(), null, null, null, null, null, null, null, null,
+                        null, null, null, facts.acknowledgement(), facts.emotion(), facts.concern(), null),
+                outcome.replyDraft(), outcome.dialogueMode(), outcome.plannerSource(), outcome.proposedTool(),
+                outcome.proposedTools(), outcome.actionType(), outcome.intent(), outcome.modelDriven());
     }
 
     private AgentTurnResponse finalizeToolEvidence(ConversationState state,
@@ -3127,11 +3149,267 @@ public class FollowupAgentService extends ConfirmationSupport {
                         q("稍后再查", "RETRY_QUERY", "")));
     }
 
+    // ---------------------------------------------------------------- 号源查询的条件解析
+    //
+    // 号源查询与办理草稿是两件事。老人可以随口问一句「市二院下周三有号吗」，心里并不打算
+    // 把手头正在办的那笔预约改掉。所以下面先把「这次到底要查哪家医院、哪个科室、哪一天」
+    // 解析清楚：模型显式给的参数说了算，参数省略时才沿用会话里已经明确的条件；解析不出来
+    // 就停下说清楚，绝不悄悄退回旧条件再装作回答了这次的问题。
+
+    /**
+     * 一次号源查询的实际条件。
+     *
+     * <p>刻意不是直接读 {@code state} 里那几个字段：它可能指向草稿之外的医院、科室或日期。
+     */
+    private record SlotQuery(String hospitalId, String hospital, String departmentId, String department,
+                             LocalDate date) {
+        /** 说给老人（和模型）听的那套条件。回复正文与工具留痕都用它，免得两边说的不是同一件事。 */
+        String label() {
+            return hospital + "·" + department + (date == null ? "" : "·" + date.format(DATE_LABEL));
+        }
+    }
+
+    /**
+     * 条件解析的结果：要么给出一套能拿去查的条件，要么给出一条「这次查不了、要说清楚」的回复。
+     * 两者必有其一——不会既查不成又不说话，也不会悄悄退回旧条件接着查。
+     */
+    private record SlotQueryResolution(SlotQuery query, AgentTurnResponse stop) {
+        static SlotQueryResolution of(SlotQuery query) { return new SlotQueryResolution(query, null); }
+
+        static SlotQueryResolution stop(AgentTurnResponse response) {
+            return new SlotQueryResolution(null, response);
+        }
+    }
+
+    /**
+     * 取这次规划里点名 {@code toolName} 那次调用的参数。
+     *
+     * <p>按名字找，不按位置取：单工具路径只有一次调用，批量路径里可能夹着别的工具，
+     * 两条路必须解析出同一份参数，否则同一句话在两条路上会查出不同结果。
+     */
+    private Map<String, String> toolArguments(AgentRuntime.Outcome outcome, String toolName) {
+        if (outcome.proposedTools() == null) return Map.of();
+        return outcome.proposedTools().stream()
+                .filter(call -> toolName.equals(call.toolName()))
+                .map(PlannerToolCall::arguments)
+                .findFirst().orElse(Map.of());
+    }
+
+    /**
+     * 把这次号源查询的条件定下来。
+     *
+     * <p>口径只有一条：<b>模型显式给的参数说了算，参数省略时才沿用会话里已经明确的条件</b>。
+     * 显式参数解析不出来（日期没看准、医院或科室对不上、不唯一）时就地停下说清楚，
+     * 绝不退回草稿的旧条件再装作回答了这次问题——那会答非所问，而且从回复里看不出来。
+     *
+     * <p>显式参数只决定「这次查什么」，不写回草稿。要落到草稿上，得由老人下一步明确表达。
+     */
+    private SlotQueryResolution resolveSlotQuery(ConversationState state, Map<String, String> arguments,
+                                                 boolean requireDate) {
+        String hospitalId = state.hospitalId;
+        String hospital = state.hospital;
+        String explicitHospital = blankToNull(arguments.get("hospital"));
+        if (explicitHospital != null) {
+            CatalogEntityResolver.Match match = entityResolver.hospital(explicitHospital,
+                    hospitalCatalogTool.listHospitals(state.id));
+            if (match.type() != CatalogEntityResolver.MatchType.EXACT) {
+                return SlotQueryResolution.stop(unresolvedHospitalReply(state, match));
+            }
+            hospitalId = match.only().id();
+            hospital = match.only().name();
+        }
+
+        String departmentId = state.departmentId;
+        String department = state.department;
+        String explicitDepartment = blankToNull(arguments.get("department"));
+        if (explicitDepartment != null) {
+            if (hospitalId == null) {
+                return SlotQueryResolution.stop(respond(state,
+                        "要查科室的号源，得先知道是哪家医院。请告诉我要去哪家医院。", resumeReplies(state)));
+            }
+            CatalogEntityResolver.Match match = entityResolver.department(explicitDepartment,
+                    departmentCatalogTool.listDepartments(state.id, hospitalId));
+            if (match.type() != CatalogEntityResolver.MatchType.EXACT) {
+                return SlotQueryResolution.stop(unresolvedDepartmentReply(state, hospital, match));
+            }
+            departmentId = match.only().id();
+            department = match.only().name();
+        }
+
+        LocalDate date = state.date;
+        String explicitDate = blankToNull(arguments.get("date"));
+        if (explicitDate != null) {
+            // 用契约那一份解析器：模型写 2026-9-12 这种没补零的写法，契约认，这里就得认，
+            // 不能因为两条路各有一套宽松度而把一次合规的调用判成说不清。
+            date = ToolContract.parseDate(explicitDate);
+            if (date == null) {
+                // 「给了但看不懂」和「没给」是两件事：前者不能退回去用旧日期，那等于把
+                // 老人问的那天换成了另一天还照答不误。
+                return SlotQueryResolution.stop(respond(state,
+                        "我没看准您说的是哪一天（“" + explicitDate + "”）。请再说一次，"
+                                + "例如“9月19号”，或写成 2026-09-19 这样。", resumeReplies(state)));
+            }
+        }
+        if (date != null && date.isBefore(clock.today())) {
+            return SlotQueryResolution.stop(respond(state,
+                    date.format(DATE_LABEL) + "已经过去了，我没有拿它去查号。请告诉我要查哪一天。",
+                    resumeReplies(state)));
+        }
+        if (hospitalId == null) {
+            return SlotQueryResolution.stop(respond(state, "要查询号源，请先告诉我想去哪家医院。",
+                    resumeReplies(state)));
+        }
+        if (department == null) {
+            return SlotQueryResolution.stop(respond(state, "要查询号源，还需要先选择复诊科室。",
+                    resumeReplies(state)));
+        }
+        if (date == null && requireDate) {
+            return SlotQueryResolution.stop(respond(state,
+                    "要找附近日期的号源，得先知道以哪一天为准。请先告诉我想查哪一天。", resumeReplies(state)));
+        }
+        return SlotQueryResolution.of(new SlotQuery(hospitalId, hospital, departmentId, department, date));
+    }
+
+    /**
+     * 显式医院对不上目录时的回话。
+     *
+     * <p>用的还是办理流程那一份 {@link CatalogEntityResolver}，口径一致；区别在于这里是查询，
+     * 所以只解释清楚，不改草稿、也不摆「是这家医院吗」的确认按钮——那不是在问这次的事。
+     */
+    private AgentTurnResponse unresolvedHospitalReply(ConversationState state,
+                                                      CatalogEntityResolver.Match match) {
+        if (match.type() == CatalogEntityResolver.MatchType.AMBIGUOUS) {
+            String names = match.candidates().stream().map(CatalogEntityResolver.Candidate::name)
+                    .collect(java.util.stream.Collectors.joining("、"));
+            return respond(state, "您说的“" + match.raw() + "”对上了不止一家医院：" + names
+                    + "。我没替您挑，请说全名或院区，我再查号源。", resumeReplies(state));
+        }
+        if (match.type() == CatalogEntityResolver.MatchType.UNIQUE_APPROXIMATE) {
+            return respond(state, "您说的“" + match.raw() + "”我理解成“" + match.only().name()
+                    + "”，但没敢直接拿它去查号。请说全名或院区确认一下，我再查。", resumeReplies(state));
+        }
+        return respond(state, "我没在可办理的医院里找到“" + match.raw() + "”，所以没有拿别的医院替它去查。"
+                + "请换一个医院名称说，或联系人工确认。", resumeReplies(state));
+    }
+
+    /** 显式科室对不上目录时的回话；口径同上。 */
+    private AgentTurnResponse unresolvedDepartmentReply(ConversationState state, String hospital,
+                                                        CatalogEntityResolver.Match match) {
+        if (match.type() == CatalogEntityResolver.MatchType.AMBIGUOUS) {
+            String names = match.candidates().stream().map(CatalogEntityResolver.Candidate::name)
+                    .collect(java.util.stream.Collectors.joining("、"));
+            return respond(state, hospital + "的“" + match.raw() + "”对上了不止一个科室：" + names
+                    + "。我不能替您猜，请说完整科室名称，我再查号源。", resumeReplies(state));
+        }
+        if (match.type() == CatalogEntityResolver.MatchType.UNIQUE_APPROXIMATE) {
+            return respond(state, hospital + "的“" + match.raw() + "”我理解成“" + match.only().name()
+                    + "”，但没敢直接拿它去查号。请说完整科室名称确认一下，我再查。", resumeReplies(state));
+        }
+        return respond(state, "我没在" + hospital + "找到与“" + match.raw() + "”对应的科室，"
+                + "所以没有拿别的科室替它去查。请按医生安排重新说科室名称。", resumeReplies(state));
+    }
+
+    /**
+     * {@code appointment.querySlots} 的入口。
+     *
+     * <p>分界只有一条——<b>这一轮是不是模型发起的</b>，与参数给没给无关：
+     * <ul>
+     *   <li>模型发起的调用：一律按只读查询处理，<b>参数为空也一样</b>。缺的项回草稿里取
+     *       （见 {@link #resolveSlotQuery}），够用就查、不够就问；不推进阶段、不动确认卡。
+     *       要按这次结果改预约，等老人下一句明确说。</li>
+     *   <li>不经过模型的按钮/规则流程：走既有办理流程，行为与加这一层之前逐字相同。</li>
+     * </ul>
+     */
+    private AgentTurnResponse querySlotsFor(ConversationState state, ExtractedFacts facts,
+                                            AgentRuntime.Outcome outcome) {
+        if (!outcome.modelDriven()) {
+            // 老人按按钮或规则规划器走到这一步：他明确说了什么就落什么，照旧进办理流程。
+            if (facts.date() != null) applyFacts(state, facts);
+            else clearSlotSelection(state, true);
+            return showAvailableSlots(state);
+        }
+        // arguments 为空也走只读出口：缺的条件从草稿里取，取不到就追问，草稿本身不动。
+        Map<String, String> arguments = toolArguments(outcome, "appointment.querySlots");
+        SlotQueryResolution resolution = resolveSlotQuery(state, arguments, false);
+        if (resolution.stop() != null) return resolution.stop();
+        return answerSlotQueryReadOnly(state, resolution.query(), false);
+    }
+
+    /** {@code appointment.queryNearbySlots} 的入口；分界规则与 {@link #querySlotsFor} 相同。 */
+    private AgentTurnResponse nearbySlotsFor(ConversationState state, AgentRuntime.Outcome outcome) {
+        if (!outcome.modelDriven()) return queryNearbySlots(state);
+        Map<String, String> arguments = toolArguments(outcome, "appointment.queryNearbySlots");
+        SlotQueryResolution resolution = resolveSlotQuery(state, arguments, true);
+        if (resolution.stop() != null) return resolution.stop();
+        return answerSlotQueryReadOnly(state, resolution.query(), true);
+    }
+
+    /**
+     * 只回答这一次的号源查询。
+     *
+     * <p>不推进阶段、不写号源候选、不动「接不接受附近日期」的意愿，更不碰确认卡——老人问的是
+     * 另一家医院或另一天的号，不构成改动手头那笔预约的授权。回复里点名这次实际查的是哪家医院、
+     * 哪个科室、哪一天，模型据此知道究竟查了什么，不会把别处的号源当成他问的那一处；查到之后
+     * 只问一句要不要按它来，改不改由老人的下一句话决定。
+     */
+    private AgentTurnResponse answerSlotQueryReadOnly(ConversationState state, SlotQuery query,
+                                                      boolean nearby) {
+        if (query.date() == null) {
+            // 要查的是草稿之外的医院或科室，可这一天还没定下来——不能拿旧日期替它查。
+            return answerReadOnly(state, "我还没听清您想问哪一天的号源。请告诉我想查哪一天，我再查。");
+        }
+        if (nearby) {
+            List<Slot> slots = callTool(state, "appointment.queryAlternatives",
+                    Map.of("hospitalId", query.hospitalId(), "department", query.department(), "date", query.date()),
+                    () -> appointmentTool.queryAlternatives(
+                            state.id, query.hospitalId(), query.department(), query.date()));
+            if (slots.isEmpty()) {
+                return answerReadOnly(state, "我查了" + query.label() + "，" + query.date().format(DATE_LABEL)
+                        + "没有号，之后三天也没有可预约时段。您可以换日期、换医院，或稍后再查。");
+            }
+            return answerReadOnly(state, "我查了" + query.label() + "，" + query.date().format(DATE_LABEL)
+                    + "没有号。附近日期目前可以预约的时间：" + slotText(slots, 4) + "。要按这个来吗？");
+        }
+        List<Slot> slots = callTool(state, "appointment.querySlots",
+                Map.of("hospitalId", query.hospitalId(), "department", query.department(), "date", query.date()),
+                () -> appointmentTool.queryAvailableSlots(
+                        state.id, query.hospitalId(), query.department(), query.date()));
+        if (slots.isEmpty()) {
+            return answerReadOnly(state, "我查了" + query.label() + "，" + query.date().format(DATE_LABEL)
+                    + "没有可预约时段。您可以换一天、换医院，或稍后再查。");
+        }
+        // 查到只是查到：这一轮不替老人把预约改过去，只问一句要不要按它来。
+        return answerReadOnly(state, "我查了" + query.label() + "，可以预约的时间：" + slotText(slots, 4)
+                + "。要按这个来吗？");
+    }
+
+    /**
+     * 只读答案的出口：正等确认时，把老人手上那张卡原样带上。
+     *
+     * <p>带上卡不只是为了不丢按钮——确认卡是业务终点，这一轮的措辞就此固定，不再交给模型润色。
+     * 否则模型可能对着「正在等确认」的状态说出一句「好的，我这就帮您约上」，而屏幕上并没有发生
+     * 任何确认；这句话既不是真实动作，也和他手上的卡对不上。
+     */
+    private AgentTurnResponse answerReadOnly(ConversationState state, String reply) {
+        List<QuickReply> replies = resumeReplies(state);
+        ConfirmationCard pending = confirmations.stillValidCard(state);
+        return pending == null
+                ? respond(state, reply, replies)
+                : respondWithoutModel(state, reply, replies, null, null, pending);
+    }
+
+    /** 把真实号源摆成一句话。查询与办理两条路共用，免得同一批号源在两边说得不一样。 */
+    private String slotText(List<Slot> slots, int limit) {
+        return slots.stream().limit(limit).map(this::slotLabel)
+                .collect(java.util.stream.Collectors.joining("；"));
+    }
+
     private AgentTurnResponse queryNearbySlots(ConversationState state) {
         if (state.hospitalId == null || state.department == null || state.date == null) {
             return validateDraftForModel(state);
         }
-        state.acceptAlternative = true;
+        // 这里刻意不写 state.acceptAlternative：查一次附近日期不等于老人答应了「可以换日期」。
+        // 意愿只有他本人说了（或点了「可以换日期」）才算数，办理流程问到这一步时照旧会问。
         state.stage = ConversationState.Stage.NO_SLOT;
         state.alternatives = callTool(state, "appointment.queryAlternatives",
                 Map.of("hospitalId", state.hospitalId, "department", state.department, "date", state.date),

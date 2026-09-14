@@ -15,9 +15,9 @@
 ## 2. 已核实的起点
 
 - `application/AgentRuntime.java` 已有主模型规划、只读工具循环和确认工具通道，优先复用。
-- `application/ToolRegistry.java` 有17个只读工具、2个确认工具。`interaction.requestConfirmation` 实际专用于取消范围；`interaction.respondConfirmation` 处理当前确认。
+- `application/ToolRegistry.java` 有17个只读工具、2个确认工具、1个澄清工具（共20个）。`interaction.requestConfirmation` 实际专用于取消范围；`interaction.respondConfirmation` 处理当前确认；`interaction.askClarification` 是 2026-09-13 新增的第三条通道（DEC-021），只提问、不建卡、不生成执行授权。
 - `agent/planning/PlannerTool.java` 的参数目前是字符串列表，缺少统一的类型与必填约束。
-- `FollowupAgentService.java` 超过五千行。`modelDailyRoute` 在模型识别意图后仍调用中文解析器；备忘补时间、补日期、删除确认等分支在主模型之前返回。
+- `FollowupAgentService.java` 5463 行（2026-09-14 审查后简化 + 只读出口收窄后）。`modelDailyRoute` 在模型识别意图后仍调用中文解析器；备忘补时间、补日期、删除确认等分支在主模型之前返回。
 - `application/longterm/MemoryStore.java` 已有数据库记忆、摘要与忘记能力。预约成功沉淀的历史不能自动等同于用户明确的长期偏好。
 - 主对话等多处使用无时区参数的 `LocalDate.now()`，备忘解析明确使用上海时区，需要统一。（2026-09-13 已统一，见第 7 节「时间」的现状提示；`MemoParser` 自身取「现在」这一处保留未动。）
 - 前端 `app/page.tsx` 已有全局语音转交与页面指令基础；`voice-commands.ts` 仍用中文词表就地截取命令。部分记录二级页在全局麦克风渲染前提前返回，应核对覆盖。
@@ -74,6 +74,20 @@
 4. 重复预约检查与日程冲突保留为不同业务校验；材料、流程、院内、院外工具职责不同，不强行合并。
 5. 取消专用申请工具要明确命名；通用确认服务保存业务动作与执行器引用，业务工具负责构造自己的待确认操作，不让一个通用工具承载全部业务参数。
 6. 参数中预约引用可来自服务端签发的候选或当前页面选择；必须校验服务对象归属，不能因为是模型提供就信任。模型不得选择当前用户身份或自行生成确认凭据。
+
+### 现状（2026-09-13 已实施 5B，2026-09-14 审查后简化为结构性规则：查询参数与办理草稿分离）
+
+> **这一节只完成了 `appointment.querySlots` 与 `appointment.queryNearbySlots` 两个工具的模型调用只查不改，不代表所有 READ_ONLY 工具都已收口。**其余工具的「查询条件 vs 会话状态」尚未按同一口径逐个核对——例如 `hospital.search` 仍可能更新会话里的解析状态。
+
+- **已定死的口径**：通过 `ToolContract` 校验的显式参数必须决定本次查询条件；参数省略时才允许沿用当前会话里已有且明确的条件；显式参数非法、医院/科室不唯一或条件不足时停下澄清，**不得退回旧条件查询后装作回答了本次问题**。不采用「草稿非空就忽略工具参数」的兜底。
+- **查询条件与办理草稿分开**：查另一日期或另一家医院，不得连带修改待办理预约或仍有效的确认卡。单工具（`appointment.querySlots`）与多工具（`CALL_READ_TOOLS`）路径共用同一套参数解析与查询口径，判据是工具名取参数，不是各写一份。
+- **模型发起的号源查询只查不改（结构性规则，分界是「谁发起的」而非「带了什么参数」）**：`appointment.querySlots` 与 `appointment.queryNearbySlots` 只要由模型发起，一律走只读出口——**`arguments` 为空也一样**，缺的条件回草稿里取（`resolveSlotQuery`），够用就查、不够就追问；不推进阶段、不动 `alternatives` / `selectedSlot` / `acceptAlternative` / 确认卡。只有 `modelDriven()==false` 的按钮/规则流程才走原来的 `showAvailableSlots` / `queryNearbySlots`。`LlmConversationPlanner` 对 `CALL_READ_TOOL(S)` 不再把 `arguments` 当事实来源，工具循环每轮进业务流程前统一过一遍 `withoutDraftWrites(...)`（医院/科室/日期/时间/陪同/通知清空，致谢与情绪照旧）。**不再问「查询条件与草稿冲不冲突」**——草稿为空就保持为空，条件与草稿相同也不写。
+- **续跑轮不算新查询**：收口统一走 `finishToolLoopDecision`——只交付上一次真实结果、模型那句回答或兜底说明，**不写草稿、不重进业务流**，**不看 intent 标签**（实测同一句复述的标签在 `QUERY_AVAILABLE_SLOTS` / `CHANGE_DATE` / `CURRENT_FLOW` 之间摇摆）。没有跨轮状态（无 ThreadLocal）。
+- **改草稿只有两条路**：模型明确提出业务动作（`PROPOSE_WORKFLOW_ACTION`）的那一轮，以及完全不经过模型的既有按钮/规则流程。老人一句「先查，有号再改」时，本轮先查并问「要按这个来吗」，下一轮明确同意后再改。
+- **一次查询不能替老人表态**：查附近日期不再自动置 `state.acceptAlternative`；「查医院 → 查号源」链路第一段（`RESOLVE_HOSPITAL` / `RESOLVE_DEPARTMENT`）同样由 `withoutDraftWrites` 挡住。
+- **提示词侧同时收口**：`AgentSystemPrompt` 明确「只读查询条件写对应工具的 arguments；facts 只表示用户明确要求写入或修改办理草稿的事实；只是询问别处时不要同时写进 facts；查询结果不得说成已经预约、已经改期、已经取消」。JSON 规划格式、字段与工具清单不变。**提示词是提醒，不是护栏**，Java 侧这条结构性规则独立成立。
+- 验证：`SlotQueryArgumentTests` 17 项、`VoiceFirstP1Tests` 7 项、`AgentRuntimeRoutingTests` 17 项共 41 项全绿；邻近的 `LlmConversationPlannerTests` / `VoiceFirstP0Tests` / `DemoScenarioTests` / `ClarificationFlowTests` / `MultimodalImageTurnTests` / `AgentSystemPromptQueryFactsTests` 共 51 项亦全绿。后端全量在本轮改动前为 497 项全绿，**本轮未重跑全量**。真实模型（deepseek-v4-flash）A/B 见 `records/PROGRESS.md` 同日条目（其中「草稿采纳」那条已按最终规则失效，未重跑）。决定见 DEC-025，踩坑见 `records/PITFALLS.md` 同日三条。
+- **仍未完成**：`modelSuggestedReplies` 对 `SELECT_SLOT` / `ASK_DATE` / `ASK_HOSPITAL` 等阶段返回空按钮；除上述两个号源工具外，其余只读工具的「只查不改」尚未逐项核对（`hospital.search` 仍可能更新会话里的解析状态）；整轮超时与工具调用上限仍是配置项，未实现。
 
 ## 6. 数据读取范围（目标权限矩阵，不代表现在全部开放）
 
@@ -172,7 +186,7 @@
 4. **确认与执行（2026-09-13 完成 4A 与 4B）**：已提取 `application/ConfirmationService`（凭据生命周期）与 `application/CancellationExecutor`（取消族执行器）。范围修订、批量事务、归属校验、重复确认防重逐条保持不变，取消专项（`CancelScopeTests`）全部保留并扩充。**会话恢复的语义按评审改了**（原来一次批量取消重启后只剩一条目标）：一份授权＝凭据＋动作类型＋完整目标集合，三样一起进 `ConversationState` 与快照、一起清；恢复出来的目标集合与签发时逐条相同，**还原不出完整目标集合的旧快照整份作废、要求重新确认，绝不部分执行**；动作类型在签发时定死，认不出来一律 fail closed。另：`respondConfirmation` 的参数校验已统一到 `ToolContract`，`AgentRuntime.Outcome.acceptedToolCall()` 因名不符实改名为 `hasContractCheckedToolCall()`（见 DEC-022）。
    **4B 已完成（2026-09-13）**：预约办理、备忘、代约取消三条也从 `FollowupAgentService.confirm()` 里搬进了各自的执行器（`BookingExecutor` 129 行 / `MemoExecutor` 96 行 / `ManagedCancelExecutor` 98 行），代他人办理另走 `CaregiverBookingExecutor` 137 行；`ConfirmationDispatcher`（142 行）统一持有并**只按签发时冻结的 `PendingOperation.Kind`** 分派，**六个 `Kind` 各有归口**（本人自办与代他人办理各成一类）、任意 `Kind` 都不会误落到 `BOOKING` 那条路，`caregiving()` 在分派里不再出现。执行器回调编排层走包级私有的抽象类 `ConfirmationSupport`（105 行，**抽象类而非接口**，且按方法参数传给分派器，避免 Spring 循环依赖）。`confirm()` 至此只做统一确认流程，**不再按 `pendingAction`、`appointmentId` 等可变会话字段重推授权类型与范围**。执行器**不复制数据库安全校验**（归属、状态、事务原子性仍由现有业务工具负责），每个只处理一种写操作。用户可见行为逐项保持，`confirmationId` 仍只能消费一次，旧凭据与不可信恢复状态继续 fail closed。后端全量 462 项 0 失败 0 错误（新增分派器 10 项、端到端分派 6 项、代约取消执行器 4 项）。
    **4B 修复轮（2026-09-13，评审驳回后当天完成）**：修的是同一类缝——**卡上写 A、执行却是 B**。① `Kind` 从四个拆成六个，路由判据只剩 `Kind`；② 目标条数在**签发与执行两侧成对**校验，`CANCEL_MANAGED` 与 `CANCEL_APPOINTMENTS_CAREGIVER` 要求**恰好一条**，执行侧 `singleTarget()` 不为一条时返回 `null` 并立即收场，**不静默取第一条**；③ 要取消的对象在签发时冻进 `targetIds`，执行时不再现找「当前预约」，原目标失效就什么都不取消、回「原预约保留」；照护端新增按明确 id 的事务入口 `CareBookingService.cancelAppointment(...)`（`cancelUpcoming` 保留给「取消当前预约」那个既有入口）；④ `ConversationStore.Snapshot` 增加备忘草稿六个字段，`payloadIntact` 在读回与签发两处都判，**旧快照缺草稿时整份作废、请他重说，绝不写残缺内容**；⑤ `MemoExecutor.write` 的写库异常收进统一 `toolError`，不再穿成 HTTP 500，失败后凭据已消费、不重复写库。公开接口与 `AgentTurnResponse` 字段零改动。后端全量 **477 项 0 失败 0 错误**（专项 79 项全绿；新增走真实库的 `MemoConfirmationRecoveryTests` 2 项与走 HTTP 的 `MemoToolFailureTests` 2 项，端到端分派 6 → 11 项、代约取消执行器 4 → 7 项、分派器 10 → 11 项、确认服务 28 → 30 项）。决定见 DEC-024。
-   **仍未完成**：`FollowupAgentService` 仍有 5173 行，除上述四类执行外的业务分支仍在它里面；按业务继续切分要等前端接口形状定形（见 `11-...md` 8.3）。
+   **仍未完成**：`FollowupAgentService` 仍有 5463 行（4B 收尾时 5185 行，5B 的号源参数改造涨到 5597，2026-09-14 简化后降到 5463），除上述四类执行外的业务分支仍在它里面；按业务继续切分要等前端接口形状定形（见 `11-...md` 8.3）。
 5. 全局语音导航：后端决定语义、前端校验导航与单次播报、覆盖所有老人页面。
 6. 真实模型评测与调优：依据失败样本调整工具描述、上下文和流程，不追加新的中文同义词表修正常路径。
 
