@@ -3,6 +3,7 @@ package com.team.silveragent;
 import com.team.silveragent.agent.AgentContext;
 import com.team.silveragent.agent.ExtractedFacts;
 import com.team.silveragent.agent.RuleFactExtractor;
+import com.team.silveragent.application.time.BusinessClock;
 import com.team.silveragent.domain.model.ToolModels.Conflict;
 import com.team.silveragent.domain.tool.ScheduleTool;
 import com.team.silveragent.support.DemoSeed;
@@ -11,7 +12,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 
-import java.time.LocalDate;
+import java.sql.Date;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.util.List;
@@ -34,11 +35,17 @@ class DemoSeedDataTests {
     @Autowired ScheduleTool scheduleTool;
     @Autowired RuleFactExtractor ruleFactExtractor;
     @Autowired JdbcTemplate jdbc;
+    /**
+     * 「今天」一律走业务时钟。{@code LocalDate.now()} 取的是 JVM 默认时区（容器是 UTC），
+     * 播种和口语解析用的却是业务时区（Asia/Shanghai）——北京时间 00:00–08:00 这八个小时里
+     * 两者差一天，跨过周一那道坎时「下周三」会整整差一周，这条用例就会在半夜自己变红。
+     */
+    @Autowired BusinessClock clock;
 
     @Test
     void spokenNextWednesdayLandsOnTheSeededCheckupDay() {
         ExtractedFacts facts = ruleFactExtractor.extract("我下周三想去市第一医院心内科复诊，上午方便",
-                new AgentContext("WAITING_DATE", "", LocalDate.now(), List.of()));
+                new AgentContext("WAITING_DATE", "", clock.today(), List.of()));
 
         assertThat(facts.date())
                 .as("演示话术里的「下周三」必须落在体检日程那天，否则冲突场景演不出来")
@@ -89,10 +96,12 @@ class DemoSeedDataTests {
 
         assertThat(departments).isNotEmpty();
         for (String department : departments) {
+            // 「未来」的基准同样用业务时钟，不用 SQL 的 CURRENT_DATE：后者取的是数据库连接的
+            // JVM 默认时区（UTC），和号源生成用的业务时区不是同一个钟面。
             Integer days = jdbc.queryForObject("""
                     SELECT COUNT(DISTINCT appointment_date) FROM appointment_slots
-                    WHERE department=? AND available=TRUE AND appointment_date > CURRENT_DATE
-                    """, Integer.class, department);
+                    WHERE department=? AND available=TRUE AND appointment_date > ?
+                    """, Integer.class, department, Date.valueOf(clock.today()));
             assertThat(days).as("科室 %s 未来还有几天可约", department).isGreaterThanOrEqualTo(3);
         }
     }
