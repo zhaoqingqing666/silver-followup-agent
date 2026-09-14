@@ -15,12 +15,14 @@ import com.team.silveragent.application.profile.ProfileQueryService;
 import com.team.silveragent.application.time.BusinessClock;
 import com.team.silveragent.application.travel.TravelGuideService;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.team.silveragent.agent.AgentContext;
 import com.team.silveragent.agent.AgentRole;
 import com.team.silveragent.agent.AnswerGenerator;
 import com.team.silveragent.agent.ExtractedFacts;
 import com.team.silveragent.agent.ReplyContext;
+import com.team.silveragent.agent.planning.HospitalRecommendation;
 import com.team.silveragent.agent.planning.PlannerActionType;
 import com.team.silveragent.agent.planning.PlannerToolCall;
 import com.team.silveragent.domain.model.AgentTurnResponse;
@@ -29,6 +31,7 @@ import com.team.silveragent.domain.model.AgentTurnResponse.PlanCard;
 import com.team.silveragent.domain.model.AgentTurnResponse.QuickReply;
 import com.team.silveragent.domain.model.AgentTurnResponse.ResultCard;
 import com.team.silveragent.domain.model.AgentTurnResponse.TaskProgress;
+import com.team.silveragent.domain.model.AgentTurnResponse.ToolTrace;
 import com.team.silveragent.domain.model.AgentTurnResponse.UiDirective;
 import com.team.silveragent.domain.model.ConversationHistoryResponse;
 import com.team.silveragent.domain.model.ConversationSummary;
@@ -158,6 +161,13 @@ public class FollowupAgentService extends ConfirmationSupport {
      * 更靠后的说“改第7条”一样能办。
      */
     private static final int MEMO_BUTTON_LIMIT = 5;
+    /**
+     * 只读日程查询里最多点名几条冲突。
+     *
+     * <p>推荐一轮只说 2—3 个选择，冲突本身只是这些选择的背景，说多了就盖过了正事；
+     * 而且老人要判断的是「这个时间行不行」，不是「那天排了几件事」。
+     */
+    private static final int CONFLICT_DISPLAY_LIMIT = 3;
     /** 反问“这个数不太对”之后，老人表示“就按这个记”的说法。 */
     private static final String[] RECORD_KEEP_WORDS = {
             "就按这个", "就按它", "按这个记", "照记", "记下来", "记下", "记上",
@@ -683,7 +693,7 @@ public class FollowupAgentService extends ConfirmationSupport {
                 state.taskStatus = ConversationState.TaskStatus.ACTIVE;
             }
         }
-        if (agentRuntime.isModelReadToolOutcome(outcome)) {
+        if (agentRuntime.isModelReadToolOutcome(outcome) || isStructuredRecommendation(outcome)) {
             return runModelToolLoop(state, value, outcome);
         }
         return dispatchOutcome(state, value, outcome);
@@ -891,13 +901,13 @@ public class FollowupAgentService extends ConfirmationSupport {
             case VALIDATE_DRAFT -> validateDraftForModel(state, facts);
             case QUERY_HOSPITALS -> showHospitals(state, facts.hospital());
             case QUERY_DEPARTMENTS -> showDepartments(state, facts.hospital());
-            case RECOMMEND_HOSPITAL -> recommendHospitals(state, facts.department());
+            case RECOMMEND_HOSPITAL -> recommendHospitals(state, facts, outcome.modelDriven());
             case QUERY_AVAILABLE_SLOTS -> querySlotsFor(state, facts, outcome);
             case QUERY_NEARBY_SLOTS -> nearbySlotsFor(state, outcome);
-            case CHECK_CONFLICT -> checkSchedule(state);
+            case CHECK_CONFLICT -> checkSchedule(state, outcome);
             case CHECK_DUPLICATE -> checkDuplicate(state);
             case ASK_MATERIALS -> showMaterials(state, facts);
-            case QUERY_TRAVEL_GUIDE -> showTravelGuide(state, facts, value, false);
+            case QUERY_TRAVEL_GUIDE -> travelGuideFor(state, facts, value, outcome);
             case QUERY_LOCATION_GUIDE -> showLocationGuide(state, facts, value, true);
             case CHANGE_HOSPITAL -> changeHospital(state, facts, value);
             case CHANGE_DEPARTMENT -> changeDepartment(state, facts, value);
@@ -965,9 +975,35 @@ public class FollowupAgentService extends ConfirmationSupport {
         AgentTurnResponse latestToolResponse = null;
         ToolOutcome.Step latestOutcome = null;
         Set<String> executed = new LinkedHashSet<>();
+        // 老人这一轮明确排除的医院、以及他说定的科室，是本轮的读条件，不是草稿字段。
+        // 模型很可能先查历史或画像、下一轮才给推荐，而那一轮未必把排除项再说一遍——
+        // 所以约束由整个循环带着走，不能只看最后那一轮的 facts。
+        TurnReadConstraint constraint = TurnReadConstraint.none().merge(initial.facts());
+        // 本轮证据的分界线：进循环前记下最大追踪 id，校验推荐理由时只认它之后的真实工具调用。
+        // 必须在任何一次目录查询之前取——目录工具自己也会写追踪，取晚了会把 Java 自己的查询
+        // 当成「模型查过的证据」。
+        long evidenceMarker = traces.latestId(state.id);
+        // 结构化推荐校验不过时只给一次修正机会，且这次修正会消耗一轮（它可能先去点只读工具）。
+        int recommendationRepairs = 0;
 
         for (int round = 1; round <= MAX_MODEL_TOOL_ROUNDS; round++) {
             if (!agentRuntime.isModelReadToolOutcome(current)) {
+                if (isStructuredRecommendation(current)) {
+                    RecommendationCheck check = checkRecommendations(state, current, constraint, evidenceMarker);
+                    if (check.ok()) return deliverRecommendation(state, current.answering(), check);
+                    // 认不准的排除、排除之后没有候选：这是 Java 的终结句，不该交给模型再改一遍。
+                    if (check.stopped() != null) return check.stopped();
+                    if (recommendationRepairs++ == 0) {
+                        turnProgress.mark(state.id, TurnProgress.Kind.PLANNING);
+                        current = agentRuntime.continueAfterTools(originalMessage, planContext(state),
+                                state, check.evidence());
+                        constraint = constraint.merge(current.facts());
+                        AgentTurnResponse guarded = guardContinuation(state, originalMessage, current);
+                        if (guarded != null) return guarded;
+                        continue;
+                    }
+                    return recommendationUnavailable(state);
+                }
                 return finishToolLoopDecision(state, current, latestToolResponse);
             }
 
@@ -1009,22 +1045,372 @@ public class FollowupAgentService extends ConfirmationSupport {
             }
 
             String evidence = toolLoopEvidence(round, freshCalls, latestToolResponse, latestOutcome);
-            AgentContext nextContext = new AgentContext(state.stage.name(), knownFacts(state),
-                    clock.today(), conversations.recentMessages(state.id), identityOf(state),
-                    conversations.recentVision(state.id));
             turnProgress.mark(state.id, TurnProgress.Kind.PLANNING);
-            current = agentRuntime.continueAfterTools(originalMessage, nextContext, state, evidence);
+            current = agentRuntime.continueAfterTools(originalMessage, planContext(state), state, evidence);
+            // 续跑轮里模型可能会补一个新的排除目标，或者第一次说出科室：并进去，只增不减。
+            // 它写错名字的代价由 Java 承担——认不准的那一轮不给推荐，绝不悄悄忽略。
+            constraint = constraint.merge(current.facts());
 
-            SafetyGuard.Decision safety = current.modelDriven()
-                    ? safetyGuard.evaluateModel(originalMessage, current.facts())
-                    : SafetyGuard.Decision.NONE;
-            if (safety == SafetyGuard.Decision.EMERGENCY) return emergency(state);
-            if (safety == SafetyGuard.Decision.MEDICAL_BOUNDARY) return medicalBoundary(state);
-            if (current.modelDriven()) prepareModelIntentState(state, current.intent());
+            AgentTurnResponse guarded = guardContinuation(state, originalMessage, current);
+            if (guarded != null) return guarded;
         }
 
+        // 轮数用尽：最后再看一眼收口，别把「三轮都在查工具、最后一次才给推荐」丢掉。
+        // 这里不再给修正机会——它已经是最后一轮了。
+        if (isStructuredRecommendation(current)) {
+            RecommendationCheck check = checkRecommendations(state, current, constraint, evidenceMarker);
+            if (check.ok()) return deliverRecommendation(state, current.answering(), check);
+            if (check.stopped() != null) return check.stopped();
+            return recommendationUnavailable(state);
+        }
         return finalizeToolEvidence(state, latestToolResponse,
                 "我已经完成当前查询。为避免重复查询，请从现有结果中选择，或告诉我想修改哪项条件。");
+    }
+
+    /**
+     * 进入规划模型的那一份上下文：阶段、已知事实、今天、最近消息、身份、最近的识图。
+     *
+     * <p>工具循环的每一轮各建一份，内容随时在变；抽出来是为了让「续跑」和「推荐修正」用的是
+     * 同一份口径——修正轮也是同一轮对话里的续跑，不该看到不一样的上下文。
+     */
+    private AgentContext planContext(ConversationState state) {
+        return new AgentContext(state.stage.name(), knownFacts(state),
+                clock.today(), conversations.recentMessages(state.id), identityOf(state),
+                conversations.recentVision(state.id));
+    }
+
+    /**
+     * 续跑结果的安全预检与意图准备。返回非空表示这一轮到此为止（急症 / 医疗边界），
+     * 返回 null 表示照常往下走。
+     *
+     * <p>工具循环的常规续跑和推荐校验失败后的那一次修正共用它：修正轮也是模型的一次续跑，
+     * 不能因为「它是在改一份不合规的推荐」就跳过安全预检。
+     */
+    private AgentTurnResponse guardContinuation(ConversationState state, String originalMessage,
+                                                AgentRuntime.Outcome current) {
+        SafetyGuard.Decision safety = current.modelDriven()
+                ? safetyGuard.evaluateModel(originalMessage, current.facts())
+                : SafetyGuard.Decision.NONE;
+        if (safety == SafetyGuard.Decision.EMERGENCY) return emergency(state);
+        if (safety == SafetyGuard.Decision.MEDICAL_BOUNDARY) return medicalBoundary(state);
+        if (current.modelDriven()) prepareModelIntentState(state, current.intent());
+        return null;
+    }
+
+    // ---------------------------------------------------------------- 结构化推荐的校验与交付
+    //
+    // 推荐这一轮不再由 Java 重装、也不再交给回答模型润色：模型在最后一次调用里同时给出结构化
+    // recommendations 和最终话语 answering，Java 只校验结构化那一半，通过了就把 answering
+    // 原样交付。Java 因此不排序、不替补、不重写理由——它只回答一个问题：
+    // 「这几家医院，是不是这一轮真查过、真没被排除、理由真有出处？」
+
+    /** 这一轮是在推荐：模型给了结构化清单，或者 intent 就是它。 */
+    private static boolean isStructuredRecommendation(AgentRuntime.Outcome outcome) {
+        return outcome != null && outcome.modelDriven()
+                && outcome.route() == AgentOrchestrator.Route.RECOMMEND_HOSPITAL;
+    }
+
+    /** 一次推荐最多给几家。超过就整轮不展示，让模型自己删——Java 不替它挑前三条。 */
+    private static final int MAX_RECOMMENDATIONS = 3;
+
+    /**
+     * 模型口中的工具名 → {@code tool_call_logs} 里真实记下的工具名。
+     *
+     * <p>目录工具的追踪名和规划器工具名不是一套：{@code hospital.list} 落库时叫
+     * {@code catalog.queryHospitals}，号源的「附近日期」查询落库时叫 {@code appointment.queryAlternatives}。
+     * 不显式对上，模型引用了真实查过的证据也会被判成「没查过」。这张表是<b>工具名</b>的对应，
+     * 不是中文词表。
+     */
+    private static final Map<String, String> TRACE_TOOL_NAMES = Map.of(
+            "hospital.list", "catalog.queryHospitals",
+            "hospital.search", "catalog.queryHospitals",
+            "department.list", "catalog.queryDepartments",
+            "department.search", "catalog.queryDepartments",
+            "appointment.queryNearbySlots", "appointment.queryAlternatives",
+            "material.checklist", "material.generateChecklist");
+
+    /**
+     * 这些证据「只对某一家医院成立」：号源、路线、科室清单、院内指引，查的时候就是奔着某一家去的。
+     * 引它们当理由时，那一次调用的参数或结果里必须真的出现这家医院；否则「有证据」只是有证据，
+     * 证明不了什么。{@code hospital.list}、{@code appointment.history}、{@code profile.memorySummary}
+     * 这类是不分医院的，只要真跑过且有结果就算数。
+     */
+    private static final Set<String> HOSPITAL_SCOPED_TOOLS = Set.of(
+            "appointment.querySlots", "appointment.queryNearbySlots", "travel.routePlan",
+            "department.list", "department.search", "hospital.search", "hospital.locationGuide");
+
+    /** 工具自己报条数时用的字段名；用来分辨「查了但一条没有」和「查到了」。 */
+    private static final Set<String> TRACE_COUNT_FIELDS = Set.of("total", "returned", "count", "size");
+
+    /**
+     * 结构化推荐的校验结果。
+     *
+     * @param ok        这一份清单能不能直接交付
+     * @param validated 过了校验的医院，<b>顺序就是模型给的顺序</b>（Java 不重排）
+     * @param note      Java 得在 {@code answering} 前面说的一句理解说明（近似排除时才有）
+     * @param evidence  校验不过时回给模型的结构化问题；{@code ok} 时为空
+     * @param stopped   这一轮不能靠模型修正：Java 已经写好了终结回复（排除认不准 / 没有候选了）
+     */
+    private record RecommendationCheck(boolean ok, List<HospitalProfile> validated, String note,
+                                       String evidence, AgentTurnResponse stopped) {
+        static RecommendationCheck ok(List<HospitalProfile> validated, String note) {
+            return new RecommendationCheck(true, validated, note, null, null);
+        }
+
+        static RecommendationCheck retry(String evidence) {
+            return new RecommendationCheck(false, List.of(), "", evidence, null);
+        }
+
+        static RecommendationCheck stopped(AgentTurnResponse response) {
+            return new RecommendationCheck(false, List.of(), "", null, response);
+        }
+    }
+
+    /**
+     * 逐条校验模型给的结构化推荐。
+     *
+     * <p>顺序很要紧：<b>先读证据、再算候选</b>。候选是 Java 自己查目录算出来的，那次查询也会落追踪；
+     * 反过来写的话，模型只要引一句 {@code hospital.list}，Java 自己刚查的那一趟就成了它的「证据」。
+     * 所以证据快照取自 {@code prepareCandidates} 之前。
+     *
+     * <p>校验只回答「推荐对象是不是本轮真实候选、有没有被排除、科室在不在、引用的证据是不是本轮真查过
+     * 且是关于这一家的、条数够不够少、answering 里有没有夹带别家」。它<b>不</b>判断理由说得好不好、
+     * 也不排序——那是模型的事。
+     */
+    private RecommendationCheck checkRecommendations(ConversationState state, AgentRuntime.Outcome decision,
+                                                     TurnReadConstraint constraint, long evidenceMarker) {
+        List<ToolTrace> evidence = traces.since(state.id, evidenceMarker);
+        RecommendationPlan plan = prepareCandidates(state, constraint.facts(), true);
+        if (plan.blocked() != null) return RecommendationCheck.stopped(plan.blocked());
+
+        List<HospitalRecommendation> items = decision.recommendations();
+        List<String> errors = new ArrayList<>();
+        if (evidence.isEmpty()) {
+            // 最要紧的一条先说：一条工具都没查就给推荐，理由不可能有出处。
+            errors.add("NO_EVIDENCE_AT_ALL: 你这一轮还没有调用过任何只读工具，也就没有任何真实数据可以支撑推荐。"
+                    + "请先查（例如 hospital.list、department.list、appointment.querySlots），拿到结果再给 recommendations。");
+        }
+        if (items.isEmpty()) {
+            errors.add("NO_RECOMMENDATIONS: 这一轮没有给出 recommendations。");
+        }
+        if (items.size() > MAX_RECOMMENDATIONS) {
+            errors.add("TOO_MANY: 一次最多推荐 " + MAX_RECOMMENDATIONS + " 家，你给了 " + items.size() + " 家，请自己删到 3 家以内。");
+        }
+
+        Map<String, HospitalProfile> candidates = new LinkedHashMap<>();
+        for (HospitalProfile item : plan.kept()) candidates.put(item.id(), item);
+        Map<String, HospitalProfile> catalog = new LinkedHashMap<>();
+        for (HospitalProfile item : hospitalCatalogTool.listHospitals(state.id)) catalog.put(item.id(), item);
+
+        Set<String> seen = new LinkedHashSet<>();
+        List<HospitalProfile> validated = new ArrayList<>();
+        for (HospitalRecommendation item : items) {
+            if (item.hospitalId().isEmpty()) {
+                errors.add("MISSING_HOSPITAL_ID: 有一条推荐没有填 hospitalId。");
+                continue;
+            }
+            if (!seen.add(item.hospitalId())) {
+                errors.add("DUPLICATE_HOSPITAL: " + item.hospitalId() + " 出现了不止一次。");
+                continue;
+            }
+            HospitalProfile hospital = candidates.get(item.hospitalId());
+            if (hospital == null) {
+                HospitalProfile known = catalog.get(item.hospitalId());
+                errors.add(plan.excludedIds().contains(item.hospitalId())
+                        ? "HOSPITAL_EXCLUDED: " + describe(known, item.hospitalId())
+                        + " 是老人这一轮明确排除的医院，不能再推荐。"
+                        : "HOSPITAL_NOT_A_CANDIDATE: " + describe(known, item.hospitalId())
+                        + " 不在本轮的真实候选里，请只从 allowedCandidates 里选。");
+                continue;
+            }
+            if (plan.department() != null && !hasDepartment(state, hospital.id(), plan.department())) {
+                errors.add("DEPARTMENT_NOT_FOUND: " + hospital.name() + " 的目录里没有“" + plan.department()
+                        + "”这个科室。");
+                continue;
+            }
+            if (item.evidenceRefs().isEmpty()) {
+                errors.add("EVIDENCE_MISSING: " + hospital.name() + " 这条没有 evidenceRefs，"
+                        + "推荐理由必须说明是从哪一次真实查询里来的。");
+                continue;
+            }
+            for (String ref : item.evidenceRefs()) {
+                String problem = evidenceProblem(ref, hospital, evidence);
+                if (problem != null) errors.add(problem);
+            }
+            validated.add(hospital);
+        }
+
+        String answering = decision.answering();
+        if (answering == null || answering.isBlank()) {
+            errors.add("NO_ANSWERING: 这一轮没有给出 answering，老人看不到话。");
+        } else {
+            String smuggled = hospitalNamedIn(answering, catalog.values(), validated);
+            if (smuggled != null) {
+                errors.add("ANSWER_MENTIONS_HOSPITAL: answering 里提到了“" + smuggled
+                        + "”，它不在这次要推荐的医院里，整句不能给老人看。");
+            }
+        }
+
+        if (!errors.isEmpty()) return RecommendationCheck.retry(recommendationRepairEvidence(errors, plan));
+        return RecommendationCheck.ok(validated, plan.note());
+    }
+
+    /**
+     * 展示这一轮校验通过的推荐：<b>就用模型给的那句话</b>，不再润色，也不再重写理由。
+     *
+     * <p>按钮由 Java 用已校验的候选按模型给的顺序生成（label / action / value 与既有页面约定一致，
+     * 前端零改动）。文字是 {@code note + answering}——{@code note} 只在近似排除时有内容，
+     * 那是 Java 必须说的话（「您说的市一我理解成市第一医院」），其余情况就是逐字的 {@code answering}。
+     *
+     * <p>走 {@code respondWithoutModel}：<b>不调用回答模型</b>，也不再经过「权威回复草稿」那一层。
+     * 这句话已经过结构校验，交给润色层再改一遍，就等于把刚验过的东西重新变成没人校验的自由文本。
+     */
+    private AgentTurnResponse deliverRecommendation(ConversationState state, String answering,
+                                                    RecommendationCheck check) {
+        List<QuickReply> choices = check.validated().stream()
+                .map(item -> q("选择" + item.name(), "SET_HOSPITAL", item.id())).toList();
+        String note = check.note() == null ? "" : check.note();
+        String text = answering == null ? "" : answering.trim();
+        return respondWithoutModel(state, note + text, choices);
+    }
+
+    /**
+     * 两次都没能给出合法推荐：只回一句中性的话。
+     *
+     * <p><b>不复述模型那句，也不出现任何医院名、任何按钮。</b>校验没通过的那句话里到底提了谁、
+     * 说得对不对，Java 判断不了（中文自由措辞不可解析），所以整句都不能给老人看。
+     */
+    private AgentTurnResponse recommendationUnavailable(ConversationState state) {
+        return respondWithoutModel(state,
+                "这一轮我还没能给您一份靠得住的推荐，所以先不列医院了。"
+                        + "您可以告诉我医生要求复诊的科室，或换个说法再说一次，我重新查。",
+                resumeReplies(state));
+    }
+
+    /**
+     * 证据引用能不能算数：那一次调用这一轮真的发生过吗？真查到东西了吗？是关于这一家医院的吗？
+     *
+     * <p>判「查到没有」读的是落库的 {@code response_json}，不是会话里那个 {@code outcomeKind}——
+     * 后者在工具循环里几乎恒为 SUCCESS（只看响应形状），拿它当「有证据」等于没查过。
+     */
+    private String evidenceProblem(String ref, HospitalProfile hospital, List<ToolTrace> evidence) {
+        if (ref == null || ref.isBlank()) return "EVIDENCE_MISSING: 有一条 evidenceRefs 是空的。";
+        String traceName = TRACE_TOOL_NAMES.getOrDefault(ref, ref);
+        List<ToolTrace> hits = evidence.stream()
+                .filter(row -> traceName.equals(row.toolName())).toList();
+        if (hits.isEmpty()) {
+            return "EVIDENCE_NOT_GATHERED: 这一轮没有真的调用过“" + ref + "”，它不能当推荐理由的出处。";
+        }
+        if (hits.stream().noneMatch(row -> row.success() && traceHasResult(row.result()))) {
+            return "EVIDENCE_EMPTY: “" + ref + "”这一轮查过，但没有查到内容，不能当推荐理由的出处。";
+        }
+        if (!HOSPITAL_SCOPED_TOOLS.contains(ref)) return null;
+        boolean aboutThisOne = hits.stream()
+                .anyMatch(row -> row.success() && traceHasResult(row.result()) && traceMentions(row, hospital));
+        return aboutThisOne ? null
+                : "EVIDENCE_NOT_ABOUT_HOSPITAL: “" + ref + "”这一轮查的不是" + hospital.name()
+                + "（那一次的参数和结果里都没有这家医院），不能当它的推荐理由。";
+    }
+
+    /**
+     * 这次调用到底查到东西没有。
+     *
+     * <p>光看「JSON 是不是空的」会漏：工具在「查了但一条也没有」时返回的往往是
+     * {@code {"total":0,...}} 这种非空对象，当成证据就等于拿空结果去支撑推荐。所以还要看
+     * 工具自己报出来的条数——报了条数且全是 0，就是没查到。
+     */
+    private boolean traceHasResult(String responseJson) {
+        if (responseJson == null || responseJson.isBlank()) return false;
+        JsonNode node;
+        try {
+            node = json.readTree(responseJson);
+        } catch (Exception error) {
+            // 没按 JSON 落库的痕迹（比如错误文本）不当空处理，交给 success 那位去判断。
+            return true;
+        }
+        if (node == null || node.isNull()) return false;
+        if (node.isArray()) return !node.isEmpty();
+        if (node.isObject()) {
+            boolean reportedCount = false;
+            for (String field : TRACE_COUNT_FIELDS) {
+                JsonNode value = node.get(field);
+                if (value != null && value.isNumber()) {
+                    reportedCount = true;
+                    if (value.asInt() > 0) return true;
+                }
+            }
+            return !reportedCount && !node.isEmpty();
+        }
+        return !node.asText("").isBlank();
+    }
+
+    /** 这一次调用的参数或结果里，有没有出现这家医院的 id 或名字。 */
+    private static boolean traceMentions(ToolTrace trace, HospitalProfile hospital) {
+        String text = (trace.parameters() == null ? "" : trace.parameters())
+                + (trace.result() == null ? "" : trace.result());
+        return (!hospital.id().isBlank() && text.contains(hospital.id()))
+                || (!hospital.name().isBlank() && text.contains(hospital.name()));
+    }
+
+    /**
+     * {@code answering} 里有没有夹带真实医院名。
+     *
+     * <p>查的是<b>真实目录里的名字</b>，不是新增一份中文词表：凡是目录里认得出来的医院名出现在这句话里、
+     * 又不属于这次要推荐的那几家，整句就不展示。被排除的那家和「目录里真有、但没验过」的那家都在此列——
+     * 前者是绕着排除走，后者是夹带了一个没人验过的名字。
+     */
+    private static String hospitalNamedIn(String text, java.util.Collection<HospitalProfile> catalog,
+                                          List<HospitalProfile> allowed) {
+        String haystack = CatalogEntityResolver.canonicalName(text);
+        Set<String> allowedIds = allowed.stream().map(HospitalProfile::id).collect(java.util.stream.Collectors.toSet());
+        for (HospitalProfile item : catalog) {
+            String name = CatalogEntityResolver.canonicalName(item.name());
+            if (name.isEmpty() || !haystack.contains(name)) continue;
+            if (allowedIds.contains(item.id())) continue;
+            return item.name();
+        }
+        return null;
+    }
+
+    private static String describe(HospitalProfile known, String hospitalId) {
+        return known == null ? "“" + hospitalId + "”" : "“" + known.name() + "”";
+    }
+
+    private boolean hasDepartment(ConversationState state, String hospitalId, String department) {
+        return departmentCatalogTool.listDepartments(state.id, hospitalId).stream()
+                .anyMatch(row -> CatalogEntityResolver.canonicalName(row.name())
+                        .equals(CatalogEntityResolver.canonicalName(department)));
+    }
+
+    /**
+     * 校验不过时回给模型的结构化问题清单。
+     *
+     * <p>形状沿用 {@link #toolLoopEvidence} 那一套（{@code outcomeKind} + 结构化字段），
+     * 让模型不必从中文里猜「到底哪一条不合规」。{@code recommendation.validate} 只是个记号，
+     * <b>不注册成工具</b>，模型看不见它、也调不到它。
+     */
+    private String recommendationRepairEvidence(List<String> errors, RecommendationPlan plan) {
+        Map<String, Object> value = new LinkedHashMap<>();
+        value.put("outcomeKind", "MISSING_INFO");
+        value.put("toolName", "recommendation.validate");
+        value.put("problems", errors);
+        value.put("requestedDepartment", plan.department());
+        value.put("excludedHospitals", plan.excluded());
+        value.put("allowedCandidates", plan.kept().stream().map(item -> Map.of(
+                "hospitalId", item.id(), "name", item.name())).toList());
+        value.put("recommendationContract", List.of(
+                "每条推荐填 hospitalId / reason / evidenceRefs；一次最多 3 条，hospitalId 不能重复",
+                "hospitalId 只能取 allowedCandidates 里的真实 id",
+                "evidenceRefs 填你这一轮真正调用过、并且真的查到了内容的工具名；每条推荐至少一个",
+                "号源、路线、科室、院内指引这类证据必须是关于那一家医院的（参数里带上那家医院）",
+                "answering 里只准出现本次要推荐的医院，别的真实医院名一个都不能有"));
+        value.put("requiredShape", "{\"recommendations\":[{\"hospitalId\":\"...\",\"reason\":\"...\","
+                + "\"evidenceRefs\":[\"appointment.querySlots\"]}],\"answering\":\"...\"}");
+        try {
+            return json.writeValueAsString(value);
+        } catch (Exception error) {
+            return value.toString();
+        }
     }
 
     /**
@@ -1065,8 +1451,11 @@ public class FollowupAgentService extends ConfirmationSupport {
      *
      * <p>工具循环里的每一轮都是「模型看着真实工具结果作答」，包括第一轮——它是由老人的话触发的，
      * 但模型选的是只读查询，不是业务动作。<b>所以这里不写草稿、也不重新进预约业务流</b>，
-     * 交付的只有三样：真实查询结果、模型那句回答、或一句兜底说明。
+     * 交付的只有两样：真实查询结果、模型那句回答（拿不到就一句兜底说明）。
      * 要改草稿，得由老人的下一句话走业务动作（{@code PROPOSE_WORKFLOW_ACTION}），那一轮不经过这里。
+     *
+     * <p>推荐路由<b>不走这里</b>：它在循环顶就被 {@link #checkRecommendations} 拦下来了，
+     * 模型那句自由措辞不能直接交付。
      *
      * <p>本轮的范围只到号源查询：{@code appointment.querySlots} 与 {@code appointment.queryNearbySlots}
      * 的模型调用只查不改。其余只读工具（如 {@code hospital.search}）仍可能更新会话里的解析状态，
@@ -1092,6 +1481,45 @@ public class FollowupAgentService extends ConfirmationSupport {
     }
 
     /**
+     * 一次用户消息内的只读约束：这一轮 Java 拿来算推荐的两样条件——科室，以及老人明确排除的医院。
+     *
+     * <p>它存在的理由是<b>工具循环跨轮</b>：老人说「推荐心内科的医院，别给我市一」之后，模型常常
+     * 先查 {@code appointment.history} 或 {@code profile.memorySummary}，下一轮才给推荐。那一轮
+     * 它未必把排除项重说一遍；只看最后那一轮的 {@code facts.excludedHospitals}，排除就会在续跑轮里
+     * 悄悄失效，被排除的医院从推荐文字里回来。约束跟着整个循环走，这个缺口才不存在。
+     *
+     * <p><b>它只活在这一次用户消息的这一轮里</b>：一个局部变量，不落 {@code ConversationState}、
+     * 不写 {@code MemoryStore}，方法返回就没了。老人下一轮改口说「那家也可以」，那是新的一轮、
+     * 新的空约束——既不会被记住，也不会被上一轮的话挡住。
+     *
+     * <p>科室取第一次说定的那个，排除目标取并集（只增不减）：中途忘掉一个排除目标，等于把它放回候选。
+     */
+    private record TurnReadConstraint(String department, List<String> excludedHospitals) {
+        static TurnReadConstraint none() { return new TurnReadConstraint(null, List.of()); }
+
+        TurnReadConstraint merge(ExtractedFacts facts) {
+            if (facts == null) return this;
+            // 科室：第一次说定的那个就是这一轮的条件，后面几轮不重复说也不该丢。
+            String mergedDepartment = department != null ? department : facts.department();
+            if (facts.excludedHospitals().isEmpty()) {
+                if (mergedDepartment == department) return this;
+                return new TurnReadConstraint(mergedDepartment, excludedHospitals);
+            }
+            List<String> merged = new ArrayList<>(excludedHospitals);
+            for (String raw : facts.excludedHospitals()) {
+                if (!merged.contains(raw)) merged.add(raw);
+            }
+            return new TurnReadConstraint(mergedDepartment, List.copyOf(merged));
+        }
+
+        /** 交给 {@link #recommendHospitals} 的那一份事实：只带读条件，草稿字段一个都没有。 */
+        ExtractedFacts facts() {
+            return new ExtractedFacts("UNKNOWN", null, department, null, null, null, null, null,
+                    null, null, null, null, null, null, null, null, excludedHospitals);
+        }
+    }
+
+    /**
      * 拿掉会落到草稿上的那几项，只留不属于「办理条件」的事实。
      *
      * <p>模型发起这一轮的 facts 不是老人的新说法：模型常把「这次要查哪家医院、哪一天」同时写进
@@ -1104,9 +1532,13 @@ public class FollowupAgentService extends ConfirmationSupport {
         if (facts == null) return outcome;
         return new AgentRuntime.Outcome(outcome.route(),
                 new ExtractedFacts(facts.intent(), null, null, null, null, null, null, null, null,
-                        null, null, null, facts.acknowledgement(), facts.emotion(), facts.concern(), null),
+                        null, null, null, facts.acknowledgement(), facts.emotion(), facts.concern(), null,
+                        // 排除目标是「这一轮查什么」，不是草稿字段，原样留着。
+                        facts.excludedHospitals()),
                 outcome.replyDraft(), outcome.dialogueMode(), outcome.plannerSource(), outcome.proposedTool(),
-                outcome.proposedTools(), outcome.actionType(), outcome.intent(), outcome.modelDriven());
+                outcome.proposedTools(), outcome.actionType(), outcome.intent(), outcome.modelDriven(),
+                // 结构化推荐与最终话语不是「办理条件」，不落草稿，原样带走。
+                outcome.recommendations(), outcome.answering());
     }
 
     private AgentTurnResponse finalizeToolEvidence(ConversationState state,
@@ -1132,7 +1564,8 @@ public class FollowupAgentService extends ConfirmationSupport {
                 calls.size() == 1 ? calls.get(0).toolName() : null, calls,
                 calls.size() == 1 ? com.team.silveragent.agent.planning.PlannerActionType.CALL_READ_TOOL
                         : com.team.silveragent.agent.planning.PlannerActionType.CALL_READ_TOOLS,
-                outcome.intent(), outcome.modelDriven());
+                outcome.intent(), outcome.modelDriven(),
+                outcome.recommendations(), outcome.answering());
     }
 
     private AgentOrchestrator.Route toolRoute(PlannerToolCall call, AgentOrchestrator.Route fallback) {
@@ -2647,6 +3080,200 @@ public class FollowupAgentService extends ConfirmationSupport {
                 resumeReplies(state));
     }
 
+    /** 已确认预约的路线：真正打开地图的那一种。 */
+    private static final String MODE_APPOINTMENT = "APPOINTMENT";
+    /** 候选条件的估算：只回用时和距离，不打开地图。 */
+    private static final String MODE_CANDIDATE = "CANDIDATE";
+
+    /**
+     * {@code travel.routePlan} 的入口。两种语义靠结构化 {@code mode} 分开，不靠「带了哪些参数」猜：
+     * APPOINTMENT 看某一次已确认预约的路线（Java 校验预约归属，照旧打开地图、发页面指令），
+     * CANDIDATE 只估算候选条件的用时（不打开地图、不改草稿）。
+     *
+     * <p>mode 缺省时才按参数唯一推断：只给 appointmentId → APPOINTMENT，只给候选参数 → CANDIDATE。
+     * 两边都给了、或者 mode 和参数对不上，一律不猜、转成澄清——猜错的代价不对称：
+     * 把「打开地图」猜成估算，老人被留在比较的半路上；把估算猜成「打开地图」，
+     * 则会在他还没定下来的时候跳走页面。
+     *
+     * <p><b>transport 只属于 CANDIDATE</b>（用于候选路线比较）。APPOINTMENT 用的是这条预约和
+     * 用户资料里已经存着的交通方式，<b>不接受这一次的 transport 覆盖</b>，所以带上它不算混用、
+     * 也不用报错，忽略即可。三种没分清的情形各给一句话，老人接下来要做的事不一样。
+     *
+     * <p>一个参数都不给的老调用（例如老人点了「查看地图」）原样走 {@link #showTravelGuide}，
+     * 那条路本来就会去数据库里定位到底要看哪一次预约。
+     */
+    private AgentTurnResponse travelGuideFor(ConversationState state, ExtractedFacts facts,
+                                            String originalMessage, AgentRuntime.Outcome outcome) {
+        if (!outcome.modelDriven()) {
+            return showTravelGuide(state, facts, originalMessage, false);
+        }
+        Map<String, String> arguments = toolArguments(outcome, "travel.routePlan");
+        String mode = blankToNull(arguments.get("mode"));
+        String appointmentId = blankToNull(arguments.get("appointmentId"));
+        // 「混着给」只看预约编号和「哪一家、哪一天、几点」。transport 不算：它只属于 CANDIDATE，
+        // APPOINTMENT 忽略它（预约与资料里存着什么就按什么走），带上它只是多了一个用不上的字段。
+        if (appointmentId != null && hasRouteCandidateLocation(arguments)) {
+            return routeModeMixedArguments(state);
+        }
+        boolean candidateArguments = hasRouteCandidateArguments(arguments);
+        if (mode == null) {
+            if (appointmentId == null && !candidateArguments) {
+                return showTravelGuide(state, facts, originalMessage, false);
+            }
+            mode = appointmentId != null ? MODE_APPOINTMENT : MODE_CANDIDATE;
+        }
+        if (MODE_APPOINTMENT.equals(mode)) {
+            if (appointmentId == null) return routeModeMissingAppointment(state);
+            return routeForAppointment(state, appointmentId);
+        }
+        // CANDIDATE：给药了 appointmentId 是模式说不通，什么都没给是条件不够，两句话不一样。
+        if (appointmentId != null) return routeModeMixedArguments(state);
+        if (!candidateArguments) return routeModeMissingConditions(state);
+        return routeEstimateReadOnly(state, arguments);
+    }
+
+    /**
+     * 三种「没分清」分开说，因为老人接下来要做的事不一样：缺预约编号要去挑一条预约，
+     * 缺条件要把医院或时间说出来，模式矛盾要说明白他到底想看哪一种。
+     *
+     * <p>都不摆候选：老人这一轮问的是路线，Java 手上并没有一个「正确的那一次预约」，
+     * 随便摆几条出来等于把猜错的责任推给他。
+     */
+    private AgentTurnResponse routeModeMissingAppointment(ConversationState state) {
+        return answerReadOnly(state, "您想看的是某一次复诊预约的路线，但没告诉我是哪一次。"
+                + "请从您的预约里选一条，我再打开它的地图。");
+    }
+
+    private AgentTurnResponse routeModeMissingConditions(ConversationState state) {
+        return answerReadOnly(state, "要估算路上要多久，我还需要知道去哪家医院、哪一天几点。"
+                + "请告诉我要去的医院或者时间。");
+    }
+
+    private AgentTurnResponse routeModeMixedArguments(ConversationState state) {
+        return answerReadOnly(state, "这一次的路线请求我没分清：是要看某一次已确认预约的路线，"
+                + "还是只估算某个候选条件的用时。请说明白是看已有预约的路线，还是估算候选的路线。");
+    }
+
+    /**
+     * 已确认预约的路线：这一条才是真正打开地图、发页面跳转指令的那条路。
+     *
+     * <p><b>预约归属由 SQL 把关</b>：{@link TravelGuideService#forAppointment} 的
+     * {@code WHERE a.user_id=? AND a.id=?} 就是这次调用的鉴权——模型给的 appointmentId 必须
+     * 真属于这位就诊人，否则查不到、抛异常，这里转成一句明确的回绝。
+     * 「不存在」和「不是您的」回同一句话，不给出可比较的差异，避免越权调用靠回话探测预约是否存在。
+     * 越权时不发 UiDirective，页面不会因为一个模型给的编号被带走。
+     */
+    private AgentTurnResponse routeForAppointment(ConversationState state, String appointmentId) {
+        // 紧急处置期间安全提示优先：这一条和 showTravelGuide 一样，不自动跳页。
+        if (state.stage == ConversationState.Stage.EMERGENCY_PAUSED) return emergencyNotice(state);
+        try {
+            return renderTravelGuide(state, appointmentId, false);
+        } catch (IllegalArgumentException missing) {
+            return answerReadOnly(state, "没有找到这条复诊预约，所以没有打开地图。"
+                    + "您可以先查询自己的预约，再从里面选一条看路线。");
+        }
+    }
+
+    /**
+     * 这次调用有没有给 CANDIDATE 要的东西。{@code appointmentId} 不算——它是另一种模式的参数。
+     *
+     * <p>只要给了 {@code transport} 就算：医院、日期、时刻可以回退到草稿里已经明确的条件，
+     * 「坐公交去要多久」本身就是一个完整的候选估算请求。
+     */
+    private boolean hasRouteCandidateArguments(Map<String, String> arguments) {
+        return hasRouteCandidateLocation(arguments) || blankToNull(arguments.get("transport")) != null;
+    }
+
+    /**
+     * 「算哪一家、哪一天、几点」——和 {@code appointmentId} 放在同一个请求里说不通的那三项。
+     *
+     * <p>{@code transport} <b>不算</b>：它只属于 CANDIDATE。APPOINTMENT 走的是这条预约和用户资料里
+     * 已经存着的交通方式（{@code travelGuides.forAppointment} 自己取），不接受这一次的
+     * {@code transport} 覆盖——所以「APPOINTMENT + appointmentId + transport」不是混用，
+     * 是正常的看地图请求多带了一个用不上的字段，忽略它就是了，不该为它把老人拦下来问一句。
+     */
+    private boolean hasRouteCandidateLocation(Map<String, String> arguments) {
+        return blankToNull(arguments.get("hospital")) != null
+                || blankToNull(arguments.get("date")) != null
+                || blankToNull(arguments.get("time")) != null;
+    }
+
+    /**
+     * 只估算一次候选路线的用时与距离。
+     *
+     * <p><b>这一轮只查不改、也不跳页面。</b>不写 {@code state.travelPlan}、不动草稿的任何字段，
+     * 不生成 {@code UiDirective}——推荐轮里替老人「打开地图」等于把他从比较的半路上带走，
+     * 而且那条指令是给某一次真实预约用的，候选医院根本没有预约可打开。
+     *
+     * <p>路线来自模拟数据，措辞里继续保留「模拟」二字；查不到就如实说查不到，
+     * 不拿别的交通方式或别家医院的用时顶上——「大概半小时吧」是最容易被写进推荐理由的那种编造。
+     */
+    private AgentTurnResponse routeEstimateReadOnly(ConversationState state, Map<String, String> arguments) {
+        String hospitalId = state.hospitalId;
+        String hospital = state.hospital;
+        String explicitHospital = blankToNull(arguments.get("hospital"));
+        if (explicitHospital != null) {
+            // 用的还是办理流程那一份解析器，口径一致：对不上目录就直说对不上，不用草稿里的旧医院顶上。
+            CatalogEntityResolver.Match match = entityResolver.hospital(explicitHospital,
+                    hospitalCatalogTool.listHospitals(state.id));
+            if (match.type() != CatalogEntityResolver.MatchType.EXACT) {
+                return unresolvedHospitalReply(state, match);
+            }
+            hospitalId = match.only().id();
+            hospital = match.only().name();
+        }
+        if (hospitalId == null) {
+            return answerReadOnly(state, "要预估路上要多久，得先知道去哪家医院。请告诉我是哪一家。");
+        }
+        String target = hospital;
+
+        String explicitDate = blankToNull(arguments.get("date"));
+        LocalDate date = explicitDate == null ? state.date : ToolContract.parseDate(explicitDate);
+        if (explicitDate != null && date == null) {
+            return answerReadOnly(state, "我没看准您说的是哪一天（“" + explicitDate
+                    + "”）。请再说一次，例如“9月19号”，或写成 2026-09-19 这样。");
+        }
+        String explicitTime = blankToNull(arguments.get("time"));
+        LocalTime time = explicitTime == null ? draftTime(state) : ToolContract.parseTime(explicitTime);
+        if (explicitTime != null && time == null) {
+            return answerReadOnly(state, "我没看准您说的是几点（“" + explicitTime
+                    + "”）。请按 09:30 这样的写法再说一次。");
+        }
+        if (date == null || time == null) {
+            return answerReadOnly(state, "要预估到" + target + "路上要多久，还得知道是哪一天的几点。"
+                    + "请告诉我复诊的日期和时间。");
+        }
+        String explicitTransport = blankToNull(arguments.get("transport"));
+        String transport = explicitTransport != null ? explicitTransport : state.transport;
+        if (transport == null) {
+            return answerReadOnly(state, "要预估到" + target + "路上要多久，还得知道您打算怎么去"
+                    + "（打车、公交还是步行）。");
+        }
+        String chosenTransport = transport;
+        String chosenHospitalId = hospitalId;
+        LocalDateTime at = LocalDateTime.of(date, time);
+        RouteGuide route;
+        try {
+            route = callTool(state, "travel.routePlan",
+                    Map.of("hospitalId", chosenHospitalId, "transport", chosenTransport, "appointmentAt", at),
+                    () -> routeGuideTool.plan(state.id, state.userId, chosenHospitalId, at, chosenTransport));
+        } catch (RuntimeException error) {
+            // 没有这条路线就说没有，绝不按距离或经验编一个用时——推荐理由里的「大概半小时」
+            // 一旦不是工具给的，老人据此选的时间就建立在假数据上。
+            return answerReadOnly(state, "我没有查到从您登记的住址到" + target + "选择" + chosenTransport
+                    + "的路线数据，所以没法给出预计用时。您可以换一种交通方式再问我。");
+        }
+        return answerReadOnly(state, "从您登记的住址到" + target + "，选择" + route.transport() + "预计约"
+                + route.durationMinutes() + "分钟、" + distanceLabel(route.distanceMeters())
+                + "。建议" + route.departureAt().format(TIME_LABEL) + "出发"
+                + simulatedSuffix(route) + "。这一轮只是在帮您比较，没有改动手上的预约。");
+    }
+
+    /** 模拟路线必须自己说出来：推荐理由里的距离和时间是模拟数据，不能读成真实路况。 */
+    private String simulatedSuffix(RouteGuide route) {
+        return "SIMULATED".equalsIgnoreCase(String.valueOf(route.source())) ? "（模拟路线，供参考）" : "";
+    }
+
     /**
      * 出行路线。本轮事实里的日期、医院、科室必须真正参与定位预约，
      * 不能再无条件退回“最近一条有效预约”，否则用户说出的日期会在 Java 阶段被丢掉。
@@ -3598,6 +4225,83 @@ public class FollowupAgentService extends ConfirmationSupport {
         // 真正需要问的场景（选的日期根本没号）在 querySlots 的 NO_SLOT 分支里照样会问。
         if (state.acceptAlternative == null) state.acceptAlternative = false;
         return advance(state, ExtractedFacts.empty());
+    }
+
+    /**
+     * {@code schedule.checkConflict} 的入口。
+     *
+     * <p>分界与号源查询是同一把尺子——<b>这一轮是不是模型发起的</b>：
+     * <ul>
+     *   <li>模型发起的调用：按只读查询处理（见 {@link #checkConflictReadOnly}）。模型问的是
+     *       「这个时间冲不冲突」，不是「把草稿推进到冲突这一步」。</li>
+     *   <li>不经过模型的按钮/规则流程：走既有办理流程，行为与加这一层之前逐字相同——
+     *       它本来就有权推进阶段、记下冲突、摆候选号源。</li>
+     * </ul>
+     */
+    private AgentTurnResponse checkSchedule(ConversationState state, AgentRuntime.Outcome outcome) {
+        return outcome.modelDriven() ? checkConflictReadOnly(state, outcome) : checkSchedule(state);
+    }
+
+    /**
+     * 只回答这一次的日程冲突查询。
+     *
+     * <p>推荐轮里模型要拿「哪个时间不冲突」当理由，就得能单独问一次时间，而这一问不能顺手
+     * 把办理推着往前走。所以这里和号源只读出口（{@link #answerSlotQueryReadOnly}）同口径：
+     * 不写 {@code stage}、不写 {@code conflicts}、不写 {@code alternatives}、不置
+     * {@code scheduleChecked}，<b>也不经由 {@code checkDuplicate} 生成确认卡</b>。
+     * 中间那几项看着像「顺便记一下」，但工具循环收口时的 {@code finalizeToolEvidence} 真的会
+     * 落盘，于是「查一下时间」就变成了「替老人把预约往前推了一步」。
+     *
+     * <p>条件只用这一次调用给的 {@code date}/{@code time}，缺了才回草稿取；取不到就直说要哪一项，
+     * 不拿别的时段的结论顶上。冲突一律点名说不冲突/有冲突——不能默默把冲突时段混在候选里，
+     * 那正是「老人以为这个时间空着」的来源。
+     */
+    private AgentTurnResponse checkConflictReadOnly(ConversationState state, AgentRuntime.Outcome outcome) {
+        Map<String, String> arguments = toolArguments(outcome, "schedule.checkConflict");
+        String explicitDate = blankToNull(arguments.get("date"));
+        LocalDate date = explicitDate == null ? state.date : ToolContract.parseDate(explicitDate);
+        if (explicitDate != null && date == null) {
+            // 「给了但看不懂」不退回去用旧日期：那是把老人问的那天换成另一天还照答不误。
+            return answerReadOnly(state, "我没看准您说的是哪一天（“" + explicitDate
+                    + "”）。请再说一次，例如“9月19号”，或写成 2026-09-19 这样。");
+        }
+        String explicitTime = blankToNull(arguments.get("time"));
+        LocalTime time = explicitTime == null ? draftTime(state) : ToolContract.parseTime(explicitTime);
+        if (explicitTime != null && time == null) {
+            return answerReadOnly(state, "我没看准您说的是几点（“" + explicitTime
+                    + "”）。请按 09:30 这样的写法再说一次。");
+        }
+        if (date == null || time == null) {
+            return answerReadOnly(state, "要帮您看这个时间冲不冲突，得先知道是哪一天的几点。请告诉我日期和具体时间。");
+        }
+        LocalDateTime start = LocalDateTime.of(date, time);
+        // 「正好等于此刻」也算已经过去，口径与号源查询（appointment_time > 当前时间）和
+        // 确认闸门（{@link #slotAlreadyPassed}）一致：同一个整点，一边说还能约、另一边说过去了，
+        // 老人就会拿到一个永远确认不成的时段。
+        if (!start.isAfter(clock.now())) {
+            return answerReadOnly(state, date.format(DATE_LABEL) + time.format(TIME_LABEL)
+                    + "已经过去了，我没有拿它去查日程。请告诉我另一个时间。");
+        }
+        List<Conflict> conflicts = callTool(state, "schedule.checkConflict",
+                Map.of("userId", state.userId, "start", start),
+                () -> scheduleTool.findConflicts(state.id, state.userId, start, start.plusMinutes(APPOINTMENT_DURATION)));
+        String when = date.format(DATE_LABEL) + " " + time.format(TIME_LABEL);
+        if (conflicts.isEmpty()) {
+            return answerReadOnly(state, when + "这个时间与您已有的日程不冲突。"
+                    + "这一轮只是在帮您比较，没有改动手上的预约。");
+        }
+        // 冲突一定要点名说：它必须以「有冲突」的样子出现在候选里，不能被混进去当一个普通时段。
+        String items = conflicts.stream().limit(CONFLICT_DISPLAY_LIMIT)
+                .map(item -> item.title() + "（" + item.startAt() + " 至 " + item.endAt() + "）")
+                .collect(java.util.stream.Collectors.joining("；"));
+        return answerReadOnly(state, when + "与您已有的日程有冲突：" + items
+                + "。换一个时间能避开它。要不要改由您说了算，我没有改动手上的预约。");
+    }
+
+    /** 草稿里已经定下来的时刻；没有就返回 null。只读查询拿它当兜底条件，不写回任何字段。 */
+    private LocalTime draftTime(ConversationState state) {
+        if (state.selectedSlot != null && state.selectedSlot.time() != null) return state.selectedSlot.time();
+        return state.requestedTime;
     }
 
     private AgentTurnResponse checkSchedule(ConversationState state) {
@@ -5061,25 +5765,38 @@ public class FollowupAgentService extends ConfirmationSupport {
         return respond(state, state.hospital + "目前可办理：" + names + "。请选择医生要求您复诊的科室。", choices);
     }
 
-    private AgentTurnResponse recommendHospitals(ConversationState state, String requestedDepartment) {
-        String department = requestedDepartment != null ? requestedDepartment : state.department;
+    /**
+     * 推荐医院。
+     *
+     * <p>{@code modelDriven} 为真时这条路是<b>只读</b>的：一个字段都不写。推荐只是建议，
+     * 老人点了「选择市第一医院」之后才由那一次的业务动作把医院写进草稿。不给模型留一条
+     * 「说是推荐、其实顺手把科室定了」的缝，规则才有可验证的边界。
+     *
+     * <p>不经过模型的按钮/规则流程（老人自己点了「推荐」）保持原样：那种调用里
+     * {@code facts.department()} 就是老人刚说的条件，按既有口径记进草稿。
+     */
+    private AgentTurnResponse recommendHospitals(ConversationState state, ExtractedFacts facts,
+                                                 boolean modelDriven) {
+        RecommendationPlan plan = prepareCandidates(state, facts, modelDriven);
+        if (plan.blocked() != null) return plan.blocked();
+        String department = plan.department();
+        List<HospitalProfile> rows = plan.kept();
         if (department == null) {
-            List<HospitalProfile> rows = hospitalCatalogTool.listHospitals(state.id);
             String summary = rows.stream().limit(3).map(this::hospitalSummary)
                     .collect(java.util.stream.Collectors.joining("；"));
             List<QuickReply> choices = rows.stream().limit(3)
                     .map(item -> q("了解" + item.name(), "SET_HOSPITAL", item.id())).toList();
-            return respond(state, "我不能判断哪家医院‘最好’，但可以根据数据库中的科室特色、适老服务和号源帮您筛选。"
+            return respond(state, plan.note()
+                    + "我不能判断哪家医院‘最好’，但可以根据数据库中的科室特色、适老服务和号源帮您筛选。"
                     + summary + "。请先告诉我医生要求复诊的科室。", choices);
         }
-        List<HospitalProfile> rows = hospitalCatalogTool.findHospitalsForDepartment(state.id, department);
-        if (rows.isEmpty()) {
-            return respond(state, "模拟数据库中暂时没有开设" + department + "的医院。您可以换一个科室，或联系人工帮助。",
-                    List.of(q("查看医院", "CHANGE_HOSPITAL", ""), q("联系人工", "CONTACT_HUMAN", "")));
+        // 模型发起的推荐轮到此为止：往下一行都不许写草稿。不经过模型的那条路里，科室是老人
+        // 自己说的条件，才按既有口径记下来——清掉日期、时段和候选号源，因为它们都是照着旧科室定的。
+        if (!modelDriven && !java.util.Objects.equals(state.department, department)) {
+            resetAfterDate(state);
+            state.department = department;
+            state.departmentId = null;
         }
-        if (!java.util.Objects.equals(state.department, department)) resetAfterDate(state);
-        state.department = department;
-        state.departmentId = null;
         List<String> reasons = new ArrayList<>();
         for (HospitalProfile item : rows.stream().limit(3).toList()) {
             DepartmentProfile departmentProfile = departmentCatalogTool
@@ -5095,8 +5812,158 @@ public class FollowupAgentService extends ConfirmationSupport {
         String summary = String.join("。", reasons);
         List<QuickReply> choices = rows.stream().limit(3)
                 .map(item -> q("选择" + item.name(), "SET_HOSPITAL", item.id())).toList();
-        return respond(state, "根据“" + department + "”和模拟医院资料，我找到了以下选择。" + summary
+        return respond(state, plan.note() + "根据“" + department + "”和模拟医院资料，我找到了以下选择。" + summary
                 + "。这是办理信息筛选，不是医疗诊断，请选择您原就诊医院或医生建议的医院。", choices);
+    }
+
+    /**
+     * 本轮推荐的真实候选，以及算它的过程中必须当场说的两句话。
+     *
+     * @param kept          排除之后剩下的真实候选。模型给的结构化推荐只能从这里选——
+     *                      校验层和展示层用的是<b>同一份</b>，否则「模型推荐的」和「Java 会摆出来的」就是两批人。
+     * @param department    这一轮按哪个科室算的候选；为空表示还没说科室，按全院算
+     * @param excludedIds   被排除掉的医院 id：用来把「夹带被排除的那家」和「压根不在候选里」分开说
+     * @param excluded      老人原话里说要排除的目标，原样带回去给模型看它错在哪
+     * @param note          Java 必须说的一句理解说明（近似排除时才有），交付时要接在模型那句话前面
+     * @param blocked       非空表示这一轮到此为止，直接把这句话交给老人（认不准 / 没有候选了）
+     */
+    private record RecommendationPlan(List<HospitalProfile> kept, String department,
+                                      Set<String> excludedIds, List<String> excluded, String note,
+                                      AgentTurnResponse blocked) {
+        static RecommendationPlan blocked(AgentTurnResponse response) {
+            return new RecommendationPlan(List.of(), null, Set.of(), List.of(), "", response);
+        }
+    }
+
+    /**
+     * 算本轮推荐的真实候选：先定科室，再查目录，最后拿掉老人明确排除的。
+     *
+     * <p>规则路径（老人自己点了「推荐」）和模型路径（模型给结构化推荐）走的是<b>同一个方法</b>。
+     * 两条路各算各的候选，校验就成了一句空话——模型只需要推荐一批「另一套口径下的候选」，
+     * 逐条检查照样能过。
+     *
+     * <p>{@code modelDriven} 只决定一件事：Java 自己写的那些终结句（科室查不到、排除认不准、
+     * 没有候选了）走 {@code respond} 还是 {@code respondWithoutModel}。模型那条路上不能调用回答模型
+     * 润色——那些是安全措辞，改软了就等于把边界说模糊了。
+     */
+    private RecommendationPlan prepareCandidates(ConversationState state, ExtractedFacts facts,
+                                                 boolean modelDriven) {
+        String requestedDepartment = facts == null ? null : facts.department();
+        String department = requestedDepartment != null ? requestedDepartment : state.department;
+        // 老人这一轮明确说不要的医院：在生成推荐文字和快捷按钮之前就把它们拿掉。
+        List<String> excluded = facts == null ? List.of() : facts.excludedHospitals();
+        if (department == null) {
+            return finishCandidates(state, hospitalCatalogTool.listHospitals(state.id), null, excluded, modelDriven);
+        }
+        List<HospitalProfile> rows = hospitalCatalogTool.findHospitalsForDepartment(state.id, department);
+        if (rows.isEmpty()) {
+            List<QuickReply> choices = List.of(q("查看医院", "CHANGE_HOSPITAL", ""),
+                    q("联系人工", "CONTACT_HUMAN", ""));
+            String text = "模拟数据库中暂时没有开设" + department + "的医院。您可以换一个科室，或联系人工帮助。";
+            return RecommendationPlan.blocked(modelDriven
+                    ? respondWithoutModel(state, text, choices) : respond(state, text, choices));
+        }
+        return finishCandidates(state, rows, department, excluded, modelDriven);
+    }
+
+    private RecommendationPlan finishCandidates(ConversationState state, List<HospitalProfile> rows,
+                                                String department, List<String> excluded,
+                                                boolean modelDriven) {
+        ExclusionFilter filter = withExclusionsRemoved(state, rows, excluded, modelDriven);
+        if (filter.unclear() != null) {
+            return new RecommendationPlan(List.of(), department, Set.of(), List.copyOf(excluded), "",
+                    filter.unclear());
+        }
+        if (filter.kept().isEmpty()) {
+            return new RecommendationPlan(List.of(), department, filter.excludedIds(),
+                    List.copyOf(excluded), filter.note(),
+                    noCandidateLeftAfterExclusion(state, department, filter.note(), modelDriven));
+        }
+        return new RecommendationPlan(filter.kept(), department, filter.excludedIds(),
+                List.copyOf(excluded), filter.note(), null);
+    }
+
+    /**
+     * 过滤掉老人这一轮明确排除的医院：{@code note} 是一句要在回复里说的话（近似匹配时必须
+     * 说出来，让老人有机会纠正），{@code excludedIds} 是真正被拿掉的 id，
+     * {@code unclear} 非空表示有一个排除目标 Java 认不准，这一轮就不给推荐了。
+     */
+    private record ExclusionFilter(List<HospitalProfile> kept, Set<String> excludedIds, String note,
+                                   AgentTurnResponse unclear) {
+        static ExclusionFilter none(List<HospitalProfile> rows) {
+            return new ExclusionFilter(rows, Set.of(), "", null);
+        }
+    }
+
+    /**
+     * 把老人排除的医院从候选里拿掉 <b>它们和真实医院目录比对之后</b>。
+     *
+     * <p>这里是「当前明确排除」真正落地的地方：<b>在生成推荐文字和快捷按钮之前</b>过滤，
+     * 所以被排除的医院不可能从哪一句话或哪一个按钮里漏回来。
+     *
+     * <p>三种匹配结果三种处理，都不猜：
+     * <ul>
+     *   <li>精确命中：直接排除，不用多解释。</li>
+     *   <li>唯一近似（老人说「市一」）：仍然排除，但<b>必须把理解的结果说出来</b>，
+     *       他才有机会发现认错了。</li>
+     *   <li>对不上目录，或者对上了不止一家：这一轮不给推荐，直接说清是哪一步没认准。
+     *       不拿别的医院替它，也不假装已经排除了。</li>
+     * </ul>
+     */
+    private ExclusionFilter withExclusionsRemoved(ConversationState state, List<HospitalProfile> candidates,
+                                                  List<String> excluded, boolean modelDriven) {
+        if (excluded == null || excluded.isEmpty()) return ExclusionFilter.none(candidates);
+        List<HospitalProfile> catalog = hospitalCatalogTool.listHospitals(state.id);
+        Set<String> excludedIds = new LinkedHashSet<>();
+        StringBuilder note = new StringBuilder();
+        for (String raw : excluded) {
+            CatalogEntityResolver.Match match = entityResolver.hospital(raw, catalog);
+            if (match.type() == CatalogEntityResolver.MatchType.EXACT
+                    || match.type() == CatalogEntityResolver.MatchType.UNIQUE_APPROXIMATE) {
+                excludedIds.add(match.only().id());
+                if (match.type() == CatalogEntityResolver.MatchType.UNIQUE_APPROXIMATE) {
+                    note.append("您说的“").append(match.raw()).append("”我理解成“")
+                            .append(match.only().name()).append("”，已经不算在候选里。");
+                }
+            } else {
+                String reply = exclusionUnclearReply(match);
+                return new ExclusionFilter(candidates, Set.of(), "",
+                        modelDriven ? respondWithoutModel(state, reply, resumeReplies(state))
+                                : respond(state, reply, resumeReplies(state)));
+            }
+        }
+        List<HospitalProfile> kept = candidates.stream()
+                .filter(item -> !excludedIds.contains(item.id())).toList();
+        return new ExclusionFilter(kept, Set.copyOf(excludedIds), note.toString(), null);
+    }
+
+    /** 排除目标认不准时的回话：说清是哪一步没认准，不替老人挑一家来排除。 */
+    private String exclusionUnclearReply(CatalogEntityResolver.Match match) {
+        if (match.type() == CatalogEntityResolver.MatchType.AMBIGUOUS) {
+            String names = match.candidates().stream().map(CatalogEntityResolver.Candidate::name)
+                    .collect(java.util.stream.Collectors.joining("、"));
+            return "您说的“" + match.raw() + "”对上了不止一家医院：" + names
+                    + "。我没替您猜是哪一家，所以这一轮先不给推荐。请说全名或院区，我再按您排除的那家重新看。";
+        }
+        return "您说不要“" + match.raw() + "”，但我在可办理的医院里没找到这一家，"
+                + "所以不知道要排除的到底是哪一家。这一轮我先不给推荐，也不拿别的医院替它。"
+                + "请说完整的医院名称，或换个说法。";
+    }
+
+    /**
+     * 排除之后没有候选了：如实说明，请他换条件。
+     *
+     * <p><b>绝不把被排除的医院悄悄放回来。</b>「都被您排除了」和「您选一家吧」这两句话
+     * 只能出现一句，出现后者就等于推荐里又有了他刚说不要的那家。
+     */
+    private AgentTurnResponse noCandidateLeftAfterExclusion(ConversationState state, String department,
+                                                            String note, boolean modelDriven) {
+        String scope = department == null ? "可办理的医院" : "开设" + department + "的医院";
+        List<QuickReply> replies = resumeReplies(state);
+        String reply = note + "把您明确排除的医院去掉之后，" + scope + "里没有别家了。"
+                + "您可以说一家不排除的医院，或者换一个科室，我再看看。这一轮没有改动手上的预约。";
+        return modelDriven ? respondWithoutModel(state, reply, replies)
+                : respond(state, reply, replies);
     }
 
     private String hospitalSummary(HospitalProfile item) {

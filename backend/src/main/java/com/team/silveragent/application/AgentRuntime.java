@@ -4,6 +4,7 @@ import com.team.silveragent.agent.AgentContext;
 import com.team.silveragent.agent.ExtractedFacts;
 import com.team.silveragent.agent.RuleFactExtractor;
 import com.team.silveragent.agent.planning.ConversationPlanner;
+import com.team.silveragent.agent.planning.HospitalRecommendation;
 import com.team.silveragent.agent.planning.PlannerActionType;
 import com.team.silveragent.agent.planning.PlannerDecision;
 import com.team.silveragent.agent.planning.PlannerToolCall;
@@ -22,7 +23,27 @@ final class AgentRuntime {
     record Outcome(AgentOrchestrator.Route route, ExtractedFacts facts, String replyDraft,
                    String dialogueMode, String plannerSource, String proposedTool,
                    List<PlannerToolCall> proposedTools, PlannerActionType actionType,
-                   String intent, boolean modelDriven) {
+                   String intent, boolean modelDriven,
+                   List<HospitalRecommendation> recommendations, String answering) {
+
+        /**
+         * 兼容构造：绝大多数路由没有结构化推荐，也不单独给最终话语。
+         *
+         * <p>留这一条是为了让「模型这轮说了什么」的既有构造点一处都不用改——
+         * 只有 {@code modelProposal} 与 {@code continueAfterTools} 要把新读出来的值传下去。
+         */
+        Outcome(AgentOrchestrator.Route route, ExtractedFacts facts, String replyDraft,
+                String dialogueMode, String plannerSource, String proposedTool,
+                List<PlannerToolCall> proposedTools, PlannerActionType actionType,
+                String intent, boolean modelDriven) {
+            this(route, facts, replyDraft, dialogueMode, plannerSource, proposedTool, proposedTools,
+                    actionType, intent, modelDriven, List.of(), null);
+        }
+
+        Outcome {
+            recommendations = recommendations == null ? List.of() : List.copyOf(recommendations);
+        }
+
         /**
          * 这一轮有一个<b>过了契约校验</b>的工具调用，可以照它的意思办。
          *
@@ -248,6 +269,15 @@ final class AgentRuntime {
             return outcome(AgentOrchestrator.Route.DIRECT_ANSWER, proposal, null, List.of(), true);
         }
 
+        // 推荐轮不进「直接回答」：那条路会把模型那句自由措辞原样送给老人，结构化清单一个字都不校验，
+        // 被排除的医院就有缝可钻。所以只要这一轮是在推荐——给了结构化清单、或者 intent 就是它——
+        // 一律回推荐路由，由工作流那一侧拿本轮真实候选逐条校验。
+        // 它这一轮若同时点着只读工具，上面那一支已经按工具走完了，这里不会抢。
+        if (!proposal.recommendations().isEmpty()
+                || "REQUEST_RECOMMENDATION".equals(proposal.intent())) {
+            return outcome(AgentOrchestrator.Route.RECOMMEND_HOSPITAL, proposal, null, List.of(), true);
+        }
+
         // 备忘 / 健康数值 / 发周报要先于下面的「直接回答」判定：这三件事都要落库或对外发消息，
         // 不能让模型用一句 ANSWER 就带过去——实测过，那样它会回“我给您记一个提醒”而库里一条都没有。
         // 模型只需要认出“这句话属于这三件事”，填槽仍由 Java 做。
@@ -426,7 +456,8 @@ final class AgentRuntime {
                             String tool, List<PlannerToolCall> tools, boolean modelDriven) {
         return new Outcome(route, proposal.facts(), proposal.replyDraft(),
                 normalizeDialogueMode(proposal.dialogueMode()), proposal.source(), tool, tools,
-                proposal.actionType(), proposal.intent(), modelDriven);
+                proposal.actionType(), proposal.intent(), modelDriven,
+                proposal.recommendations(), proposal.answering());
     }
 
     private Outcome workflow(String message, PlannerDecision proposal, ConversationState state) {

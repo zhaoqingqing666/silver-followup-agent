@@ -74,7 +74,9 @@ final class ToolRegistry {
                         ToolArgument.date("date", false, "ISO 日期"),
                         ToolArgument.time("time", false, "HH:mm")),
                 AgentOrchestrator.Route.CHECK_DUPLICATE);
-        register("schedule.checkConflict", "查询当前预约草稿选择的时间是否与用户已有日程冲突；只读",
+        // 给了 date/time 就查那一个时间（推荐时比较几个候选用），没给才回草稿里已选的时间。
+        // 无论走哪条，它都只回答冲不冲突：不推进办理阶段、不替老人改时间、不建确认卡。
+        register("schedule.checkConflict", "查询某个复诊时间是否与用户已有日程冲突；只读，不修改预约草稿，也不推进办理",
                 List.of(ToolArgument.date("date", false, "ISO 日期"),
                         ToolArgument.time("time", false, "HH:mm")),
                 AgentOrchestrator.Route.CHECK_CONFLICT);
@@ -133,9 +135,30 @@ final class ToolRegistry {
                 List.of(ToolArgument.text("hospital", false, "医院名"),
                         ToolArgument.text("department", false, "科室名")),
                 AgentOrchestrator.Route.ASK_MATERIALS);
-        register("travel.routePlan", "查询到医院的路线、距离、预计用时和建议出发时间；只读",
-                List.of(ToolArgument.text("appointmentId", false, "针对哪条预约规划路线"),
-                        ToolArgument.text("transport", false, "交通方式，如打车、公交")),
+        // 两种问法共用一条工具，不新开一条，但必须靠 mode 明确分开——「带了哪些参数」不足以
+        // 区分它们，因为两种模式都可能带交通方式：
+        //   - APPOINTMENT：看某一次<b>已确认预约</b>的路线。必须给 appointmentId，Java 会拿它去
+        //     数据库校验这条预约是不是这位就诊人的（越权的和不存在的回同一句话），然后照旧
+        //     打开地图：发页面跳转指令、给出路线和院内指引。
+        //   - CANDIDATE：推荐轮里问「去这家要多久」「这个时间来不来得及」这类<b>比较用</b>估算。
+        //     给 hospital/date/time/transport，只回估算，不打开地图、不改草稿。
+        // 单给 appointmentId 就能推断成 APPOINTMENT，单给候选条件就能推断成 CANDIDATE；两者混着给、
+        // 或给的 mode 和参数对不上，Java 一律不猜，转成澄清。一个参数都不给的老调用仍然走既有导航流程。
+        // CANDIDATE 里少了 hospital/date/time 时 Java 会回退到草稿里已经明确的条件，取不到就如实追问，
+        // 所以这几个参数仍是可选，不能因为模型没带就判成缺参数。
+        register("travel.routePlan", "查询到医院的路线、距离、预计用时和建议出发时间；只读，不修改预约。"
+                        + "mode=APPOINTMENT：按 appointmentId 打开这条已确认预约的地图与路线，"
+                        + "交通方式用预约和用户资料里已经存着的，不接受 transport 覆盖；"
+                        + "mode=CANDIDATE：按 hospital/date/time/transport 只回预估，不打开地图。"
+                        + "transport 只在 CANDIDATE 里有意义，不要给 APPOINTMENT 带",
+                List.of(ToolArgument.enumeration("mode", false, List.of("APPOINTMENT", "CANDIDATE"),
+                                "看已确认预约的路线用 APPOINTMENT；问候选条件要多久用 CANDIDATE"),
+                        ToolArgument.text("appointmentId", false, "APPOINTMENT：哪条已确认预约"),
+                        ToolArgument.text("hospital", false, "CANDIDATE：要评估的医院名"),
+                        ToolArgument.date("date", false, "CANDIDATE：复诊日期，ISO 日期"),
+                        ToolArgument.time("time", false, "CANDIDATE：复诊时刻，HH:mm"),
+                        ToolArgument.text("transport", false, "CANDIDATE：交通方式，如打车、公交；"
+                                + "APPOINTMENT 不吃这个参数")),
                 AgentOrchestrator.Route.QUERY_TRAVEL_GUIDE);
         register("hospital.locationGuide", "查询门诊楼入口、楼层、诊室、报到点和无障碍指引；只读",
                 List.of(ToolArgument.text("appointmentId", false, "针对哪条预约"),

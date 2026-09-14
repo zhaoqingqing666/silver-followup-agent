@@ -27,6 +27,10 @@ import java.util.Map;
 @Component
 public class LlmConversationPlanner implements ConversationPlanner {
     private static final Logger log = LoggerFactory.getLogger(LlmConversationPlanner.class);
+    /** 一轮里认下来的排除目标条数上限（见 {@link #names}）。 */
+    private static final int MAX_EXCLUDED_TARGETS = 5;
+    /** 从一次模型输出里最多读几条结构化推荐；3 条的业务上限由校验层判，见 {@link #recommendations}。 */
+    private static final int MAX_PARSED_RECOMMENDATIONS = 8;
     private final ModelGateway gateway;
     private final ObjectMapper json;
     private final RuleConversationPlanner fallback;
@@ -100,7 +104,49 @@ public class LlmConversationPlanner implements ConversationPlanner {
                 readTool(actionType) ? Map.of() : arguments);
         return new PlannerDecision(actionType, intent, nullableText(root, "toolName"), arguments,
                 nullableText(root, "replyDraft"), text(root, "dialogueMode", dialogueMode(intent)),
-                facts, source, toolCalls);
+                facts, source, toolCalls, recommendations(root.path("recommendations")),
+                answering(root));
+    }
+
+    /**
+     * 推荐轮的结构化清单。
+     *
+     * <p>只认数组：一个字符串或者一个对象都不算，宁可当作「没给推荐」让校验层去判，
+     * 也不替模型猜它想推荐谁。读不出来的项跳过，一项畸形不该把整轮作废。
+     *
+     * <p>条数封顶 {@value #MAX_PARSED_RECOMMENDATIONS}，但<b>故意不按 3 截断</b>：上限 3 是业务规则，
+     * 由校验层判 {@code TOO_MANY} 并让模型自己改，解析层悄悄砍掉多余的，等于把「模型多给了一条」
+     * 这件事藏起来。
+     */
+    private List<HospitalRecommendation> recommendations(JsonNode node) {
+        if (!node.isArray()) return List.of();
+        List<HospitalRecommendation> result = new ArrayList<>();
+        for (JsonNode item : node) {
+            if (!item.isObject()) continue;
+            result.add(new HospitalRecommendation(nullableText(item, "hospitalId"),
+                    nullableText(item, "reason"), strings(item.path("evidenceRefs"))));
+            if (result.size() == MAX_PARSED_RECOMMENDATIONS) break;
+        }
+        return result;
+    }
+
+    /**
+     * 最终话语。模型写 {@code answering}；仍写成 {@code replyDraft} 的按等义回退——
+     * 两者都来自这同一次输出，所以回退不等于多要一次调用。
+     */
+    private String answering(JsonNode root) {
+        return first(nullableText(root, "answering"), nullableText(root, "replyDraft"));
+    }
+
+    private List<String> strings(JsonNode node) {
+        if (!node.isArray()) return List.of();
+        List<String> result = new ArrayList<>();
+        for (JsonNode item : node) {
+            if (!item.isValueNode()) continue;
+            String text = item.asText("").trim();
+            if (!text.isEmpty()) result.add(text);
+        }
+        return result;
     }
 
     private List<PlannerToolCall> toolCalls(JsonNode root, Map<String, String> legacyArguments) {
@@ -144,7 +190,35 @@ public class LlmConversationPlanner implements ConversationPlanner {
                 nullableText(node, "transport"), time(nullableText(node, "selectedTime")),
                 nullableText(node, "timePreference"), nullableBoolean(node, "acceptRecommendedTime"),
                 nullableText(node, "acknowledgement"), nullableText(node, "emotion"),
-                nullableText(node, "concern"), nullableText(node, "familyContact"));
+                nullableText(node, "concern"), nullableText(node, "familyContact"),
+                names(node, "excludedHospitals"));
+    }
+
+    /**
+     * 「老人这一轮明确不要」的目标名，可能不止一个。
+     *
+     * <p>只认两种写法：JSON 数组（每一项是一个完整的目标名），或者一个字符串——那表示
+     * <b>恰好一个</b>排除目标。故意<b>不</b>按「、」「,」「，」切分字符串：切分等于让 Java
+     * 替模型猜它想排除谁，而医院名本身就可能含这些字符；模型真要排除两家，写成数组就行。
+     *
+     * <p>读不出来的项直接跳过（空串、空白），不因为一个畸形字段就打断这一轮。条数封顶
+     * {@value #MAX_EXCLUDED_TARGETS} 条：这个字段影响的是「过滤掉谁」，不该由模型决定
+     * 能把候选清空到什么规模。
+     */
+    private List<String> names(JsonNode node, String name) {
+        JsonNode value = node.get(name);
+        if (value == null || value.isNull()) return List.of();
+        List<String> result = new ArrayList<>();
+        if (value.isArray()) {
+            value.forEach(item -> {
+                String text = item.asText("").trim();
+                if (!text.isEmpty()) result.add(text);
+            });
+        } else if (value.isValueNode()) {
+            String text = value.asText("").trim();
+            if (!text.isEmpty()) result.add(text);
+        }
+        return result.size() > MAX_EXCLUDED_TARGETS ? List.copyOf(result.subList(0, MAX_EXCLUDED_TARGETS)) : result;
     }
 
     private Map<String, String> stringMap(JsonNode node) {

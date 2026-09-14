@@ -600,3 +600,81 @@
 - **现有正确行为未被破坏**（第 4 项，全部由 `ProfileReadTests` 原有测试守住并按上述结果全绿）：服务端注入身份、`care_relations` 权限检查、字段白名单与 `HISTORY_LIMIT`、只说「预约过」不说「去过/看过/就诊过」、只读查询不动草稿与确认卡、`appointment.history` 与 `appointment.queryMine` 分开、当轮要求优先于历史。
 - **措辞收口**：`docs/05-api-contracts.md:253`、`docs/03-agent-workflow.md:132`、`docs/04-architecture-and-modules.md:125`、`docs/02-pages-and-interactions.md:189-196`、`docs/09-demo-acceptance-checklist.md:132` 五处仍把记忆内容描述成「常去的医院是……」的文档已同步成新的中性口径；`frontend/features/profile/profile-view.tsx:124` 的「我的」页空态文案「记下常去的医院和科室」也改成了「记下最近一次确认预约的医院和科室，您可以随时让它忘记」。**前端只动了这一处用户可见文案**：不改页面结构、不加交互、不动接口，也没把「预约历史」说成实际就诊历史。
 - 未提交、未推送，等审查。不进入 8B。
+
+## 2026-09-14 第八阶段 8B-1：基于真实数据的个性化推荐（只读，不写偏好）
+
+- 范围：老人说「根据我以前的情况推荐一下」「我不知道去哪家医院」「帮我看看哪个时间合适」「上次预约的那家这次还有号吗」「有没有不和我日程冲突的时间」「给我推荐几个可以预约的选择」时，**读真实信息、给 2—3 个选择**。**不做偏好保存/修改/忘记**（8B-2 尚未开始），不做完整推荐排序，不自动选医院/科室/号源，不做全局麦克风，不碰队友负责的备忘与家属报告。
+- **一个工具、一个路由都没新增。**推荐证据全部由既有只读工具提供：`hospital.list` / `hospital.search`、`department.list` / `department.search`、`appointment.querySlots` / `appointment.queryNearbySlots`、`appointment.history`、`profile.memorySummary`、`schedule.checkConflict`、`travel.routePlan`。刻意不做「万能推荐工具」——那会把工具选择、参数校验与结果编排一起收进一个 Java 方法，等于把「模型决定查什么」又收回 Java。有依赖的调用串行、无依赖的可并行、同工具同参数不重复调，继续用既有的有界只读循环（`MAX_MODEL_TOOL_ROUNDS = 3`、`Set<String> executed` 去重）。
+- **只补了两条编排缝，都是「既有只读路径在推荐轮里会顺手写状态」造成的**：
+  1. `schedule.checkConflict`：模型发起的调用以前落到 `checkSchedule(state)`（办理那条），会推进阶段、写 `conflicts` / `alternatives`、置 `scheduleChecked`，并可能经 `checkDuplicate` 生成确认卡——而 `finalizeToolEvidence` 收口时**真的会落盘**。现在入口按 `outcome.modelDriven()` 分开：模型发起的走新增的 `checkConflictReadOnly(state, outcome)`，只回答冲不冲突；按钮/规则流程逐字保持原样。`date` / `time` 由本次 `arguments` 决定，缺了才回草稿取；`start` 早于 `clock.now()` 时如实说「已经过去了」而不去查；冲突**点名说出**「有冲突」并最多列 `CONFLICT_DISPLAY_LIMIT = 3` 条，不把冲突时段混进候选里当普通时段。
+  2. `travel.routePlan`：以前无论怎么调都走 `showTravelGuide`，它只能解析**已有的**确认预约、并会发 `UiDirective.travel(...)`（推荐轮里替老人「打开地图」等于把他从比较的半路上带走）。现在给这条工具加了结构化的 `mode`（`APPOINTMENT` / `CANDIDATE`，见同日「审查收尾」一节）与 `hospital` / `date` / `time` / `transport` 四个**可选**候选参数，模型带候选条件来时走新增的 `routeEstimateReadOnly`：不写 `travelPlan`、不发导航指令、保留「（模拟路线，供参考）」措辞；查不到路线就如实说查不到，**绝不按距离或经验编一个用时**。
+- **Java 保证的（可断言，`RecommendationTests` 钉住）**：模型发起的推荐轮**一个草稿字段都不写**（`hospital` / `department` / `departmentId` / `date` / `requestedTime` / `selectedSlot` / `alternatives` / `conflicts` / `travelPlan` / `stage`）、**不建也不替换确认卡**、不发导航指令、`appointments` 表不新增行；候选清单一律 `limit(3)`；条件冲突时按 5B 口径「这一次的参数决定这一次查什么」，缺条件就如实追问；拿到真工具结果才说事实。**顺带修掉一个既有缺陷**：`recommendHospitals` 原来无条件把 `departmentId` 清空（同一个科室再推荐一次就会抹掉院内指引依赖的目录 ID），现在只在**科室真的换了**时才走既有重置口径；并且在**模型发起的轮次里干脆不写草稿**（`modelDriven` 为真时整段跳过），不给模型留一条「说是推荐、其实顺手把科室定了」的缝。
+- **提示词保证的（只降低概率，不是护栏，报告与文档都必须这么写）**：`AgentSystemPrompt` 新增一节「推荐：先查真实数据，再给两三个选择」——六句触发说法 + `intent=REQUEST_RECOMMENDATION`、七类可用证据、五级优先级（当前要求 > 当前排除 > 仍适用的明确偏好 > 统计倾向 > 单次历史）、十一条规则（2—3 条上限 / 理由必须能追溯到本轮工具结果 / 无可靠距离不说「最近」/ 无真实号源不说「可以预约」/ 一次预约不说「常去·习惯·一直选择」/ 已取消不说成仍有效 / 只说「预约过」不说「去过·看过·就诊过·到过医院」/ 不按症状选科 / 不评价「最好·最专业·治得最好」/ 模拟数据保留「模拟」/ 条件不足只追问一个最关键的问题）、以及只读约束与「下一轮明确选择走正常业务动作」。审查收尾时新增第 12 条：排除目标要放进 `facts.excludedHospitals`（字符串数组，或只有一家时写一个字符串），不要只写在 `replyDraft` 里当作已经排除，也不要用「、」把两家拼成一个字符串。
+- **依据的优先级由 Java 摆、模型读**：`currentDraftNote` 把草稿里已定的条件单独成段并标明「优先级最高，历史与统计都不能覆盖它」；`appointmentHistoryText` 把「事实」与「统计（多次记录形成，不是老人明确说过的偏好）」分开；`profileMemoryText` 把「曾明确表达的偏好（带更新时间）」与「系统归纳的历史事实」分开。**「当前明确排除」由 Java 落成了状态**：模型在 `facts.excludedHospitals` 里给出排除目标，Java 拿去和真实医院目录比对、在生成推荐文字与快捷按钮**之前**过滤掉（见同日「审查收尾」一节）。
+- 新增测试：`application/RecommendationTests.java` **38 项**（26 + 审查收尾 12），覆盖要求的 24 条（当轮医院压过历史 / 当轮日期时段压过统计倾向 / 已排除的不推荐 / 一次预约不成「常去」/ 多次预约才出统计 / 旧明确偏好不覆盖当轮 / 忘掉的不当当前事实 / 没号的不能说可预约 / 只有已取消⇒没有当前有效预约 / 无距离数据不说最近 / 路线理由必须有真结果 / 冲突时段不默认排在无冲突前面 / 条数上限 / 医院科室日期时段都来自真工具结果 / 推荐轮不写草稿 / 不建不替换不消费确认卡 / 拒绝后不自动写历史选择 / 下一轮明确选择走既有业务动作 / 家属只能读已绑定长辈的证据 / 越权目标不给推荐与历史摘要 / 同工具同参数不无限循环 / 工具失败⇒不编造推荐 / 模型不得输出医疗效果排名或按症状选科 / 模拟标识保留）。其中「模型不得输出医疗效果排名或按症状选科」仍然是**提示词层断言**，测试文件头部的类注释里逐条写明了哪些是 Java 层保证、哪些只是提示词里有这条规则；「已排除的不推荐」在审查收尾后已经变成 Java 层保证（`withExclusionsRemoved` 在拼推荐文字与按钮之前过滤）。另新增 `application/CheckConflictBoundaryTests.java` **2 项**，把业务时钟钉死在北京时间 2026-09-16 09:00 整，验整点边界。
+- 验证（Dev Container `/workspace`）：先跑新增专项 `RecommendationTests` 26 项全绿；再跑 `ProfileReadTests` 23 + `SlotQueryArgumentTests` 17 + `AgentRuntimeRoutingTests` 17 + `UserMemoryTests` 8 = **65 项 0 失败 0 错误**；随后**重跑后端全量 `mvn -o test`：548 项，0 失败 0 错误，BUILD SUCCESS**（本轮改动前为 522 项）。改动落在 `FollowupAgentService` 的 `dispatchOutcome` 这个**无 default 的 switch** 上，且 `recommendHospitals` 的草稿写入行为有变，所以这轮按实际影响跑了全量而不是只跑专项。
+- **本轮没有跑真实模型。**如实标记：**8B-1 真实模型语义尚未验证，自动测试不能证明模型一定会选择正确工具，留待用户手动测试及最终验收。** 全部 26 项都是脚本模型（`ScriptedModelGateway`）驱动的桩测试——它证明的是「Java 侧的只读保证、条数上限、证据来源与措辞规则都在」，**不能证明真模型会去查 `appointment.history` 而不是凭上下文猜**。也没有做真机测试（本轮不需要）。
+- 未解决风险：
+  1. **「当前明确排除」已由 Java 落地，但排除目标的解析要靠模型给对名字。**老人说「别推荐市第一医院」之后，Java 会把 `facts.excludedHospitals` 里的目标拿到真实医院目录里比对并过滤，认不准就澄清、不给推荐。**这条约束现在活着穿过整个只读工具循环**（见同日「第二轮审查收尾」）：先查历史、查画像、下一轮才推荐，同样过滤。残留风险仍在模型侧：它得把老人那句话里的目标正确地写进结构化字段；写错名字时 Java 只会说「没找到这一家」，不会替它猜。
+  2. **模拟标识的去向要说清楚**：`CareCatalogRepository` 会剥掉目录里医院名/地址的「（模拟）」，所以「模拟医院资料如下」这句限定语是 Java 唯一保留的模拟标识（路线那侧是「（模拟路线，供参考）」）。
+  3. 五级优先级的**排序**仍然是模型读证据自己排，Java 只保证这几类信息带着来源出现在同一段证据里，没有排序逻辑。
+  4. **工具循环的预算：已有固定 3 轮上限与同签名去重**（`MAX_MODEL_TOOL_ROUNDS = 3`、`Set<String> executed`），**尚未实现的是整轮超时、可配置的调用预算这类能力**——不是「都还没做」。两者都是硬编码常量而非配置项，改上限要改代码。
+- 与队友改动的文件冲突：业务专属文件零重叠——**没有碰** `HealthRecord*` / `HealthReport*` / `Memo*` / 家属报告发送 / 自动周报 / `ConfirmationService` / `ConfirmationDispatcher` / `PendingOperation.Kind` / `ConversationState` 的确认字段 / `ConversationStore` 的确认快照 / 全局麦克风 / 前端页面 / `MemoryStore` 的写入 API / 外部 HTTP 接口。本轮只改了 `FollowupAgentService`、`ToolRegistry`、`AgentSystemPrompt` 三个**共享**文件（与 8A 同一批），**存在 Git 合并冲突可能；提交前需与负责备忘和家属报告的队友确认**。对外 HTTP 接口与 `AgentTurnResponse` 字段零改动，`docs/05-api-contracts.md` 与 `records/INTERFACE_CHANGES.md` 无需改动（工具清单不进 HTTP 契约）。
+- 未提交、未推送，等审查。不进入 8B-2，不做全局麦克风，不做偏好写入。
+
+### 同日审查收尾（未提交）：双模式契约、结构化排除、整点边界
+
+- **背景**：8B-1 的第一次实现把 `travel.routePlan` 的两种语义用「带了哪些参数」猜，并且「当前明确排除」只写在提示词里。审查指出这两处都不成立，另有一处时间边界不统一、一处文档表述含混。
+- **其一，`travel.routePlan` 加结构化 `mode`（`APPOINTMENT` / `CANDIDATE`）。**两种模式都可能带交通方式，「参数形状」根本不是可靠的分界：
+  - `APPOINTMENT` 必须给 `appointmentId`，Java 拿它去 `TravelGuideService.forAppointment` 的 SQL（`WHERE a.user_id=? AND a.id=?`）校验**归属**，越权和不存在回同一句话（不说它在不在），然后照旧打开地图、发 `UiDirective.travel(...)`。
+  - `CANDIDATE` 用 `hospital` / `date` / `time` / `transport`（缺的回退到草稿），只回估算，不发页面指令、不写草稿。
+  - 不给 `mode` 时按参数唯一推断（只给 `appointmentId` → APPOINTMENT；只给候选条件 → CANDIDATE；一个参数都不给 → 既有导航流程原样）；**混着给、或 `mode` 与参数对不上，一律澄清**，不猜。
+  - `ToolRegistry` 的描述不再写「不打开地图」这种一概而论的话，改成把两种模式分别写清；提示词同步。
+- **其二，「当前明确排除」由 Java 落地，不新增任何中文关键词或同义词表。**排除目标由主模型结构化给出（`facts.excludedHospitals`，JSON 数组；只有一家时也接受一个字符串——**不做分隔符切分**），Java 用既有的 `CatalogEntityResolver` 和真实医院目录比对，**在拼推荐文字与快捷按钮之前**过滤：精确命中直接排除；唯一近似（「市一」）排除并**把理解结果说出来**让他有机会纠正；对不上目录或对上多家则**这一轮不给推荐**，说清是哪一步没认准。全被排除时说「没有别家了」并请他换条件，**绝不把被排除的医院悄悄放回来**；排除只在当轮生效，不落草稿、不进长期偏好。
+  - 为此 `ExtractedFacts` 增加第 17 个组件 `List<String> excludedHospitals`（保留 16 参兼容构造，不波及规则抽取、确认动作与测试脚手架），由 `LlmConversationPlanner` 从规划 JSON 的 `facts` 节点读数组。
+  - **取舍记录**：工具参数那一层是 `Map<String,String>`，表达多个排除目标只能靠分隔符切分，而医院名本身就可能带顿号、逗号、括号（「市第一医院（门诊部）」）——切错等于 Java 替模型猜它排除了谁。规划 JSON 的 `facts` 节点本来就是 `JsonNode`，直接读数组是假设最少的表达，所以选它，而不是给 `arguments` 发明一套转义约定。
+- **其三，整点边界统一。**`checkConflictReadOnly` 里原来写 `start.isBefore(clock.now())`，于是**正好等于此刻**的整点会被判成「还没到」，答复「不冲突」；而号源查询（`appointment_time > 当前时间`）和确认闸门（`slotAlreadyPassed`，`!时间.isAfter(now)`）都把它算作已过去——同一个整点，一边说能约一边说过期了。改成 `!start.isAfter(clock.now())`。
+- **文档修正**：此前几处「整轮超时与工具调用上限仍是配置项，未实现」的含混表述已改准确——**已有**固定 3 轮上限（`MAX_MODEL_TOOL_ROUNDS = 3`）与同签名去重（`Set<String> executed`）；**尚未实现**的是整轮超时、可配置的调用预算这类能力。
+- 新增测试：`RecommendationTests` 12 项（APPOINTMENT 导航 / CANDIDATE 不导航 / 只给交通方式回退草稿 / 参数为空的老路径 / 混着给澄清 / 越权与不存在的 `appointmentId`；单个排除 / 多排除即排除所有候选 / 对不上目录 / 唯一近似的说明 / 不成为长期偏好 / 历史偏好也压不过排除）+ `CheckConflictBoundaryTests` 2 项（固定时钟整点）。
+- **边界测试是双向验过的**：把 `!start.isAfter(...)` 临时改回 `isBefore` 重跑，`theExactCurrentInstantCountsAsAlreadyPassed` 如期变红（09:00 被答「与您已有的日程不冲突」），改回来后 2 项全绿。
+- **验证**（Dev Container `/workspace/backend`）：专项 `RecommendationTests` 38 项、`CheckConflictBoundaryTests` 2 项全绿；**重跑后端全量 `mvn -o test`：562 项，0 失败 0 错误 0 跳过，BUILD SUCCESS**（本轮改动前为 548 项，净增 14）。这轮按用户要求本可只跑专项，但改动落在 `FollowupAgentService.dispatchOutcome` 这个**无 default 的 switch**、`ToolRegistry` 的工具描述与 `ExtractedFacts` 这个 record 上，都属公共分派与共享契约，所以决定跑全量。
+- **真实模型仍未跑**，本节的结论与原来一样不覆盖模型语义：**8B-1 真实模型语义尚未验证，自动测试不能证明模型一定会选择正确工具，留待用户手动测试及最终验收。**
+- 未提交、未推送，不进入 8B-2。
+
+### 同日第二轮审查收尾（未提交）：排除穿过工具循环、transport 归位
+
+- **背景**：第一轮审查收尾把排除做成了 Java 过滤，但只在「模型第一跳就要推荐」那条路上生效。审查指出：`runModelToolLoop` 先执行 `appointment.history`、`profile.memorySummary` 之后，`finishToolLoopDecision` 会直接交付模型的 `replyDraft`——首轮的排除集合没带过来，最终推荐也没经过 Java 校验，老人明确排除的医院照样会回来。
+- **其一，排除成为「本次用户消息的轮内约束」，一路带着穿过整个循环。**新增 `FollowupAgentService.TurnReadConstraint`（科室 + 排除目标两样读条件，**只是循环里的一个局部变量**）：进循环时从首轮 facts 建起来，每次 `continueAfterTools` 之后把新 facts 并进来（排除目标取并集，只增不减；科室取第一次说定的那个）。不落 `ConversationState`、不写 `MemoryStore`，方法返回就没了——**老人下一条消息不再提，就是新的一轮、新的空约束**，用例里验了「下一轮两家医院都回来」。
+- **其二，推荐路由的收口一律由 Java 从真实候选重装。**`finishToolLoopDecision` 在 `decision.route() == RECOMMEND_HOSPITAL` 时改走 `recommendHospitals(state, constraint.facts(), true)`：查本轮真实医院目录、应用排除、生成文字与按钮，**模型这一轮的 `replyDraft` 不作为给老人看的那句话**。理由是这段自由措辞没人能校验（Java 不解析中文，认不出里面点了哪几家医院），而「先查历史再推荐」恰恰是这个循环最常见的走法。照旧不写草稿、不建卡、不消费确认卡。
+  - 残留缺口如实记下：回答阶段（`LlmAnswerGenerator`）还会拿 Java 的草稿去润色，那一层理论上能改写措辞、塞进名字——这一层本来就是「只改措辞不改问题」，且对**直接进推荐**那条老路同样成立，本轮不动它，写进报告。
+- **其三，`transport` 归 CANDIDATE 专有。**第一版说明写「两种模式都可能带 transport」，`hasRouteCandidateArguments` 却把 transport 当候选专属——于是 `mode=APPOINTMENT + appointmentId + transport` 被误判成「混用」。现在：`transport` 只属于 CANDIDATE（用于候选路线比较）；APPOINTMENT 用预约和用户资料里已经存着的交通方式（`travelGuides.forAppointment` 自己取），**明确忽略这次传的 transport**，多带它不算混用、也不报错。混用检测只看 `appointmentId` 与 `hospital`/`date`/`time` 三项（新增 `hasRouteCandidateLocation`）。`ToolRegistry` 描述、系统提示词、Java 注释、测试四处口径一致。
+- **其四，`routeModeAmbiguity` 拆成三句话，按错误类型给。**原来三种情形共用一句「请告诉我具体的日期和时间」——缺的是哪一条预约时，这句话把老人指错了方向。现在：APPOINTMENT 缺 `appointmentId` → 问「请从您的预约里选一条」；CANDIDATE 一个条件都没给 → 问「要去的医院或者时间」；`appointmentId` 与候选位置条件混用（或 CANDIDATE 却给了 `appointmentId`）→ 请他说明「看已有预约的路线，还是估算候选的路线」。都不摆候选。
+- 测试：`RecommendationTests` 38 → **45 项**。新增路线 4 项（APPOINTMENT 忽略同调 transport / APPOINTMENT 缺编号问哪一条 / CANDIDATE 缺条件问医院或时间 / 工具声明与提示词都写明 transport 归 CANDIDATE），并改写混用那条断言新的三句话。排除部分把 `anExcludedHospitalNeverComesBackThroughTheHistoricalPreference`（原断言 `appointment.history` 为 0，证明不了「穿过历史工具后不回来」）**替换**成四条真跑工具循环的用例：先 `appointment.history` 再推荐（历史的常去医院正好被排除，断言 `traceCount == 1`、按钮只剩 h002、模型那句推荐原文一个字都没出去、草稿没写、下一条消息两家都回来）、history + profile.memorySummary 两轮后再推荐、模型点名推荐被排除与目录里没有的医院、查完历史发现候选全被排除。脚本网关加了一个 `answerReply`（回答阶段要说的话），只有回答层真说了话，`result.reply()` 才是可信的「老人实际看到的那句」。
+- **两条双向验过**：把 `finishToolLoopDecision` 里的推荐重装分支临时短路后重跑，上面那 4 条循环用例如期变红、其余 41 条全绿；把 `hasRouteCandidateLocation` 临时改回含 transport 后重跑，只有 `anAppointmentRouteIgnoresTheTransportPassedInTheSameCall` 变红。两处随后都复原。
+- 验证（Dev Container `/workspace/backend`）：专项 `RecommendationTests` 45 项 + 邻近 `CheckConflictBoundaryTests` 2 / `SlotQueryArgumentTests` 17 / `AgentRuntimeRoutingTests` 17 / `LlmConversationPlannerTests` 6 / `VoiceFirstP0Tests` 17 / `VoiceFirstP1Tests` 7 / `ClarificationFlowTests` 12 / `MultimodalImageTurnTests` 7 / `DemoScenarioTests` 5 / `CancelScopeTests` 6 = **141 项 0 失败 0 错误**；随后**重跑后端全量 `mvn -o test`：569 项，0 失败 0 错误 0 跳过，BUILD SUCCESS**（本轮改动前 562 项，净增 7）。改动落在 `runModelToolLoop` / `finishToolLoopDecision` 这个公共分派上，所以照例跑了全量。
+- **真实模型仍未跑**，本节结论不覆盖模型语义：**8B-1 真实模型语义尚未验证，自动测试不能证明模型一定会选择正确工具，留待用户手动测试及最终验收。**
+- 未提交、未推送，不进入 8B-2。
+
+### 同日第三轮（2026-09-14，8B-1 定稿）：推荐改由模型结构化产出，Java 只验证
+
+- **背景**：第二轮把推荐收口改成「Java 从真实候选重装、模型那轮 `replyDraft` 不作数」。这条把「排除被绕过」堵住了，但代价是**模型说的话一个字都不算数**：Java 拼出来的推荐只能按目录字段做固定陈述，说不了「您上次预约的就是这家、这次要不要继续」这类真正需要组织语言的话。而为了让它像人话，后面还挂着一层 `LlmAnswerGenerator` 润色——**那一层没人校验**，理论上可以改掉名单，Java 认不出来（DEC-029 的「代价一」把这条如实记成了残留缺口）。本轮按用户要求改掉这个架构。
+- **新流程**：模型完成历史、画像、号源、路线等工具查询后，**在最后一次模型调用里同时产出结构化 `recommendations` 与最终话语 `answering`**。Java 只逐条验证结构化那一半；验证通过就把同一次响应里的 `answering` **原样**交给老人，**不再调用 `LlmAnswerGenerator`**。
+  - `recommendations` 每项 `hospitalId` / `reason` / `evidenceRefs`（新增 `agent/planning/HospitalRecommendation`，与 `PlannerToolCall` 同级——它是模型契约的一部分，不是业务模型）。
+  - `PlannerDecision` 与 `AgentRuntime.Outcome` 各追加两个组件，并保留 8 参 / 10 参兼容构造，其余调用点一处都不用改。
+  - `LlmConversationPlanner`：`recommendations` 从 `root.path("recommendations")` 读数组，条数硬上限 8（**故意不按 3 截断**——超过 3 由校验层判 `TOO_MANY` 退回给模型自己删，Java 不替它砍前三条）；`answering` 取 `first(answering, replyDraft)`，别名只在这里收一次，其余路由照旧读 `replyDraft`。
+- **Java 验证什么**（`checkRecommendations`）：医院属于本轮真实候选；未被 `excludedHospitals` 排除；本轮有科室时该医院真有这个科室；「有号、距离、用时」等理由具有对应工具证据；条数 ≤ 3 且 `hospitalId` 不重复；`answering` 非空。**Java 不根据画像排序、不自行决定替代医院、不重新生成推荐理由**——排序就是模型给的顺序，`deliverRecommendation` 只按这个顺序生成 `q("选择"+name, "SET_HOSPITAL", id)`，文字是 `note + answering`（`note` 只有唯一近似排除时非空）。
+- **证据从哪来**：`traces.since(state.id, evidenceMarker)`，`evidenceMarker = traces.latestId(state.id)` 在**进循环时**取。判据是「本轮真的调用过该工具」∧「`success=true` 且 `response_json` 不是空的」∧（对号源/路线/科室/院内指引这类**关于某一家医院**的证据）「那一次调用的参数或结果里带着这家医院」。查了但没查到不算证据——`response_json` 是唯一能回答这件事的地方，会话里那段 `outcomeKind` 几乎恒为 `SUCCESS`，拿它当「有证据」等于没查；而 `{"total":0,...}` 这种非空对象要靠工具自报的条数（`total`/`returned`/`count`/`size`）识别。
+  - 映射表与医院级工具集合都是**工具名集合**（`TRACE_TOOL_NAMES` / `HOSPITAL_SCOPED_TOOLS`），不是中文词表。
+- **失败时不给 `answering`**：最多允许模型根据结构化错误修正一次（这次修正会消耗一轮，它可能先去点只读工具）；再失败返回一句中性安全提示（`recommendationUnavailable`），不出现任何医院名、不复述模型那句。**排除认不准 / 排除后没有候选**这两类是 Java 的终结句（`check.stopped()`），不交给模型再改一遍。
+- **模型驱动这条路上 Java 自己写的终结句全部改走 `respondWithoutModel`**（推荐交付、排除理解说明、没有候选、安全提示）——这些是安全措辞，不能交给润色层改写。**不经过模型的规则路径（`modelDriven=false`，老人自己点「推荐」）保持原样**走 `respond`，行为一字不变。
+- **`TurnReadConstraint` 原样保留**，仍是「本次用户消息内的排除条件」，只增不减、不落草稿不落记忆、方法返回就没了。
+- **不写草稿**：整条路一个 `ConversationState` 字段都不写，不建卡、不消费确认卡、不推进阶段。**`AgentTurnResponse` 字段与对外 HTTP 接口零改动**，前端与 `docs/05-api-contracts.md`、`INTERFACE_CHANGES.md` 无需改动。
+- **提示词**（`AgentSystemPrompt`）：JSON 骨架加 `"recommendations":[],"answering":null`；新增「推荐轮的最后一次调用：recommendations 和 answering 一起给」一节，写明三个字段的契约、条数上限、`hospitalId` 必须是本轮工具结果里出现过的真实 id、医院级证据的参数里要带上那家医院、`answering` 里只准出现 `recommendations` 里那几家、推荐轮 `replyDraft` 留空；并说明「Java 会逐条校验，校验不过会把结构化错误发回来，按错误改一次；再不行这一轮就不给推荐了——所以先查真实数据、再开口」。**第 12 条末句改写**：原文「推荐路由上给老人看的医院清单和按钮由 Java 拿真实候选重装，不要指望自己写在 replyDraft 里的医院名会被原样展示」与新契约直接矛盾，换成「`answering` 会原样给老人看（前面可能带一句 Java 的排除理解说明），所以只能提校验通过的那几家；不再有第二次润色」。
+- 测试：`RecommendationTests` 45 → **56 项**。改写 11 条（推荐轮不再经过回答模型，断言从 `authoritativeDraft()` 换成 `result.reply()`），新增 11 条：校验通过逐字展示且**这次没有回答模型调用**；首轮一条工具都没查就给推荐 → 修正提示明说「你还没有调用过任何只读工具」→ 修正里真去查 → 下一轮合法推荐正常展示；修正后仍不合法 → 安全提示（不含模型那句、不含医院名、无 `SET_HOSPITAL` 按钮）；`hospitalId` 目录里没有；指向本轮没跑过的工具；指向跑过但没结果的工具（空 `appointment.history`）；医院级证据不是关于这家的；`answering` 提了被排除的医院；`answering` 提了目录里真实存在但不在已校验名单里的医院；超过 3 条退回而不是裁剪；按钮顺序与条数跟着 `recommendations` 走且草稿/确认卡/阶段一字未动。
+  - 这轮踩的两个测试坑写进了 `PITFALLS.md` 同日两条：**Java 自己那次目录查询会变成模型的「证据」**（所以 `since()` 必须在 `prepareCandidates` 之前调用）、以及**「模型说话了」要看整个 messages 而不只是最后一个提示词**（修正轮之后往往还有一轮工具轮，`lastToolPhasePrompt` 会被覆盖）；还有一条更基础的：`appointment.history` 在 `resetData()` 清空预约后返回 `{"total":0,...}`，**「查了」和「查到了」是两回事**。
+- **双向验证两条**（改完复原并 `grep -rn "TEMP-CHECK\|if (true" src/` 确认无残留）：
+  1. 把 `recommendationUnavailable` 换成「照旧展示校验不过的 `answering`」→ `whenTheRepairAlsoFailsNothingOfTheModelSentenceIsShown` 如期变红（`"那还是推荐协和医院，真的很近。"` 里被排除的医院名漏了出去）。把它换成**整体短路校验**（无条件信模型）→ **14 项**变红，覆盖排除、候选、条数、证据、`answering` 包含检查与两条 Java 终结句。
+  2. 把 `evidenceProblem` 短路成恒返回 `null` → **正好 3 项**变红：`evidenceFromAToolThatNeverRanIsRejected` / `evidenceFromAToolThatRanButFoundNothingIsRejected` / `evidenceAboutAnotherHospitalIsRejected`。
+- 验证（Dev Container `/workspace/backend`）：专项 `RecommendationTests` **56 项 0 失败**；邻近 `RecommendationTests` + `CheckConflictBoundaryTests` + `ProfileReadTests` + `SilverAgentApplicationTests` = **117 项 0 失败 0 错误**；随后**重跑后端全量 `mvn -o test`：580 项，0 失败 0 错误 0 跳过，BUILD SUCCESS**（本轮改动前 569 项，净增 11）。改动落在 `runModelToolLoop` 收口与 `AgentRuntime` 的 outcome 契约上，属公共分派，所以照例跑了全量。
+- **真实模型仍未跑**，本章结论不覆盖模型语义：**8B-1 真实模型语义尚未验证，自动测试不能证明模型一定会选择正确工具，留待用户手动测试及最终验收。**
+- 未提交、未推送，不进入 8B-2。
