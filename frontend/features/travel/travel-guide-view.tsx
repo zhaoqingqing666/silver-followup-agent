@@ -88,13 +88,13 @@ export function TravelGuideView({ appointmentId, initialTab = 'outside', forceSp
     });
   }, [appointmentId, voicePreference?.speechRate, voicePreference?.speechVolume]);
 
+  // 「院内/院外路线」不再由本页按关键词接住：那是地图与路线意图，一律交给主智能体，
+  // 由它去调真实工具、发页面指令。这里只留「返回」和「重听」两个不改状态的短口令。
   const handleVoiceCommand = useCallback((text: string) => {
     const command = matchPageVoiceCommand(text);
     if (!command) return false;
     if (command === 'BACK') { onBack(); return true; }
     if (!guide) return true;
-    if (command === 'INSIDE') { setTab('inside'); speak(facilityNarration(guide)); return true; }
-    if (command === 'OUTSIDE') { setTab('outside'); speak(routeNarration(guide)); return true; }
     speak(travelNarration(guide));
     return true;
   }, [guide, onBack, speak]);
