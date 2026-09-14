@@ -88,18 +88,35 @@ class UserMemoryTests {
         approve(prepare(id, "h001", "d001", DAY, MORNING_SLOT));
 
         assertThat(contents()).containsExactlyInAnyOrder(
-                "常去的医院是市第一医院（模拟）",
-                "常去的科室是心内科",
-                "习惯上午复诊");
-        // 明天开一段新对话，助手应该已经认得他——这是这一个功能存在的全部意义。
-        assertThat(memories.digest("user-001")).contains("常去的医院是市第一医院（模拟）");
+                "最近一次确认预约的医院是市第一医院（模拟）",
+                "最近一次确认预约的科室是心内科",
+                "最近一次确认预约的时段是上午");
+        // 明天开一段新对话，助手按需查得到——这是这一个功能存在的全部意义。
+        assertThat(memories.digest("user-001")).contains("最近一次确认预约的医院是市第一医院（模拟）");
+    }
+
+    /**
+     * 一次预约只能被记成「最近一次确认预约的是……」，不能记成习惯。
+     *
+     * <p>这是「一次预约不能自动成为长期习惯」这条要求在**存储层**的守卫：写入的措辞里
+     * 只要出现「常去」「习惯」，模型下一轮就会拿它去劝老人「您常去这家，还约这儿吧」——
+     * 而那句话背后只有一次预约。要谈「常去」，只能由统计真的数够次数之后再说。
+     */
+    @Test
+    void oneBookingIsStoredAsAHistoryFactNotAsAHabit() {
+        approve(prepare(service.start().conversationId(), "h001", "d001", DAY, MORNING_SLOT));
+
+        assertThat(contents()).as("一次预约不许被写成习惯")
+                .allSatisfy(content -> assertThat(content).doesNotContain("常去").doesNotContain("习惯"));
+        assertThat(service.memories("user-001")).as("也不许带上「这是偏好」的类别标签")
+                .allSatisfy(memory -> assertThat(memory.kind()).isEqualTo(MemoryStore.KIND_HISTORY));
     }
 
     @Test
     void afternoonSlotIsRememberedAsAfternoon() {
         String id = service.start().conversationId();
         approve(prepare(id, "h002", "d003", LATER_DAY, ENDOCRINOLOGY_SLOT));
-        assertThat(contents()).contains("习惯下午复诊");
+        assertThat(contents()).contains("最近一次确认预约的时段是下午");
     }
 
     @Test
@@ -107,12 +124,12 @@ class UserMemoryTests {
         approve(prepare(service.start().conversationId(), "h001", "d001", DAY, MORNING_SLOT));
         approve(prepare(service.start().conversationId(), "h002", "d003", LATER_DAY, ENDOCRINOLOGY_SLOT));
 
-        // 换了医院就要覆盖：两版偏好都留着，下一轮提示词里就会同时出现两家医院。
+        // 换了医院就要覆盖：两版都留着，下一轮读数时就会同时出现两家医院。
         assertThat(contents()).hasSize(3);
         assertThat(contents()).containsExactlyInAnyOrder(
-                "常去的医院是市人民医院（模拟）",
-                "常去的科室是内分泌科",
-                "习惯下午复诊");
+                "最近一次确认预约的医院是市人民医院（模拟）",
+                "最近一次确认预约的科室是内分泌科",
+                "最近一次确认预约的时段是下午");
     }
 
     @Test
@@ -120,7 +137,8 @@ class UserMemoryTests {
         approve(prepare(service.start().conversationId(), "h001", "d001", DAY, MORNING_SLOT));
 
         assertThat(service.forgetMemory("user-001", "habit.hospital")).isTrue();
-        assertThat(contents()).containsExactlyInAnyOrder("常去的科室是心内科", "习惯上午复诊");
+        assertThat(contents()).containsExactlyInAnyOrder(
+                "最近一次确认预约的科室是心内科", "最近一次确认预约的时段是上午");
         // 忘掉的东西不能再进提示词。
         assertThat(memories.digest("user-001")).doesNotContain("市第一医院");
         // 再忘一次：已经没有了，如实返回 false，不报错。
@@ -137,7 +155,7 @@ class UserMemoryTests {
         assertThat(cancelCard.confirmation()).isNotNull();
         service.confirm(id, true, cancelCard.confirmation().confirmationId());
 
-        assertThat(contents()).contains("常去的医院是市第一医院（模拟）");
+        assertThat(contents()).contains("最近一次确认预约的医院是市第一医院（模拟）");
     }
 
     /** 忘记这条路径只走人自己按的按钮：模型与前端都够不着它。 */

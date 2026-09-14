@@ -559,3 +559,44 @@
 - 验证：`SlotQueryArgumentTests` 17 + `VoiceFirstP1Tests` 7 + `AgentRuntimeRoutingTests` 17 = **41 项 0 失败 0 错误**；邻近专项 `LlmConversationPlannerTests` 6 + `VoiceFirstP0Tests` 17 + `DemoScenarioTests` 5 + `ClarificationFlowTests` 12 + `MultimodalImageTurnTests` 7 + `AgentSystemPromptQueryFactsTests` 4 = **51 项 0 失败 0 错误**。按要求不跑全量、不跑真实模型、不修跨午夜用例、不处理按钮问题。
 - 环境备注：中途遇到一次 `TestEngine with ID 'junit-jupiter' failed to discover tests` / `NoClassDefFoundError: AgentTurnResponse`——`target/test-classes` 下的 `SlotQueryArgumentTests*.class` 是 IDE（ecj）以「Unresolved compilation problems」容错形态写出来的坏产物。删掉这几个 class 后 `mvn -o test` 正常，不是源码问题。`mvn -o clean` 仍不可用（`:8080` 上的实例占着 `target/classes`）。
 - 未提交、未推送，等审查。
+
+## 2026-09-14 第八阶段 8A：画像与预约历史的受控读取（只读，不动写入侧）
+
+- 范围：让模型能**先真的查库、再说话**——复用现有 `application/longterm/MemoryStore`（医院/科室/习惯时段的长期记忆，**不是** `application/preference/UserPreferenceStore`：那个存的是语速/朗读开关/音色这类应用设置），为模型提供受控的预约历史与画像摘要读取能力。**只做只读**：不做完整推荐排序、不做偏好写入。第六阶段的健康记录/健康备忘/家属报告一律没动；旧第七阶段「统一确认执行」已由 4A/4B 与修复轮完成，未重做。
+- 新增（后端）：`application/profile/ProfileQueryService.java`（约 330 行）——`history(actorUserId, actorRole, subjectUserId, HistoryQuery)` 与 `memorySummary(actorUserId, actorRole, subjectUserId)` 两个入口，参数化 SQL（只拼死片段，取值一律走 `?`）、字段白名单、`HISTORY_LIMIT = 5`、`TENDENCY_SCAN_LIMIT = 200`、`TENDENCY_MIN_COUNT = 2`。
+- 改动（后端）：`application/ToolRegistry.java`（注册 `appointment.history`、`profile.memorySummary`，并在注释里写清「为什么是新工具而不是扩 `appointment.queryMine`」「`limit` 为什么不做成参数」）；`application/AgentOrchestrator.java`（`Route.QUERY_APPOINTMENT_HISTORY` / `QUERY_PROFILE_MEMORY`，只读、不走写链路、不带 intent 映射）；`application/FollowupAgentService.java`（两个 handler + 文案装配 `appointmentHistoryText` / `profileMemoryText` / `currentDraftNote` / `factLabel` / `tendencyLabel` / `historyTrace`，一律走 `answerReadOnly`；三处 `"CONFIRMED_BOOKING"` 字面量改为 `MemoryStore.SOURCE_CONFIRMED_BOOKING`）；`application/longterm/MemoryStore.java`（新增 `SOURCE_USER_STATED` / `SOURCE_CONFIRMED_BOOKING` 常量与 javadoc）；`agent/planning/AgentSystemPrompt.java`（新增一节「画像与预约历史：先查，再说话，只能说『预约过』」）。**对外 HTTP 接口与 `AgentTurnResponse` 字段零改动**，`docs/05-api-contracts.md` 与 `INTERFACE_CHANGES.md` 无需改动。
+- 不加 intent 是故意的：参数写坏的调用在按 intent 回退时不会落到这两条上（`rejectedByIntent` → `REFUSE_UNSUPPORTED_TOOL`），宁可回绝，也不装作答了。
+- **身份与数据范围**：`requireReadable(actorUserId, actorRole, subjectUserId)` —— 代办（`actorRole.isCaregiver() && subject != actor`）必须 `CareService.bound(actor, subject)` 为真；本人只能读本人。**越权与「这个人不存在」返回逐字相同的 `ProfileQueryService.REFUSED`**（否则拒绝语就是「库里有没有他」的探针）；拒绝时一条 SQL 都不执行、一条留痕都不落。模型不连数据库、不执行 SQL、不遍历表。`userId` 由 Java 按当前会话注入并写进留痕的 `request_json`，模型传不进来。
+- **四类信息分开**：当轮要求（草稿里已有的条件，Java 单独一段 + 「优先级最高」）、明确偏好（`SOURCE_USER_STATED`）、最近预约事实（`FactStatus`：`CONFIRMED_UPCOMING` / `CONFIRMED_PAST` / `CANCELLED` / `UNKNOWN`）、统计倾向（扫已确认预约聚合，`confirmedTotal >= 2` 才出，每条明说是「历史统计，不是老人明确说过的偏好」）。优先级：当轮要求 > 明确偏好 > 统计倾向。**Java 侧刻意只产出纯事实标签，不产出「去过 / 看过 / 就诊过 / 到院」**——措辞红线写在 `AgentSystemPrompt`，这样 Java 文本可以做干净的 `doesNotContain` 断言。
+- **只读是结构性的**：两条都走 `answerReadOnly`，不推进阶段、不动 `alternatives` / `selectedSlot` / 草稿、确认卡原样带回；查询结果不回写草稿，用户下一轮明确说「这次还选它」时走正常业务动作。沿用 5B 的结构性规则，不新增按「查询条件与草稿冲不冲突」判断的分支。**不新增 Java 中文同义词表**——「上次那家」「还是原来的」由主模型理解并输出结构化工具调用或业务动作。
+- 新增测试：`application/ProfileReadTests.java` **19 项**，覆盖要求的 17 条——本人只能读自己 / 家属读已绑定长辈 / 越权拒绝且不泄露存在性 / 最近预约带医院科室日期状态 / 已取消不能说成仍有效 / 已预约不能说成已到院已就诊 / 一次预约不是习惯 / 四类来源分得开 / 当轮要求压过历史 / 忘掉的记忆不当当前事实 / 字段白名单与条数上限 / 模型查询不动草稿 / 查询期间确认卡不被消费 / 无结果不编造 / 可基于真实结果问「还考虑吗」/ 拒绝沿用不动草稿 / 同意沿用仍走正常预约动作。
+- 验证：`ProfileReadTests` 19 + 受影响既有 `SlotQueryArgumentTests` 17 + `UserMemoryTests` 7 + `AgentRuntimeRoutingTests` 17 + `DemoSeedDataTests` 6 = **66 项 0 失败**；后端全量 **517 项 0 失败 0 错误**（`mvn -o test`）。
+- 真实模型评测（deepseek-v4-flash，独立端口 **8099** + `/tmp` 隔离 H2 文件库，**全程没碰你跑着的 :8080 / :3000**；种子为 3 条模拟预约：市第一医院心内科 ×2 已确认 + 市人民医院内分泌科 ×1 已取消）：
+  - 场景 1（询问上次预约医院）：「我上次是在哪家医院看的来着？」→ 命中 `appointment.history`（success），回复「您最近一次预约的是市第一医院（模拟）心内科，2026年8月12日上午9点；…这次还考虑去市第一医院（模拟）心内科吗？」——**用「预约的是」，没有出现「去过 / 看过 / 就诊」**；草稿仍为空，只问不写。
+  - 场景 2（当前明确要求与历史不一致）：「就去市人民医院内分泌科，别管我以前约过哪儿。」→ 草稿 `hospital=市人民医院`（当轮要求生效），历史那家没有被拿来覆盖。
+  - 场景 3（用户拒绝沿用）：「不去那家了，我想换别的医院。」→ 先查了历史，随后尊重拒绝、改推另一家；草稿 `hospital=待确认`，**没有把历史值写进去**。
+  - 场景 4（无历史记录）：user-002「我以前都约的是哪家医院？」→ 「系统里没有查到您以前在这边的预约记录，所以没法告诉您常去哪家医院…这次复诊您想去哪家医院呢？」——**没有编造医院、没有编造偏好**。
+  - 附加：家属（user-f001，care_relations 已绑定 user-001）能读到被服务长辈的记录；同一会话里试图改查 user-002 被回绝（「这个会话里我只能查看王阿姨的复诊记录」）。评测期间库里 `appointments` **始终只有种子那 3 条**，`interaction.requestConfirmation` 一次都没出现——没有产生任何预约、没有建过或消费过确认卡。
+- 未解决风险：
+  1. `repository` 层统计倾向的扫描上限是 200 条、倾向阈值是 2 次，都是 Java 侧写死的常量，未做成配置；真实使用量级下够用，但没有评测依据。
+  - 说明（2026-09-14 修复轮改写）：初版这里还列过两条「未解决风险」——`knownFacts` 里的 `memoryNote → digest` 旁路把全部 `active` 记忆不分来源拼进提示词、以及写入措辞本身就是「常去的医院是 X」。**这两条的定性是错的，不是「潜在风险、将来才会出问题」，它们当时就已经在违反「一次预约不能自动成为长期习惯」。** 已在同日的修复轮条目里修掉；判断为什么错见 `PITFALLS.md` 同日条目。
+- 与队友改动的文件冲突：业务专属文件没有重叠——**没有碰** HealthRecord*/HealthReport*/Memo* 这些备忘与家属报告相关的文件（`MemoExecutor.java` 只是在 IDE 里被打开看过，未改动），也没有碰 `ConfirmationService` / `ConfirmationDispatcher` / 既有 `PendingOperation.Kind`、前端页面与全局麦克风。但本轮修改了 `FollowupAgentService`、`ToolRegistry`、`AgentSystemPrompt` 三个共享文件，**存在 Git 合并冲突可能；提交前需与负责备忘和家属报告的队友确认**。开工前核对过起点：分支 `zhaotingfang`、HEAD `3d15804bd994e65d19b7fce4c9f7576eb3c96fbf`、工作区干净（5B 那一轮的改动已在 3d15804 里，不存在别人的未提交改动可被覆盖）。
+- 未提交、未推送，等审查。不进入 8B、第九阶段或其他功能。
+
+## 2026-09-14 第八阶段 8A 修复轮（审查后：记忆旁路、偏好时效措辞、反向日期范围）
+
+- 起因：8A 审查未通过，指出三处问题。**保留现有实现、不回退**，只修这三处；同样未提交、未推送、不进入 8B。
+- **修复一：旧的长期记忆旁路（这是本轮的实质缺陷）**。原实现里 `knownFacts(state)` 调 `memoryNote(state)`，后者把 `MemoryStore.digest(userId)` 拼进 `knownFacts` 末尾，而 `digest` 会把全部 `active` 记忆**不分来源**原样塞进**每一轮**主模型提示词。配合写入侧 `rememberBookingPreferences` 一次预约就写「常去的医院是 X」「常去的科室是 X」「习惯上午/下午复诊」，等于**一次预约当场就被当成长期习惯送进了模型**——遵守「一次预约不能自动成为长期习惯」这条要求，写作**中性历史事实**。改法：
+  - `FollowupAgentService.knownFacts` **删掉 `memoryNote(state)` 调用**，`memoryNote` 方法整体删除；默认上下文里一个字记忆都不再注入。画像改为一律经 `profile.memorySummary` 按需读取。这是**结构性**做法（默认提示词里干脆没有记忆），而不是给 `digest` 加来源过滤——过滤只在这一条路径上成立，结构性做法让「未经画像查询就不能把记忆当偏好用」不可能被绕过。
+  - `rememberBookingPreferences` 写入措辞改为「最近一次确认预约的医院是……」「……科室是……」「……时段是……」，**不出现「常去」「习惯」**；`kind` 一律用新常量 `MemoryStore.KIND_HISTORY`（不再伪装成 HABIT/PREFERENCE）。
+  - `MemoryStore.digest` **保留**（不打断「我的」页那一侧与既有测试），但 javadoc 降级为「**已经不是主模型画像入口了，新代码不要用**」；新增 `KIND_HISTORY` 常量并写明它与 HABIT/PREFERENCE 的区别不是显示分组、而是**不许被读成偏好**。
+  - **修正初版的判断错误**：初版把这条旁路记成「既有旁路、现实中还打不起来、留给以后」，量错了标准——当时看的是「新写的来源分类会不会被它干扰」，而要求原文说的是「一次预约不能自动成为长期习惯」。旁路当场就在生效。已在 `PITFALLS.md` 与 `DECISIONS.md` DEC-026 中改写这段表述，并删掉「该旁路目前还不会产生实际问题」。
+- **修复二：明确偏好的时效措辞**。`profileMemoryText` 原文案「这些是老人自己说过要让记着的，**可以直接当作他的偏好**」会把旧偏好说成现在仍然有效。改为历史事实口径：「这些是老人曾明确表达的偏好，**附带更新时间；如果时间较久或与当轮要求不一致，需要询问现在是否仍适用**」。**本轮刻意不发明「多少天算过期」的阈值**——那是个需要产品依据的数字，编一个反而会变成新的、没人验证过的规则。软删除记录继续不返回；active 但时间较久的不覆盖当轮明确要求，也不说成现在仍确定有效。
+- **修复三：写反的日期范围**。`appointment.history` 的 `from` 晚于 `to` 时，原实现把它当普通空结果，会答成「没有查到历史记录」——把用户的口误说成事实。现在 `ProfileQueryService.HistoryQuery` 新增 `rangeReversed()`，`showAppointmentHistory` 在**执行任何历史 SQL 之前**返回「您说的开始日期 X 晚于结束日期 Y，这两个日期是反的，我没法按这个范围查。请重新说一下要查哪一段时间。」不执行 SQL、不回答成「没有历史记录」、不改草稿/阶段/确认卡。
+- 测试：`ProfileReadTests` 19 → **23 项**（测试 8 重写为对**整段模型提示词**的端到端断言；新增 4 项：一次预约不进模型上下文 / 旧明确偏好按历史表达 / 旧偏好不覆盖当轮要求 / 反向日期范围被拒不算空结果）。**审查特别要求的「不得通过把断言改到 `ProfileQueryService` 返回值上来绕开整段模型提示词」已照办**：`ScriptedModelGateway` 现在记录每一条 `ModelRequest.Message`，断言落在模型实际收到的**每一条非 system 消息**上（不过滤 system，是因为提示词里本身带着「不许说常去／习惯」这条禁令，禁的是模型说出去，不是禁止提示词教它别说）。`UserMemoryTests` 7 → **8 项**（改写期望措辞，新增「一次预约被存成历史事实而不是习惯」：措辞不含「常去」「习惯」，`kind` 必须是 `KIND_HISTORY`，**没有降低「一次预约不是习惯」的要求**）。
+- 验证：`ProfileReadTests` 23 + `UserMemoryTests` 8 + `SlotQueryArgumentTests` 17 + `AgentRuntimeRoutingTests` 17 + `LlmConversationPlannerTests` 6 + `AgentSystemPromptQueryFactsTests` 4 + `AgentSystemPromptTimeTests` 3 + `AgentSystemPromptVisionTests` 5 + `DemoSeedDataTests` 6 = **89 项 0 失败 0 错误**；后端全量 **522 项 0 失败 0 错误**（`mvn -o test`，修复前 517 项）。
+- **真实模型评测本轮没有重跑**：本轮改动确实动到了提示词内容（删掉 `knownFacts` 的记忆段、改画像偏好文案）与写入措辞，理论上会影响模型输出。**如实标记：这三处修复只有桩测试（`ScriptedModelGateway`）覆盖，没有真实模型复测，不冒充已验证。** 8A 原版的四个真实模型场景是在**修复前**的代码上跑的，其结论不能直接平移到现在这份代码上。
+- **收口轮（同日）明确记录：8A 修复后的真实模型与真机测试尚未执行，留到全局语音整合和最终验收阶段；不得把修复前的真实模型结果当作修复后结果。** 本轮不重跑真实模型、不做真机测试。
+- **现有正确行为未被破坏**（第 4 项，全部由 `ProfileReadTests` 原有测试守住并按上述结果全绿）：服务端注入身份、`care_relations` 权限检查、字段白名单与 `HISTORY_LIMIT`、只说「预约过」不说「去过/看过/就诊过」、只读查询不动草稿与确认卡、`appointment.history` 与 `appointment.queryMine` 分开、当轮要求优先于历史。
+- **措辞收口**：`docs/05-api-contracts.md:253`、`docs/03-agent-workflow.md:132`、`docs/04-architecture-and-modules.md:125`、`docs/02-pages-and-interactions.md:189-196`、`docs/09-demo-acceptance-checklist.md:132` 五处仍把记忆内容描述成「常去的医院是……」的文档已同步成新的中性口径；`frontend/features/profile/profile-view.tsx:124` 的「我的」页空态文案「记下常去的医院和科室」也改成了「记下最近一次确认预约的医院和科室，您可以随时让它忘记」。**前端只动了这一处用户可见文案**：不改页面结构、不加交互、不动接口，也没把「预约历史」说成实际就诊历史。
+- 未提交、未推送，等审查。不进入 8B。

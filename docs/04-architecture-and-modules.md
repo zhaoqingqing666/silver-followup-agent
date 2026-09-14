@@ -122,7 +122,7 @@ backend/src/main/java/com/team/silveragent/
 │  ├─ demo/              演示场景：DemoScenario、DemoScenarioService
 │  ├─ health/            健康记录与报告：HealthRecordStore、HealthRecordParser、
 │  │                     HealthReportParser、HealthReportService
-│  ├─ longterm/          跨对话长期记忆：MemoryStore（常去的医院、科室、习惯时段）
+│  ├─ longterm/          跨对话长期记忆：MemoryStore（最近一次确认预约的医院、科室、时段）
 │  ├─ memo/              备忘：MemoStore、MemoParser、MemoCommandParser
 │  ├─ preference/        用户设置：UserPreferenceStore（朗读开关、语速、音色）
 │  ├─ time/              业务时间：BusinessClock（业务时区与可注入时钟，见 DEC-019）

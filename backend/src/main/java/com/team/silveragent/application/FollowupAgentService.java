@@ -11,6 +11,7 @@ import com.team.silveragent.application.memo.MemoCommandParser;
 import com.team.silveragent.application.memo.MemoParser;
 import com.team.silveragent.application.memo.MemoStore;
 import com.team.silveragent.application.longterm.MemoryStore;
+import com.team.silveragent.application.profile.ProfileQueryService;
 import com.team.silveragent.application.time.BusinessClock;
 import com.team.silveragent.application.travel.TravelGuideService;
 
@@ -105,6 +106,13 @@ public class FollowupAgentService extends ConfirmationSupport {
      */
     private record CancellationStep(ToolOutcome.Kind kind, AgentTurnResponse response, String detail) { }
     private static final int MAX_MODEL_TOOL_ROUNDS = 3;
+    /**
+     * 长期记忆摘要里每一摞最多摆几条。
+     *
+     * <p>比 {@code MemoryStore.digest} 的 8 条松一点，因为这里分了两摞、还带来源和时间；
+     * 但也只是松一点——摘要段的用途是让模型知道「有这么回事」，不是把整张表搬进上下文。
+     */
+    private static final int MEMORY_LIST_LIMIT = 10;
     /** 一轮最多接受几张图：再多会超过并发识别池的批次，也会让这一轮明显变慢。 */
     private static final int MAX_IMAGES_PER_TURN = 3;
     /**
@@ -197,6 +205,8 @@ public class FollowupAgentService extends ConfirmationSupport {
     private final VlService vlService;
     private final TurnProgress turnProgress;
     private final MemoryStore memories;
+    /** 画像与预约历史的受控只读读取；本类只负责把结果摆成话，权限与 SQL 都在它那边。 */
+    private final ProfileQueryService profileQuery;
     private final ConfirmationInteractionTool confirmationInteraction;
     private final ClarificationInteractionTool clarificationInteraction;
     /** 确认凭据与待确认操作登记的唯一出处；本类只负责「什么时候问老人要凭据」。 */
@@ -246,6 +256,7 @@ public class FollowupAgentService extends ConfirmationSupport {
             VlService vlService,
             TurnProgress turnProgress,
             MemoryStore memories,
+            ProfileQueryService profileQuery,
             ConfirmationInteractionTool confirmationInteraction,
             ClarificationInteractionTool clarificationInteraction,
             ConfirmationService confirmations,
@@ -285,6 +296,7 @@ public class FollowupAgentService extends ConfirmationSupport {
         this.vlService = vlService;
         this.turnProgress = turnProgress;
         this.memories = memories;
+        this.profileQuery = profileQuery;
         this.confirmationInteraction = confirmationInteraction;
         this.clarificationInteraction = clarificationInteraction;
         this.confirmations = confirmations;
@@ -901,6 +913,8 @@ public class FollowupAgentService extends ConfirmationSupport {
             case QUERY_DRUG_KNOWLEDGE -> showDrugKnowledge(state, outcome);
             case QUERY_CARE_TIMELINE -> showCareTimeline(state);
             case QUERY_CARE_NOTIFICATIONS -> showCareNotifications(state);
+            case QUERY_APPOINTMENT_HISTORY -> showAppointmentHistory(state, outcome);
+            case QUERY_PROFILE_MEMORY -> showProfileMemory(state);
             case REMIND_ELDER -> remindElder(state, value);
             // 模型点名了一个执行不了的工具，intent 也归不到任何业务链路。绝不复用它的 replyDraft，
             // 也不走 DIRECT_ANSWER（那条路会暂停正在办理的任务）：由 Java 明确回绝，任务状态原地不动。
@@ -1138,6 +1152,8 @@ public class FollowupAgentService extends ConfirmationSupport {
             case "travel.routePlan" -> AgentOrchestrator.Route.QUERY_TRAVEL_GUIDE;
             case "hospital.locationGuide" -> AgentOrchestrator.Route.QUERY_LOCATION_GUIDE;
             case "drug.queryKnowledge" -> AgentOrchestrator.Route.QUERY_DRUG_KNOWLEDGE;
+            case "appointment.history" -> AgentOrchestrator.Route.QUERY_APPOINTMENT_HISTORY;
+            case "profile.memorySummary" -> AgentOrchestrator.Route.QUERY_PROFILE_MEMORY;
             default -> fallback;
         };
     }
@@ -3913,6 +3929,201 @@ public class FollowupAgentService extends ConfirmationSupport {
                 caregiverActions(elderName(state.userId)));
     }
 
+    /**
+     * 预约历史事实：把库里真实发生过的记录摆给模型看。
+     *
+     * <p><b>只说「预约过」。</b>Java 这边产出的是纯事实标签——「已预约（还没到日子）」
+     * 「已预约（日子已经过了）」「已取消」——没有一个字说人去过医院。项目里没有可靠的
+     * 到院/就诊完成事实，而「预约成功」和「人真的去了」是两件事：把前者说成后者，
+     * 是这套功能最容易犯、后果也最重的错。措辞规则在提示词里再写一遍，这里保证没有可被
+     * 误读成到院的词。
+     *
+     * <p><b>这一轮只查不改。</b>查询条件只决定这次查什么，不落到草稿上；出口走
+     * {@link #answerReadOnly}，正等确认时把老人手上那张卡原样带回。老人真想改成这家，
+     * 下一轮由他自己说了算，走正常业务动作。
+     */
+    private AgentTurnResponse showAppointmentHistory(ConversationState state, AgentRuntime.Outcome outcome) {
+        Map<String, String> arguments = toolArguments(outcome, "appointment.history");
+        ProfileQueryService.HistoryQuery query = new ProfileQueryService.HistoryQuery(
+                arguments.get("hospital"), arguments.get("department"), arguments.get("status"),
+                // 日期用的是契约那一份宽松解析（认 2026-9-12 这种写法），解析不出来就当没给这个条件——
+                // 不另写一套格式判断，免得同一个参数在两处有两种解释。
+                ToolContract.parseDate(arguments.get("from")), ToolContract.parseDate(arguments.get("to")));
+        if (query.rangeReversed()) {
+            // 反过来的范围是「你这两句话对不上」，不是「那段时间没有记录」。
+            // 当成空结果回答，老人会以为自己那段真的没有预约——实际上他要的那段根本没被查过。
+            // 所以：一条 SQL 都不跑、一条留痕都不落，也说清楚是这个范围本身不成立。
+            return answerReadOnly(state, "您说的开始日期 " + query.from() + " 晚于结束日期 " + query.to()
+                    + "，这两个日期是反的，我没法按这个范围查。请重新说一下要查哪一段时间。");
+        }
+        ProfileQueryService.History history;
+        try {
+            history = profileQuery.history(state.actorUserId, state.actorRole, state.userId, query);
+        } catch (IllegalArgumentException error) {
+            // 权限类消息一律不走模型润色：措辞被改软就等于把边界说模糊了。
+            // 也不清确认卡——查不了是权限问题，和他手上那张卡没有任何关系。
+            return answerReadOnly(state, "现在查不了这位老人的预约记录：" + error.getMessage() + "。");
+        }
+        traces.record(state.id, "appointment.history",
+                Map.of("userId", state.userId, "arguments", arguments), historyTrace(history), true);
+        return answerReadOnly(state, appointmentHistoryText(state, history));
+    }
+
+    /**
+     * 长期记忆摘要：明确偏好与「系统从预约里总结出来的」分开说。
+     *
+     * <p>把两者混成一摞「用户偏好」，模型就会拿一条系统自己归纳的「常去的医院是市一院」
+     * 当成老人亲口说过的要求去劝他，而老人从没这么说过。来源和更新时间原样带出来，
+     * 让读的人能自己判断这条还算不算数。
+     */
+    private AgentTurnResponse showProfileMemory(ConversationState state) {
+        ProfileQueryService.MemorySummary summary;
+        try {
+            summary = profileQuery.memorySummary(state.actorUserId, state.actorRole, state.userId);
+        } catch (IllegalArgumentException error) {
+            return answerReadOnly(state, "现在查不了这位老人的长期记忆：" + error.getMessage() + "。");
+        }
+        traces.record(state.id, "profile.memorySummary", Map.of("userId", state.userId),
+                Map.of("explicitPreferences", summary.explicitPreferences().size(),
+                        "bookingHistory", summary.bookingHistory().size(),
+                        "unverifiableCount", summary.unverifiableCount()), true);
+        return answerReadOnly(state, profileMemoryText(state, summary));
+    }
+
+    /** 预约历史摆成给模型看的一段话。事实、统计、当轮要求三段各自标明来历，不揉成一句「您的偏好」。 */
+    private String appointmentHistoryText(ConversationState state, ProfileQueryService.History history) {
+        StringBuilder text = new StringBuilder(elderName(state.userId)).append("的预约记录：");
+        if (history.total() == 0) {
+            text.append("没有查到符合条件的记录。");
+        } else {
+            String facts = history.facts().stream()
+                    .map(fact -> fact.date().format(DATE_LABEL) + " " + fact.time().format(TIME_LABEL)
+                            + " " + fact.hospital() + " " + fact.department() + "（" + factLabel(fact.status()) + "）")
+                    .collect(java.util.stream.Collectors.joining("；"));
+            // 这里刻意不写「不代表已经到院」这类免责句：说了「到院」两个字，就等于把那个词
+            // 放回了提示词。Java 只给纯事实标签，能不能说到院由提示词那条硬红线去管。
+            text.append("共 ").append(history.total()).append(" 条，按日期从晚到早列出 ")
+                    .append(history.facts().size()).append(" 条：").append(facts).append("。");
+        }
+        if (!history.tendencies().isEmpty()) {
+            String items = history.tendencies().stream()
+                    .map(item -> itemLabel(item.dimension()) + "是" + tendencyLabel(item)
+                            + "（已确认预约中出现 " + item.count() + " 次）")
+                    .collect(java.util.stream.Collectors.joining("；"));
+            text.append(" 历史统计（只统计已确认的预约，是多次记录形成的统计，不是老人明确说过的偏好）：")
+                    .append(items).append("。");
+        } else if (history.confirmedTotal() == 1) {
+            text.append(" 历史统计：只查到 1 次已确认的预约，还谈不上习惯。");
+        }
+        return text.append(currentDraftNote(state)).toString();
+    }
+
+    private String profileMemoryText(ConversationState state, ProfileQueryService.MemorySummary summary) {
+        StringBuilder text = new StringBuilder(elderName(state.userId)).append("的长期记忆：");
+        if (summary.isEmpty()) {
+            text.append("没有查到记录。");
+        } else {
+            text.append("共 ").append(summary.explicitPreferences().size() + summary.bookingHistory().size())
+                    .append(" 条。");
+            // 明确偏好也不能说成「就是现在的偏好」：它是老人在**某个时间点**说过的话，
+            // 说过之后可能改主意。带出更新时间、并要求时间较久或与当轮要求不一致时回头问一句，
+            // 是这条记录能被安全使用的唯一前提——本项目没有任何「偏好自动过期」的可靠阈值，
+            // 所以不发明天数，只把判断交回给这一轮的真实对话。
+            appendMemories(text, "老人曾明确表达的偏好",
+                    summary.explicitPreferences(),
+                    "这些是老人曾明确表达的偏好，附带更新时间；如果时间较久或与当轮要求不一致，"
+                            + "需要询问现在是否仍适用。");
+            appendMemories(text, "系统根据已确认预约沉淀的历史事实",
+                    summary.bookingHistory(),
+                    "这些是系统自己归纳出来的历史事实，不是老人明确说过的偏好：只说明最近一次"
+                            + "确认预约的是什么，不代表他以后还想这样，同样要按更新时间复核。");
+            if (summary.unverifiableCount() > 0) {
+                text.append("另有 ").append(summary.unverifiableCount())
+                        .append(" 条来源不明的记录，我没有采用。");
+            }
+        }
+        return text.append(currentDraftNote(state)).toString();
+    }
+
+    private void appendMemories(StringBuilder text, String title, List<MemoryStore.Memory> items,
+                                String note) {
+        if (items.isEmpty()) return;
+        String lines = items.stream().limit(MEMORY_LIST_LIMIT)
+                .map(memory -> "（" + memory.kind() + "）" + memory.content()
+                        + "（来源 " + memory.source() + "，更新于 " + memory.updatedAt() + "）")
+                .collect(java.util.stream.Collectors.joining("；"));
+        text.append(" ").append(title).append("：").append(lines).append("。").append(note);
+    }
+
+    /**
+     * 当轮要求：当前办理草稿里已经定下来的条件。
+     *
+     * <p>它不在库里，也不在记忆里——是这一轮对话里老人自己说的。摆出来的唯一目的是让模型
+     * 明白优先级：当前要求压过明确偏好，明确偏好压过统计倾向。少了这一段，
+     * 「上次去的那家还考虑吗」就可能在老人已经改口说「这次去市二院」之后还往回劝。
+     */
+    private String currentDraftNote(ConversationState state) {
+        List<String> parts = new ArrayList<>();
+        if (notBlank(state.hospital)) parts.add("医院=" + state.hospital);
+        if (notBlank(state.department)) parts.add("科室=" + state.department);
+        if (state.date != null) parts.add("日期=" + state.date.format(DATE_LABEL));
+        if (state.selectedSlot != null && state.selectedSlot.time() != null) {
+            parts.add("时间=" + state.selectedSlot.time().format(TIME_LABEL));
+        } else if (state.requestedTime != null) {
+            parts.add("时间=" + state.requestedTime.format(TIME_LABEL));
+        } else if (notBlank(state.timePreference)) {
+            parts.add("时段=" + ("MORNING".equals(state.timePreference) ? "上午" : "下午"));
+        }
+        if (parts.isEmpty()) {
+            return " 本轮办理中还没有确定医院、科室、日期或时间；这些历史与统计只是候选，"
+                    + "要不要用由老人自己决定。";
+        }
+        return " 本轮办理中已经明确的条件（优先级最高，历史与统计都不能覆盖它）："
+                + String.join("、", parts) + "。";
+    }
+
+    /** 事实标签里没有一个字能读成「人已经去过了」。 */
+    private String factLabel(ProfileQueryService.FactStatus status) {
+        return switch (status) {
+            case CONFIRMED_UPCOMING -> "已预约，还没到日子";
+            case CONFIRMED_PAST -> "已预约，日子已经过了";
+            case CANCELLED -> "已取消";
+            case UNKNOWN -> "状态未知";
+        };
+    }
+
+    private String itemLabel(ProfileQueryService.Tendency.Dimension dimension) {
+        return switch (dimension) {
+            case HOSPITAL -> "最常预约的医院";
+            case DEPARTMENT -> "最常预约的科室";
+            case PERIOD -> "预约时段偏";
+        };
+    }
+
+    private String tendencyLabel(ProfileQueryService.Tendency tendency) {
+        return switch (tendency.dimension()) {
+            case HOSPITAL, DEPARTMENT -> tendency.value();
+            case PERIOD -> "MORNING".equals(tendency.value()) ? "上午" : "下午";
+        };
+    }
+
+    /** 工具留痕里只落结构化字段，不落整段话术：留痕是给排查看的，不该成为第二条返回通道。 */
+    private Map<String, Object> historyTrace(ProfileQueryService.History history) {
+        return Map.of("total", history.total(),
+                "confirmedTotal", history.confirmedTotal(),
+                "returned", history.facts().size(),
+                "facts", history.facts().stream().map(fact -> Map.of(
+                        "date", fact.date().toString(),
+                        "time", fact.time().toString(),
+                        "hospital", fact.hospital(),
+                        "department", fact.department(),
+                        "status", fact.status().name())).toList(),
+                "tendencies", history.tendencies().stream().map(item -> Map.of(
+                        "dimension", item.dimension().name(),
+                        "value", item.value(),
+                        "count", item.count())).toList());
+    }
+
     @Override
     String elderName(String userId) {
         return catalog.user(userId).map(CareCatalogRepository.UserProfile::name).orElse(userId);
@@ -5177,25 +5388,38 @@ public class FollowupAgentService extends ConfirmationSupport {
     private static final String MEMORY_PERIOD = "habit.period";
 
     /**
-     * 把这次办成的偏好记下来，下一段对话开始时就认得他。
+     * 把这次办成的事记下来，下一段对话里模型按需查得到。
      *
      * <p>只在确认门禁放行、预约真的写进库之后调用——记的是「实际发生的事」，
      * 不是老人在某一轮随口提过的想法。模型不参与、前端也不能调，它只是已确认动作的副产品。
      *
-     * <p>时段按号源的实际时间归纳成上午/下午。记「上午」而不是「9:30」：
-     * 号源是时刻，偏好是习惯，把时刻当成习惯下次会去推一个并不合适的具体时间。
+     * <p><b>措辞必须是中性的历史事实，不能写成「常去的医院是……」「习惯上午复诊」。</b>
+     * 这里记的是**一次**已确认的预约，一次不等于习惯；写成「常去」，模型下一轮就会拿它
+     * 去劝老人「您常去这家，还约这儿吧」——那句话没有任何事实支撑，而且它已经绕开了
+     * 「一次预约不能自动成为长期习惯」这条要求。要谈「常去」，只能由
+     * {@link ProfileQueryService} 在真的统计出足够多次数之后说出来。
+     *
+     * <p>时段按号源的实际时间归纳成上午/下午，而不是记具体时刻：号源是时刻，
+     * 把「9:30」当成结论下次会去推一个并不合适的具体时间。
+     *
+     * <p>{@code kind} 一律用 {@link MemoryStore#KIND_HISTORY}：这三条都是同一类东西——
+     * 系统从已确认预约里沉淀的历史信息，没有一条是老人明确要求的偏好。原来给时段标的
+     * {@code PREFERENCE} 与事实不符，会让读取侧的同一条记录有两个互相矛盾的标签。
      */
     @Override
     void rememberBookingPreferences(ConversationState state) {
         Slot slot = state.selectedSlot;
         if (slot == null) return;
-        memories.remember(state.userId, MEMORY_HOSPITAL, "HABIT",
-                "常去的医院是" + slot.hospitalName(), "CONFIRMED_BOOKING", state.id);
-        memories.remember(state.userId, MEMORY_DEPARTMENT, "HABIT",
-                "常去的科室是" + slot.department(), "CONFIRMED_BOOKING", state.id);
-        memories.remember(state.userId, MEMORY_PERIOD, "PREFERENCE",
-                "习惯" + (slot.time() != null && slot.time().getHour() < 12 ? "上午" : "下午") + "复诊",
-                "CONFIRMED_BOOKING", state.id);
+        memories.remember(state.userId, MEMORY_HOSPITAL, MemoryStore.KIND_HISTORY,
+                "最近一次确认预约的医院是" + slot.hospitalName(),
+                MemoryStore.SOURCE_CONFIRMED_BOOKING, state.id);
+        memories.remember(state.userId, MEMORY_DEPARTMENT, MemoryStore.KIND_HISTORY,
+                "最近一次确认预约的科室是" + slot.department(),
+                MemoryStore.SOURCE_CONFIRMED_BOOKING, state.id);
+        memories.remember(state.userId, MEMORY_PERIOD, MemoryStore.KIND_HISTORY,
+                "最近一次确认预约的时段是"
+                        + (slot.time() != null && slot.time().getHour() < 12 ? "上午" : "下午"),
+                MemoryStore.SOURCE_CONFIRMED_BOOKING, state.id);
     }
 
     private String knownFacts(ConversationState state) {
@@ -5229,21 +5453,12 @@ public class FollowupAgentService extends ConfirmationSupport {
                 "；预约草稿缺失字段=" + draftMissingFields(state) +
                 "；时段偏好=" + valueOrPending(state.timePreference) +
                 "；数据库可用号源=" + state.alternatives.stream().map(this::slotLabel).toList() +
-                "；当前推荐号源=" + slotLabel(state.recommendedSlot) +
-                memoryNote(state);
-    }
-
-    /**
-     * 长期记忆拼成的一小段。没有记忆时是空串——那时提示词与没有这个功能时逐字相同，
-     * 老会话和既有测试都不会因为多出一个空段而漂移。
-     *
-     * <p>措辞上明确它是「上次办过的事」，不是「这次已经定好的事」：模型看到这段只该少问一句，
-     * 不该替老人做主。真正写库仍然只能由确认门禁放行。
-     */
-    private String memoryNote(ConversationState state) {
-        String digest = memories.digest(state.userId);
-        return digest.isEmpty() ? ""
-                : "；这位老人以前办过的复诊情况（仅供参考，不要当成这次已经定好的安排，拿它少问一句就好）=" + digest;
+                "；当前推荐号源=" + slotLabel(state.recommendedSlot);
+        // 这里<b>不</b>再拼长期记忆。原来这里挂过一句 memories.digest(state.userId)，
+        // 它把全部 active 记忆（不分来源）原样塞进每一轮提示词：一条系统自己归纳的
+        // 「常去的医院是市一院」到了模型眼里和老人亲口说的话没有区别，来源分类在上游
+        // 分得再干净也没有用。画像现在统一走 profile.memorySummary 按需查——
+        // 查不到就没有，查到了也带着来源与更新时间。默认上下文里一个字的记忆都没有。
     }
 
     /**

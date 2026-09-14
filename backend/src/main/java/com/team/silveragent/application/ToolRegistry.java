@@ -156,6 +156,29 @@ final class ToolRegistry {
         register("care.notifications", "查询发给当前操作者的协同通知；只读，仅家属/志愿者可用",
                 List.of(), AgentOrchestrator.Route.QUERY_CARE_NOTIFICATIONS,
                 AgentRole.FAMILY, AgentRole.VOLUNTEER);
+        // 画像与预约历史：为什么是新工具而不是扩展 appointment.queryMine——
+        // queryMine 只看 status='CONFIRMED'，服务于「要取消哪一条、去哪一家、怎么走」的对象选取，
+        // 而且模型调用它会走既有业务流程（读 facts、可能记住被打断的任务）。本轮的语义是
+        // 「这个人的预约历史事实」，要带已取消、要能按时间范围筛、要能区分「还没到日子」和
+        // 「日子已经过了」。两条语义不同，硬扩 queryMine 会改到取消与澄清链路的模型行为上，
+        // 所以单独开一条，各查各的。
+        //
+        // limit 刻意不做成参数：一次摆几条由 Java 定（见 ProfileQueryService.HISTORY_LIMIT），
+        // 模型能决定的只是筛选条件。返回条数上限这种事交给模型，就等于把「会不会把上下文灌爆」
+        // 交给模型判断。
+        register("appointment.history", "查询当前服务对象的预约历史事实（含已取消）；只读，"
+                        + "服务对象身份由 Java 注入，模型不得指定；只表示预约过，不代表已经到院或就诊过",
+                List.of(ToolArgument.text("hospital", false, "只看这家医院的预约"),
+                        ToolArgument.text("department", false, "只看这个科室的预约"),
+                        ToolArgument.enumeration("status", false, List.of("CONFIRMED", "CANCELLED"),
+                                "只看已确认或只看已取消；不给就都看"),
+                        ToolArgument.date("from", false, "只看这一天及以后的预约，ISO 日期"),
+                        ToolArgument.date("to", false, "只看这一天及以前的预约，ISO 日期")),
+                AgentOrchestrator.Route.QUERY_APPOINTMENT_HISTORY);
+        register("profile.memorySummary", "查询当前服务对象的长期记忆摘要（明确偏好与预约沉淀的历史信息分开返回）；"
+                        + "只读，服务对象身份由 Java 注入，模型不得指定",
+                List.of(),
+                AgentOrchestrator.Route.QUERY_PROFILE_MEMORY);
     }
 
     private void register(String name, String description, List<ToolArgument> arguments,

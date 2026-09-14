@@ -77,7 +77,7 @@
 
 ### 现状（2026-09-13 已实施 5B，2026-09-14 审查后简化为结构性规则：查询参数与办理草稿分离）
 
-> **这一节只完成了 `appointment.querySlots` 与 `appointment.queryNearbySlots` 两个工具的模型调用只查不改，不代表所有 READ_ONLY 工具都已收口。**其余工具的「查询条件 vs 会话状态」尚未按同一口径逐个核对——例如 `hospital.search` 仍可能更新会话里的解析状态。
+> **号源那两个工具（`appointment.querySlots` / `appointment.queryNearbySlots`）之外，2026-09-14 的 8A 又把 `appointment.history` 与 `profile.memorySummary` 两条新的只读工具按同一口径建起来并核对过**（见下方「画像与预约历史的受控读取」）。**但这不是「所有 READ_ONLY 工具都已收口」**：`hospital.search` / `hospital.list` / `department.search` 一类目录工具仍可能更新会话里的解析状态，尚未逐项核对。
 
 - **已定死的口径**：通过 `ToolContract` 校验的显式参数必须决定本次查询条件；参数省略时才允许沿用当前会话里已有且明确的条件；显式参数非法、医院/科室不唯一或条件不足时停下澄清，**不得退回旧条件查询后装作回答了本次问题**。不采用「草稿非空就忽略工具参数」的兜底。
 - **查询条件与办理草稿分开**：查另一日期或另一家医院，不得连带修改待办理预约或仍有效的确认卡。单工具（`appointment.querySlots`）与多工具（`CALL_READ_TOOLS`）路径共用同一套参数解析与查询口径，判据是工具名取参数，不是各写一份。
@@ -87,7 +87,18 @@
 - **一次查询不能替老人表态**：查附近日期不再自动置 `state.acceptAlternative`；「查医院 → 查号源」链路第一段（`RESOLVE_HOSPITAL` / `RESOLVE_DEPARTMENT`）同样由 `withoutDraftWrites` 挡住。
 - **提示词侧同时收口**：`AgentSystemPrompt` 明确「只读查询条件写对应工具的 arguments；facts 只表示用户明确要求写入或修改办理草稿的事实；只是询问别处时不要同时写进 facts；查询结果不得说成已经预约、已经改期、已经取消」。JSON 规划格式、字段与工具清单不变。**提示词是提醒，不是护栏**，Java 侧这条结构性规则独立成立。
 - 验证：`SlotQueryArgumentTests` 17 项、`VoiceFirstP1Tests` 7 项、`AgentRuntimeRoutingTests` 17 项共 41 项全绿；邻近的 `LlmConversationPlannerTests` / `VoiceFirstP0Tests` / `DemoScenarioTests` / `ClarificationFlowTests` / `MultimodalImageTurnTests` / `AgentSystemPromptQueryFactsTests` 共 51 项亦全绿。后端全量在本轮改动前为 497 项全绿，**本轮未重跑全量**。真实模型（deepseek-v4-flash）A/B 见 `records/PROGRESS.md` 同日条目（其中「草稿采纳」那条已按最终规则失效，未重跑）。决定见 DEC-025，踩坑见 `records/PITFALLS.md` 同日三条。
-- **仍未完成**：`modelSuggestedReplies` 对 `SELECT_SLOT` / `ASK_DATE` / `ASK_HOSPITAL` 等阶段返回空按钮；除上述两个号源工具外，其余只读工具的「只查不改」尚未逐项核对（`hospital.search` 仍可能更新会话里的解析状态）；整轮超时与工具调用上限仍是配置项，未实现。
+- **仍未完成**：`modelSuggestedReplies` 对 `SELECT_SLOT` / `ASK_DATE` / `ASK_HOSPITAL` 等阶段返回空按钮；目录类只读工具（`hospital.search` / `hospital.list` / `department.search` / `department.list`）的「只查不改」尚未逐项核对（`hospital.search` 仍可能更新会话里的解析状态）；整轮超时与工具调用上限仍是配置项，未实现。
+
+### 画像与预约历史的受控读取（2026-09-14 已实施 8A）
+
+本节对应第 7 节「画像」的落地。两条新工具**都只读、都不带 intent 映射**（参数写坏的调用按 intent 回退时不会落到它们上，宁可回绝也不装作答了）。
+
+- **工具**：`appointment.history`（可按 `hospital` / `department` / `status` / `from` / `to` 过滤，**不含 `limit` 参数**——摆几条由 Java 定，`ProfileQueryService.HISTORY_LIMIT = 5`）；`profile.memorySummary`（无参数，返回明确偏好与预约沉淀分开两摞）。**为什么不在 `appointment.queryMine` 上扩**：它只看 `status='CONFIRMED'`，服务于「要取消哪一条、去哪一家、怎么走」的对象选取，且模型调用它走既有业务流程（读 facts、可能记住被打断的任务）；本轮要的是「这个人的预约历史事实」——带已取消、能按时间范围筛、区分「还没到日子」和「日子已经过了」。两条语义不同，硬扩会改到取消与澄清链路的模型行为上。
+- **身份由 Java 注入，模型不得传 `userId`。**`ProfileQueryService.requireReadable(actorUserId, actorRole, subjectUserId)`：代办（`actorRole.isCaregiver() && subject != actor`）必须 `CareService.bound(actor, subject)` 为真，否则抛 `IllegalArgumentException(REFUSED)`；本人只能读本人。**越权与「这个人根本不存在」返回逐字相同的 `REFUSED`**，否则拒绝语本身就成了「库里有没有他」的探针；拒绝时**一条 SQL 都不执行、一条留痕都不落**。
+- **四类信息分开，不混成一个「用户偏好」**：当轮要求（草稿里已有的医院/科室/日期/时间，Java 单独一段并标明「优先级最高」）、明确偏好（`MemoryStore` 中 `SOURCE_USER_STATED`）、最近预约事实（`FactStatus` 四值：`CONFIRMED_UPCOMING` / `CONFIRMED_PAST` / `CANCELLED` / `UNKNOWN`）、统计倾向（扫已确认预约聚合出的医院/科室/时段，`confirmedTotal >= 2` 才出，且每一条都标明「是多次记录形成的统计，不是老人明确说过的偏好」）。优先级：当轮要求 > 明确偏好 > 统计倾向。
+- **只能说「预约过」**：Java 侧只产出纯事实标签（`已预约，还没到日子` / `已预约，日子已经过了` / `已取消` / `状态未知`），刻意不产出「去过 / 看过 / 就诊过 / 到院」这类词；措辞红线写在 `AgentSystemPrompt`：一条记录不能说「您经常去这家医院」，预约成功不等于已经到院。
+- **只读是结构性的**：两条走 `answerReadOnly` —— 不推进阶段、不动 `alternatives` / `selectedSlot`、不改草稿、确认卡原样带回；工具结果不回写草稿，用户下一轮明确说「这次还选它」时才走正常业务动作。
+- 验证：新增 `ProfileReadTests` 19 项（覆盖要求的 17 条），后端全量 **517 项 0 失败**。真实模型（deepseek-v4-flash，独立 8099 + 内存 H2）四个场景见 `records/PROGRESS.md`。决定见 DEC-026，遗留风险见 `records/PITFALLS.md`。
 
 ## 6. 数据读取范围（目标权限矩阵，不代表现在全部开放）
 
@@ -122,6 +133,8 @@
 临近午夜才确认时，卡片上的绝对日期不自动移动；业务状态或用户相对日期意图已变化需要重新确认。历史记录时区迁移先核实旧字段语义，不直接把所有时间加八小时。
 
 ### 画像
+
+> **现状（2026-09-14 已实施 8A，只读那一半）**：受控读取已落地——`appointment.history` + `profile.memorySummary` 两条只读工具、身份由 Java 注入、`care_relations` 越权拒绝、字段白名单与条数上限、四类信息分开标注。**写入侧没动**：本轮不做偏好保存/修改/忘记，不做完整推荐排序，不自动选医院/科室/号源。本节其余内容仍作为后续细化的依据。**当时记下的两处张力已在同日修复轮里修掉**：`knownFacts` 不再挂 `memoryNote`（默认上下文里不再注入任何未经来源分类的记忆，画像一律经 `profile.memorySummary` 按需读取），`MemoryStore` 的写入措辞改为中性的「最近一次确认预约的医院是 X」并用 `KIND_HISTORY` 标注（`digest` 保留但已降级为「新代码不要用」）。修复轮的三处改动与判断依据见 `records/PROGRESS.md` 与 `records/PITFALLS.md` 的同日条目。详见上一节「画像与预约历史的受控读取」。
 
 复用 MemoryStore，区分：用户明确偏好、最近预约事实、统计倾向、当轮临时要求。给每条来源、时间、可撤销标识；一次预约不能自动说“您一直喜欢这家医院”。用户当前明确要求优先于旧偏好。
 

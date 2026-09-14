@@ -121,7 +121,7 @@ export function ProfileView({ onNavigate, largeText, onLargeTextChange, autoSpea
       )}
 
       {memories !== null && !memoriesError && memories.length === 0 && (
-        <p className="px-5 py-6 text-base leading-8 text-muted-foreground">助手还没记住什么。等您办成一次复诊预约，它会记下常去的医院和科室。</p>
+        <p className="px-5 py-6 text-base leading-8 text-muted-foreground">助手还没记住什么。等您办成一次复诊预约，它会记下最近一次确认预约的医院和科室，您可以随时让它忘记。</p>
       )}
 
       {memories !== null && !memoriesError && memories.length > 0 && (

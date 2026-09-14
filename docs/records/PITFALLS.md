@@ -350,3 +350,12 @@
 - 测试里的连带修正：把「`arguments={}` → `NO_SLOT` + `SELECT_SLOT` 按钮」当成正确行为的用例改掉（那是旧实现的产物，不是期望），换成「阶段与草稿原样不动、不出现代表草稿已推进的选择按钮」，并补一条反面对照——非模型的按钮流程仍要能写进草稿、仍要摆出 `SET_PERIOD` / `SELECT_SLOT`，免得把预约办理入口一起收窄掉。
 - 结论：**给「只读出口」定分界时，判据要落在「谁发起的」而不是「带了什么参数」。**参数是内容、是这一次查什么；发起方才是权限、是这一轮能不能改状态。把两者混在一处，模型少写一个字段就能把写路径重新打开——而它少写一个字段是完全正常的用法。
 - 范围边界（这一轮同时收窄了措辞）：本轮只做到 `appointment.querySlots` 与 `appointment.queryNearbySlots` 的模型调用只查不改。其余只读工具尚未逐个按同一口径核对——`hospital.search` 仍可能更新会话里的解析状态，所以**不能**写成「所有 READ_ONLY 工具都已收口」。
+
+## 2026-09-14 新读取把记忆按来源分了类，可提示词里那条老路仍把全部记忆原文塞给模型
+
+- 现象：8A 新加的 `profile.memorySummary` 仔细按来源把记忆分成「明确偏好（`SOURCE_USER_STATED`）」「预约沉淀（`SOURCE_CONFIRMED_BOOKING`）」「来源不明（只计数、不外带内容）」三摞，测试也据此断言。但同一轮里，**提示词中仍然出现了来源不明那条记忆的原文**——`ProfileReadTests.explicitPreferenceBookingFactTendencyAndCurrentRequestAreToldApart` 里对 `gateway.lastToolPhasePrompt` 的 `doesNotContain("来路不明的一条记录")` 断言失败。
+- 根因：**这不是新读取的结论，是一条 8A 之前就有的旁路。**`knownFacts(state)` → `memoryNote(state)` → `memories.digest(state.userId)` 会把**全部 `active=TRUE` 的记忆（不分来源）**用「；」拼成一句，塞进证据的 `appointmentDraft` 字段，原文是「这位老人以前办过的复诊情况（仅供参考，不要当成这次已经定好的安排，拿它少问一句就好）＝…」。它比新读取更早、路径更短，所以新读取分得再干净，也挡不住同一个模型在同一轮的提示词里读到原文。
+- **这不是「将来才会出问题」，它当时就已经在违反要求了。**8A 初版把它记成「潜在风险、目前还不会产生实际问题」，理由是唯一写入点只写 `SOURCE_CONFIRMED_BOOKING`、分类不会打架——这个判断是错的，看的是「分类会不会打架」，而真正的要求是「一次预约不能自动成为长期习惯」。而 `rememberBookingPreferences` 恰恰在**只有一次预约**时就写下「常去的医院是……」「常去的科室是……」「习惯上午复诊」，`digest` 又把这三句原样送进每一轮提示词。一次预约 → 一条「常去」→ 模型张口就说「您常去这家」。旁路当场就在生效，跟 `SOURCE_USER_STATED` 有没有写入路径没有关系。
+- 修法（本轮已做）：`knownFacts(state)` 里**删掉** `memoryNote(state)`，默认上下文里一个字的记忆都没有，画像统一走 `profile.memorySummary` 按需查（带来源、带更新时间、支持越权拒绝）；`MemoryStore.digest` 保留但降级成「不是主模型的画像入口，新代码不要用」；写入措辞改成中性历史事实——「最近一次确认预约的医院是……」，`kind` 统一成新增的 `MemoryStore.KIND_HISTORY`（原来给时段标的 `PREFERENCE` 会让同一条系统归纳的记录带上「这是偏好」的标签）。
+- 测试里的处理：**没有把断言挪到 `ProfileQueryService` 的返回值上绕开**。`ProfileReadTests` 新增 `oneBookingNeverReachesTheModelLabelledAsAHabit`，真走一遍办理+确认（确认后确实写了三条记忆），再开一段新对话，断言**模型收到的每一条非 system 消息**里既没有「常去」「习惯」，也没有那三条记忆的原文；`UserMemoryTests` 新增 `oneBookingIsStoredAsAHistoryFactNotAsAHabit`，在存储层断言措辞里不出现「常去」「习惯」、类别不是偏好。只有系统提示词自己带着「不许说常去／习惯」这条禁令，所以断言过滤掉了 system 消息——禁的是模型把一次预约当习惯说出去，不是禁止提示词教它别说。
+- 结论：**入口收窄了，不等于同一份提示词里没有别的入口；「分类不会打架」也不等于「要求已经满足」。**做「按来源分类」这类读取侧改造时，要连带查一遍「同一轮还会不会有别的代码把原始数据拼进去」；判断一条旁路算不算问题，要拿要求的原文去量，而不是拿「新写的这段逻辑会不会被它干扰」去量。这两条各自都能让一个当场生效的缺陷被写成「潜在风险」。

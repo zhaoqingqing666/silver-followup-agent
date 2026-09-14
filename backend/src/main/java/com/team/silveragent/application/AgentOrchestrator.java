@@ -49,6 +49,10 @@ final class AgentOrchestrator {
         QUERY_CARE_TIMELINE, QUERY_CARE_NOTIFICATIONS,
         // 家属/志愿者给长辈留一条提醒：落到长辈自己的备忘里，反向通知。
         REMIND_ELDER,
+        // 画像与预约历史的受控只读查询：模型问「上次那家还考虑吗」之前，得先真的查过库。
+        // 两条都只读，不走任何写链路，也不带 intent 映射——参数写坏的调用按 intent 回退时
+        // 不会落到这里（见 AgentRuntime.rejectedByIntent），宁可回绝，也不装作答了。
+        QUERY_APPOINTMENT_HISTORY, QUERY_PROFILE_MEMORY,
         // 模型提议了一个执行不了的工具（未注册、无权限或写工具），它给的 intent 也归不到任何业务链路：
         // 由 Java 明确回绝，不用模型的话术。单独成一个路由，是因为 DIRECT_ANSWER 会 pauseActiveTask，
         // 把正在办理的预约流程停掉；这里只是“这条工具我不认”，不该动任务状态。
