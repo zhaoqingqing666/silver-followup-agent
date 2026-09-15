@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { CalendarDays, Check, ChevronLeft, ChevronRight, Clock3, Hospital, LoaderCircle, Pencil, Route, TriangleAlert, UsersRound } from 'lucide-react';
 import { PageHeader } from '@/components/common/page-header';
 import { getAppointments } from '@/lib/appointment-api';
+import { doctorLine } from '@/lib/appointment-display';
 import { cancelElderBooking, createBooking, getBookingDepartments, getBookingHospitals, getBookingWindows, modifyBooking, setBookingAccompany } from '@/lib/care-api';
 import type {
   AppointmentSummary,
@@ -580,9 +581,16 @@ export function CareBookingView({ caregiverId, elder, onBack, onFinished }: {
                           key={option.slotId}
                           type="button"
                           onClick={() => { setDate(window.date); setSlot(option); setSubmitError(''); }}
-                          className={`flex min-h-12 items-center gap-1.5 rounded-2xl border px-4 text-base font-bold transition active:scale-95 ${picked ? 'border-primary bg-primary text-white' : 'bg-white text-foreground'}`}
+                          aria-label={`${formatHM(option.time)} ${doctorLine(option)}`}
+                          className={`flex min-h-12 flex-col items-start justify-center gap-0.5 rounded-2xl border px-4 py-2 text-left transition active:scale-95 ${picked ? 'border-primary bg-primary text-white' : 'bg-white text-foreground'}`}
                         >
-                          <Clock3 className="size-4" aria-hidden="true" />{formatHM(option.time)}
+                          <span className="flex items-center gap-1.5 text-base font-bold">
+                            <Clock3 className="size-4" aria-hidden="true" />{formatHM(option.time)}
+                          </span>
+                          {/* 同一时段可能有两位医生出诊，光看时间分不清——必须把「谁 · 什么号」摆在按钮上 */}
+                          <span className={`text-sm font-normal ${picked ? 'text-white/90' : 'text-muted-foreground'}`}>
+                            {doctorLine(option)}
+                          </span>
                         </button>
                       );
                     })}

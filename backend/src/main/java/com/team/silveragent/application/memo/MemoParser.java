@@ -1,5 +1,7 @@
 package com.team.silveragent.application.memo;
 
+import com.team.silveragent.application.BusinessClock;
+
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
@@ -26,8 +28,10 @@ public final class MemoParser {
     /**
      * 演示按中国时区(Asia/Shanghai)起算“现在/今天”：备忘存的是无时区钟点，
      * 中国时区浏览器按本地解析后与真实北京钟点一致（开发容器本身是 UTC）。
+     *
+     * <p>时区字面量只有 {@link BusinessClock#DEMO_ZONE} 一处，号源链路用的是同一份。
      */
-    private static final ZoneId DEMO_ZONE = ZoneId.of("Asia/Shanghai");
+    private static final ZoneId DEMO_ZONE = BusinessClock.DEMO_ZONE;
     /** memos.text 列上限(VARCHAR 300)，超出截断以免插库报错。 */
     private static final int MAX_TEXT = 300;
 
@@ -518,6 +522,17 @@ public final class MemoParser {
             case '日', '天' -> 7;
             default -> -1;
         };
+    }
+
+    /**
+     * 从一句口语里抽「几点几分」：阿拉伯数字（7点 / 7点半 / 7:30）与中文数字
+     * （七点 / 三点半 / 七点二十五 / 十二点）都认；没写具体钟点返回 {@code null}。
+     *
+     * <p>复诊预约的规则抽取（{@code RuleFactExtractor}）与模型链路的时间兜底都调这一份，
+     * 不另写钟点正则——越界口径那次已经定过规矩：词表写两遍，迟早只剩一份是对的。
+     */
+    public static LocalTime clockIn(String value) {
+        return value == null ? null : clockTime(value);
     }
 
     /** “几点/几点几分”。阿拉伯数字(7点/7点半/7:30)或中文数字(七点/三点半/十二点)。返回 null 表示没写具体几点。 */

@@ -27,6 +27,18 @@ export interface AppointmentSummary {
   arrangedLabel: string | null;
   /** 陪同本次复诊的照护者账号 id；未确认陪同或老人自约为 null。照护端据此显示出发建议。 */
   accompaniedBy: string | null;
+  /**
+   * 出诊医生姓名的**快照**（预约当时的医生，不是现在这条号源的）。
+   * 加医生维度之前建的预约没有这一项，为 null——界面如实显示「医生信息未记录」，
+   * 不替它编一位医生。四项要一起看：它们来自预约行上的同一份快照。
+   */
+  doctorName: string | null;
+  /** 医生职称（主任医师 / 副主任医师 / 主治医师 / 住院医师）；老数据为 null。 */
+  doctorTitle: string | null;
+  /** 号别：NORMAL=普通号 / EXPERT=专家号；老数据为 null。后端以后加新值时前端原样显示。 */
+  slotType: string | null;
+  /** 挂号费，**以分为单位**（后端整数存储，避免浮点误差）；老数据为 null。 */
+  feeCents: number | null;
 }
 
 export interface MaterialItem {
@@ -342,11 +354,24 @@ export interface BookingDepartment {
   location: string;
 }
 
-/** 帮助预约：某个日期下的可选号源。 */
+/**
+ * 帮助预约：某个日期下的可选号源。
+ *
+ * 一个上午时段会同时有两位医生出诊（1 专家 + 1 普通），所以**光有 time 不够**：
+ * 会出现两个一模一样的「09:00」按钮，家属分不清点哪个、也不知道约的是谁。
+ * 医生 / 号别 / 挂号费都取自这条号源本身（不按医生职称推），拼法复用 `doctorLine()`。
+ */
 export interface BookingSlotOption {
   slotId: string;
   /** 如 09:00 */
   time: string;
+  /** 出诊医生姓名；加医生维度之前的旧号源为 null，界面如实显示「医生信息未记录」。 */
+  doctorName: string | null;
+  doctorTitle: string | null;
+  /** 号别：NORMAL=普通号 / EXPERT=专家号；旧号源为 null。 */
+  slotType: string | null;
+  /** 挂号费，**以分为单位**；旧号源为 null。 */
+  feeCents: number | null;
 }
 
 export interface BookingDateWindow {

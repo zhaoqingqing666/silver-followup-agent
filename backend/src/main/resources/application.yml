@@ -96,6 +96,9 @@ management:
 
 demo:
   user-id: ${DEMO_USER_ID:user-001}
+  # 业务时区：「今天 / 现在」的唯一口径（BusinessClock）。容器镜像默认是 UTC，
+  # 单靠 devcontainer 里的 TZ 只是环境兜底；号源链路一律按这里算，别在代码里再写时区字面量。
+  zone: ${DEMO_ZONE:Asia/Shanghai}
 
 health-report:
   weekly:

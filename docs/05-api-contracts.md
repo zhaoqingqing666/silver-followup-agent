@@ -27,9 +27,9 @@ POST /api/agent/messages
 ## 明确按钮操作
 
 POST /api/agent/actions
-请求：{"conversationId":"会话ID","action":"SELECT_SLOT","value":"r-d001-20260916-0900","label":"9月16日 09:00"}
+请求：{"conversationId":"会话ID","action":"SELECT_SLOT","value":"r-doc-d001-01-20260916-0900","label":"9月16日 09:00"}
 按钮使用此接口，不调用模型理解节点；完成 Java 状态处理或工具执行后，可以调用模型回答节点生成用户可读回复。
-label 是可选的用户可读文字；value 可以继续使用 hospitalId、departmentId 或 slotId。号源 id 由后端按 `r-科室-日期-时刻` 生成（如 `r-d001-20260916-0900`），日期跟着今天滚，前端一律回传后端给的原值。
+label 是可选的用户可读文字；value 可以继续使用 hospitalId、departmentId 或 slotId。号源 id 由后端按 `r-医生id-日期-时刻` 生成（如 `r-doc-d001-01-20260916-0900`），日期跟着今天滚，前端一律回传后端给的原值。**2026-09-13 起 id 里嵌的是医生 id 而不是科室 id**（医生 id 形如 `doc-d001-01`，本身就带科室），原因见 DEC-021。
 
 ## 确认关键操作
 
@@ -154,11 +154,22 @@ quickReplies：[{"label":"市第一医院","action":"SET_HOSPITAL","value":"h001
 
 - QUERY_APPOINTMENTS：查询当前用户在 appointments 中的已确认预约。
 - SELECT_APPOINTMENT_TO_CANCEL：value 必须为工具查询返回的 appointmentId；只生成取消确认卡，不直接取消。
-- 事项页的「取消这次复诊」按钮**不调用任何取消接口**，只是把「我想取消这次复诊预约」这句话交给助手页发出（`page.tsx` 的 `pendingAsk`），接下来仍旧走上面这条查询 → 确认卡 → 确认端点的老路。入口可以多，写路径只有一条。
+- 事项页的取消入口有两条，**区别只在「谁来办」，两条都要先确认才写库**：
+  - **「让助手帮我取消」**按钮**不调用任何取消接口**，只是把「我想取消这次复诊预约」这句话交给助手页发出（`page.tsx` 的 `pendingAsk`），接下来仍旧走上面这条查询 → 确认卡 → 确认端点的老路。
+  - **卡片上的垃圾桶按钮**走页内二次确认，确认后直连下面这条取消端点。
 - RESUME_INTERRUPTED：恢复进入查询/取消支线之前的流程节点。
 - CHANGE_DEPARTMENT、CHANGE_TIME：清理受影响的下游选择，再进入对应节点。
 - 自由语言 CONFIRM_ACTION、DENY_ACTION 只有在 AWAITING_CONFIRMATION 状态下有效。
 - “取消当前办理”与“取消已确认预约”是不同路由；后者必须调用个人预约查询工具并经过确认端点。
+
+## 老人端取消预约端点（2026-09-13）
+
+- `POST /api/users/{userId}/appointments/{appointmentId}/cancel`：取消一条已确认的预约，返回取消后的预约视图。
+- 复用 `AppointmentTool.cancel` 那条链，**三个动作是一套**：释放号源 → 关联提醒置 `CANCELLED` → 预约置 `CANCELLED`。**不物理删除**，`materials` / `reminders` 仍挂在原 `appointment_id` 上。
+- 归属与状态由工具内那句 `UPDATE ... WHERE id=? AND user_id=? AND status='CONFIRMED'` 一次校验：不是这位老人的预约、或已经不是「已预约」状态，都拿不到行。
+- 失败映射：工具第一句就是带 `id + user_id + status='CONFIRMED'` 的查询，「记录不存在」「不是这位老人的」「已经取消过」三种情况在那里长得一模一样，都抛 `EmptyResultDataAccessException`（`IncorrectResultSizeDataAccessException` 的子类）→ 400 + 「没有找到这条可以取消的预约，请刷新后再看。」。**故意给同一句话、也不回 404**：要分开说就得先暗示这条记录存不存在，那等于给人一个探测别人预约的口子。`IllegalStateException` 那一支是兜底（查到行之后、UPDATE 之前状态被改），平时走不到。**刻意不 catch 宽泛的 `DataAccessException`**：真故障不该被伪装成「没有这条预约」，否则线上排查会被这行代码骗过去。
+- 这个端点与助手的取消走**同一个业务方法**，不存在第二套取消逻辑（理由见 DEC-020）。
+- `GET /api/users/{userId}/appointments` 口径**没变**：仍按创建时间倒序返回全部记录（含 `CANCELLED`）。事项页与首页是在**读到数据之后**过滤 `CANCELLED` 并按预约时间正序，过滤发生在客户端。
 
 ## 角色、工具白名单与路由（2026-09-11）
 
@@ -277,3 +288,39 @@ quickReplies：[{"label":"市第一医院","action":"SET_HOSPITAL","value":"h001
 - `message` **不是 `reply` 的复制**：`reply`（及 `speechText`）是权威回答，照常进 `conversation_messages`、照常朗读；`notice.message` 只回答「这条为什么长得不一样、要办的事没被打断」。
 - 停在确认卡上时，这一轮**原样带回同一张 `ConfirmationCard`**（`confirmationId` 不变，逐条内容与上一版一致）——老人问完一句药，正要按的「确认办理」不能跟着消失。取消类确认卡（`CANCEL_EXISTING` / `CANCEL_MANAGED`）不在这条路上。
 - 兼容：字段是 record 的第 12 个分量，旧的 11 / 9 / 8 参构造全部保留，缺席即 `null`；旧会话 `last_response_json` 缺这个字段，反序列化照常。
+
+## 医生、号别与挂号费（2026-09-13）
+
+号源加了「医生」这一维：一个科室多名医生，号别与挂号费挂在号源上。本次只做**阶段 1**（数据模型 + 展示，
+不含选医生的交互），决策理由见 DEC-021。
+
+- 新增表 `doctors`：`id`（`doc-<科室id>-<序号>`，如 `doc-d001-01`）、`hospital_id`、`department_id`、`name`、
+  `title`、`good_at`、`introduction`、`slot_type`、`enabled`。**没有出诊星期列**——排班由
+  `RollingAppointmentSlotInitializer` 的纯函数算出来（DEC-022），不落在表上；`doctors` 只回答「这人是谁、
+  放什么号别、挂号费多少」。**每科室 4 位医生**（01 / 04 主任医师 `EXPERT`、02 / 03 主治医师 `NORMAL`），
+  12 个启用科室共 **48** 位。这个是 DEC-026 改过的口径：DEC-021 时是「3 位（01 主任 `EXPERT`、
+  02 / 03 主治 `NORMAL`）、全院 18 位」，DEC-026 每个科室补了一位 04 号主任、并把科室从 6 个扩到 12 个。
+- `appointment_slots` 追加四列：`doctor_id`、`slot_type`、`department_id`、`fee_cents`。
+  另有名额两列（DEC-026）：`capacity`（这一班能接几位，主任 3 / 主治 4）与 `booked`（已占几位）。
+  `available` 自 DEC-026 起是**派生位**（`available = booked < capacity`），对客户端语义不变——仍然回答
+  「还能不能约」。所以**这两列不出现在任何接口返回体里**，前端不感知。`capacity` 的 `DEFAULT 1`
+  是给手工 `INSERT` 号源的场景兜底的（测试与回滚重放），不要去掉。
+- `appointments` 追加四列，存的是**快照**：`doctor_name`、`doctor_title`、`slot_type`、`fee_cents`。
+  号源会被滚动重建，所以预约要自己说得清「当时约的是谁」，不能事后再去 join 号源。
+- `GET /api/users/{userId}/appointments` 的返回体**追加四个字段**（原有字段一个没动）：`doctorName`、
+  `doctorTitle`、`slotType`、`feeCents`。追加可选字段属兼容变更，旧客户端忽略即可。
+- `slotType` 是封闭枚举：`NORMAL`=普通号 / `EXPERT`=专家号。**前端必须给未知值兜底**——原样显示那个值，
+  不是显示成空白。`feeCents` 是**分**（整数存储，避免浮点误差）：普通号 2500（¥25）、专家号 4000（¥40）。
+- 号源 id 拼法改为 `r-<医生id>-<日期>-<时刻>`（如 `r-doc-d001-01-20260916-0900`）。**这是破坏性变更**：
+  所有按老拼法（`r-<科室id>-…`）找号源的地方——回归用例、场景重置、回滚重放——必须一起改。
+- **一个时刻固定一条号源**（DEC-026 起）：一天 4 格（09:00 / 10:30 / 14:00 / 15:30），
+  上午 1 格专家 + 1 格普通、下午同样。DEC-022 到 DEC-025 期间是「上午同一时刻两条」，
+  现在已经不是——**排班形状变了，但「一个时刻可能有多条」的防御不能撤**：客户端仍要按
+  `doctorId` / `slotType` 区分，别写死「一个时刻就一条」。
+  每科室每周只放 3 个工作日的号，周末不放；放号日是**确定性纯函数**算出来的（同一科室 + 日期，
+  任何一次启动都得到同一份）。「下午没有专家号」这条旧约束已由 DEC-026 废止（14:00 现在就是专家格）。
+- 加医生维度**之前**建的预约与号源：预约行上这四个字段为 `null`，前端如实显示「医生信息未记录」，
+  **不替它编一位医生**；没有预约在用的旧号源在启动时被整批重建为带医生的新号源，有预约挂着的那几条保留
+  （删了那条预约会变成读不出来的孤儿）。
+- 阶段 2（选医生的两条路径：`QUERY_DOCTORS` 意图、`SET_DOCTOR` 动作、按号别筛选与推荐、家属代约里的医生选择）
+  **本次未做**。

@@ -28,6 +28,9 @@ frontend/.npm-cache/
 .devcontainer/.env
 !.devcontainer/.env.example
 
+# 助手的项目工作记忆（工具产物，会持续增长；结论另有 docs/records 承载）
+.devcontainer/.workbuddy/
+
 # 内部开发笔记：实测踩坑与易错点，只供团队内部参考，不进仓库
 docs/13-agent-pitfalls.md
 # 内部架构自评：含具体批评与待修项，不进公开仓库

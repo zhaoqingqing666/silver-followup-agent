@@ -33,7 +33,7 @@ class VoiceFirstP0Tests {
     @BeforeEach void resetData() {
         for (String table : List.of("appointments", "reminders", "family_notifications")) jdbc.update("DELETE FROM " + table);
         // 周六本来就没有号源（滚动初始化刻意留出的空档），不用再手动关掉某一天。
-        jdbc.update("UPDATE appointment_slots SET available=TRUE");
+        jdbc.update("UPDATE appointment_slots SET booked=0, available=TRUE");
     }
 
     private AgentTurnResponse action(String id, String action, String value) {

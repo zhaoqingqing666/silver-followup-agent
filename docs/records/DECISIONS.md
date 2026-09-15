@@ -244,3 +244,621 @@
 - 理由三：切包的行为变更风险接近零（只改 `package` 与 `import`，diff 里没有别的行），可以独立验收、独立回滚。切类要动状态流转，风险是另一个量级；而且切类的边界到底怎么划，取决于前端需要什么形状的接口，而前端那波大改还没定。先切包、后切类，等于先用几乎零代价把「找文件」的问题解决掉。
 - 代价：`FollowupAgentService` 仍是 4883 行、占这一层 9408 行的 52%；根包仍然混着编排、门禁、状态、进度四类东西。**分包没有解决这个问题**，只是把周围的邻居归了位——不要把它当成「结构问题已解决」。真要动它，等前端接口定形后按业务切。
 - 代价二：子包之间目前只剩一条真实依赖（`HealthReportService` → `MemoParser` 的演示时区时钟）。那个时钟本来就该独立出来，因为它被塞在 `MemoParser` 里，健康报告才「依赖」备忘。这属于切类范畴，本次不动，只记在这里。
+## DEC-019 「查看办理过程」全程收起，实时状态写进标题
+
+- 日期：2026-09-12。
+- 背景：「查看办理过程」原先办理中强制展开、办完自动收起。展开时它是消息流里最高的一块——实时步骤条加上参数、结果两块等宽代码块——把下面的计划卡、确认卡整体推下去。老人正要点「确认办理」，按钮先被顶走一次，点完又缩回来，位置动两次。
+- 决定：**正文一律默认收起，点标题才展开**，办理中也不代用户打开。办理那几秒的实时感改由标题上一行小字承担：跳动点 + 此刻这一步（`当前几步` 复用同一套中文口径，如「医院目录 · 查询可办理医院」）。角标保留「办理中 / N 步」。
+- 理由（看得见）：实时过程本来就是给想看的人看的，不该对所有人强占屏幕。标题那行小字足够回答「它在不在干活」，想看参数的点一下就有。屏幕阅读器不在这里另开 live region——对话上方那句忙碌提示已经在报同一件事，两处都报会念两遍。
+- 口径不新写：标题那句走的仍是 `describeTrace` ——`live-progress.tsx` 抽出 `asTrace(step)` 供实时步骤与标题共用，避免同一工具在两处说法不同。
+- 标题那行的取舍：最后一步还在跑时说那一步；跑完了就回到思考类事件的最新一句（「正在整理回答…」比已经查完的那一步更贴近此刻）。结果小结（note）一律不上标题——结果没回来时那句是照着空结果算的假话，与 `ToolStep` 同一条规矩。
+- 代价：演示时评委看不到自动长出来的步骤条，要现场点一下标题。验收清单第十一条、`user-manual.md`、`02-pages-and-interactions.md`、`03`、`11`、`设计思路报告.md`、`报名解决方案.md` 中「办理中逐条长出 / 办理结束自动收起」的表述已同步改写。
+
+## DEC-020 事项页保留两条取消入口，页内确认不借道模型
+
+- 日期：2026-09-13。
+- 背景：事项页原先只有一条取消入口——点 **「取消这次复诊」** 把话交给助手，由助手出确认卡。后来给每张已预约卡片加了垃圾桶按钮，就地二次确认后直连 `POST /api/users/{userId}/appointments/{appointmentId}/cancel`，同一页于是出现两条取消入口。这需要先回答「要不要合并成一条」：DEC-002 与 DEC-012 把取消列在 `confirmationId` 门禁里，而页内确认并没有生成 `confirmationId`。
+- 决定一：**两条都留**，定位不同。垃圾桶是「我自己取消」（就地核对、两下办完），大按钮是「让助手帮我取消」（送到助手页、由助手出确认卡、顺带留下那段对话）。
+- 决定二：**页内确认也是确认，不改门禁口径。**`C-02`／DEC-002／DEC-012 约束的是「写操作前必须让用户看清对象和后果」，不是「必须由模型发确认卡」。页内确认框同样列出「取消哪一次（日期、时间、医院科室）」与「号源当场释放、提醒停掉、不可恢复」，确认键与返回键分开。区别只是确认这一环由页面承担，而不是由 `ConfirmationGate` 承担。
+- 决定三：**取消仍是软删，只是不再显示。**`AppointmentTool.cancel` 那条链没动：释放号源 → 关联提醒置 `CANCELLED` → 预约置 `CANCELLED`。事项页与首页只是**过滤掉** `CANCELLED` 的记录，不是把它删掉。
+- 理由（软删）：`materials`、`reminders` 两张表挂在 `appointment_id` 上。硬删要么留孤儿行、要么级联删，两者都会破坏「三个动作是一致的一套」这个性质；而「什么时候取消的」这条痕迹，老人或家属事后问得出来，界面上不想看见它只是一次过滤的事。
+- 理由（为什么要两条而不是一条）：两条路服务的是两种状态。会的、想快点办完的老人，两下点完不必跳页；不放心、想有人陪着再核一遍的老人，走助手那条，屏幕上留着他和助手的那段对话。砍掉后者，省下的是点击次数，代价是把「有人陪着」这件事一起砍了。
+- 代价一：同一页有两个「取消」，必须在**文字上**说清各自由谁办——垃圾桶从纯图标改成图标 + 「取消」，大按钮从「取消这次复诊」改成「让助手帮我取消」+ 副标题「助手会先和您核对一次」。两条都只写「取消」，等于让老人在两个都不敢按的按钮之间选。
+- 代价二：详情区那个按钮会**跳页**。文案必须写明「让助手」，否则点下去突然换页是惊吓，不是帮助。
+- 代价三：配色刻意不做区分。同一张卡里「查看地图与院内指引」才是主操作，一屏只突出一个主按钮（需求映射 A-06），取消归次级；两条路靠文字区分，不靠颜色。
+- 连带：`appointment-api.ts` 新增 `cancelAppointment()`；取消成功后由事项页广播 `silver-agent-appointments-updated`，首页与事项页都挂这个事件，助手确认取消后（`assistant-view.tsx`）也广播同一个事件，所以两边互相同步。`user-manual.md`、`02-pages-and-interactions.md`、`设计思路报告.md`、`报名解决方案.md`、`09-demo-acceptance-checklist.md` 中的相关表述已同步改写。
+- 没做：新接口只服务老人端的页内确认这条；助手那条继续走 `AppointmentTool.cancel`。两个入口共用同一个业务方法，不存在第二套取消逻辑。
+
+## DEC-021 号源加「医生」一维：号别手工指定、id 带医生、老号源整批重建
+
+- 日期：2026-09-13。
+- 状态：已采用。**阶段 1（数据模型 + 数据库字段 + 前端展示）已实施**；阶段 2（选医交互）待定。
+- 背景：号源表原本只有「科室 × 日期 × 时间」三个维度，同一科室一天 4 条号源除了时间没有任何区别，表达不了「普通号 / 专家号」，也没有医生姓名和职称。需求要的是：一个科室多名医生、每条号源可判定号别、能按号别筛选、能按姓名找医生。方案与取舍见 `proposals/医生与号别数据模型方案.md`。
+- 决定一（号源 id）：采用 **B1**，`slotId` 拼法从 `r-<科室id>-<日期>-<时刻>` 改成 **`r-<医生id>-<日期>-<时刻>`**（如 `r-doc-d001-01-20260916-0900`）。医生 id 形如 `doc-<科室id>-<序号>`，本身就带科室，语义比原来更准。
+- 理由一：加了医生之后，同一科室同一时段会有多名医生各一条号源，**id 不带医生就会撞主键**。这是本次唯一会波及回归用例的选择——`DemoSeed`（回归用号的唯一真源）、场景重置、回滚重放都按这个拼法找号源，`RollingAppointmentSlotInitializer.slotId()` 是唯一一处拼法，`DemoSeed.slot()` 直接调用它而不是各写一份。
+- 决定二（号别规则）：`slot_type` **手工指定**在医生行上（`doctors.slot_type`），生成号源时抄到号源行。**不按职称强制推导**——职称只用于前端展示。行业惯例只作为种子数据的填写依据：主任医师 / 副主任医师 = 资深 = 可出专家号，主治医师 / 住院医师 = 中初级 = 普通号。`doctors` 表同时留 `slot_type`，是因为当前没有排班表；将来要表达「同一医生既出普通号又出专家号」，只需加一张排班表覆盖号源那一列，**列不用改**。
+- 决定三（历史号源）：**删除全部无 `doctor_id` 的旧号源，重新生成带医生信息的新号源，不回填默认医生**。
+- 理由三：滚动生成器只插入、不更新，老号源上 `doctor_id` 恒为 `NULL`。回填（按科室补一个「排序第一名」医生）会造出一批「其实没有这个号」的假号源，与仓库「不虚构任何内容」的约定冲突；号源本来就是滚动生成的演示数据，删了不心疼，也不会留下半新半旧两套。
+- 连带：清理只删**没有预约占用**的旧号源——`doctor_id IS NULL AND 无 appointment 引用` 才删。被预约挂着的旧号源保留（否则会造出孤儿预约），前端对这类老记录如实显示「医生信息未记录」，不替它编一位医生。
+- 决定四（挂号费）：`appointment_slots` 新增 `fee_cents`，**以分为单位用整数存储**（普通号 2500 = ¥25，专家号 4000 = ¥40），演示要讲「专家号更贵」这件事。整数存储避免浮点误差。
+- 决定五（号源总量控制）：生成维度从「医院 → 科室 → 工作日 → 时段」改成「医院 → 科室 → **该科室每位医生** → 出诊日 → 4 时段」。每位医生的**出诊星期按序号错开**（01 号 → 周一/周三，02 号 → 周二/周四，03 号 → 周五），因此**同一科室的同一天最多只有一位医生出诊**。〔**该条已被 `DEC-022` 撤销**：排班改成「每科室固定 3 个放号日 + 上午/下午半天制」，同一时刻允许多条号源。下面「理由五」中依赖「一个时刻一条号源」的取舍随之作废，保留原文只为留下演进痕迹。〕
+- 理由五：如果每位医生都排满周一到周五，同一科室同一天会出现 N 条同一时刻的号源，助手「共查到 N 个可预约时段」和家属代约的候选按钮都会被搞成一堆重复项（现有代码全按「一个时刻一条号源」写的）。错开之后既满足「不是每个医生每天都出诊」，又把总量压在几百条（不翻到上千）。每个科室只放 2–3 名医生，同样是为了控量。
+- 周末仍然一律不排号源，保留「当天暂无号源」的演示场景。
+- 快照：`appointments` 存 `doctor_name / doctor_title / slot_type / fee_cents` 四个快照列，不在读取时回连号源——号源是滚动重建的（周末号源会删、过去日期会过期），预约记录必须自己说得清「当时约的是谁、什么号、多少钱」。这与 `reminder_status / family_status / materials` 写死在预约行上的做法一致。
+- 前端：展示口径收在一处纯函数 `doctorLine()`（`frontend/lib/appointment-display.ts`），输出「医生 · 职称 · 号别 · 挂号费」；`slotType` 遇未知值**原样显示**（不显示空白），无医生信息显示「医生信息未记录」。
+- 阶段边界：本次**只做数据模型、数据库字段与前端展示，不改任何交互**（不新增选医生的路由、动作或界面）。阶段 2 才接「助手推荐医生 / 老人直呼姓名」两条路径，落地前先验收阶段 1 的数据模型没选错。
+- 影响：`slotId` 拼法是跨模块约定变更，已在此登记；`INTERFACE_CHANGES.md`、`05-api-contracts.md`、`06-mock-data-design.md`、`13-demo-scenarios-workflow.md` 同步改写。新增 `DoctorSlotModelTests` 把上述约定钉成回归（排班口径重做后扩到 14 例，见 `DEC-022`）。
+
+## DEC-022 排班重做为「每科室固定 3 个放号日 + 上午/下午半天制」，撤销 DEC-021 决定五
+
+- 日期：2026-09-13。
+- 状态：已采用，**数据层已实施**（生成器 / 表 / 种子 / 回归用例）；助手侧的选医交互（阶段 2）仍待定。
+- 背景：DEC-021 决定五为了让「同一时刻只有一条号源」继续成立，把每位医生的出诊星期按序号错开，做到**同一科室同一天只有一位医生在诊**。但新的需求是「选好科室和日期后，列出这天有哪几位医生可约」——一天只有一位医生等于没有可选性；而且「老人指定某天要专家号、当天恰好没有」这条规则缺少一个真实存在的日子来演示。于是排班口径整体重做。
+- 决定一（排班形状）：**每个科室每周固定放 3 个工作日的号**；放号日的**上午排 1 位专家 + 1 位普通**（09:00 / 10:30 各一条），**下午排 1~2 位**（14:00 / 15:30）。周末一律不放，「指定日期没有号源」的演示场景保留。
+- 决定二（为什么是半天制）：上午固定「1 专家 + 1 普通」，保证老人**总能在上午二选一**；下午刻意安排**一天只排普通号**，专门用来演示「指定要专家号、当天没有专家号，改推最近 7 天内的专家号」。
+- 决定三（**撤销**决定五）：DEC-021 决定五「每位医生出诊星期错开、同科室同一天只有一位医生」**作废**，由本决定取代。连带地，「**同一时刻只有一条号源**」这个旧不变量**不再成立**——上午 09:00 天然两条，界面与助手改由「医生 + 号别」区分。原先依赖该不变量的回归用例（`DoctorSlotModelTests` 里那条「同日同时刻只有一条」）已改写为三条：**上午恰好 1 专家 + 1 普通**、**下午同一时刻 ≤ 2 条**、**同一位医生同一时刻不重复**。
+- 决定四（确定性——硬约束）：排班必须**算出来、不随机**。`openWeekdays(departmentId)` / `morningDoctors(...)` / `afternoonDoctors(...)` 都是纯函数，同一个「科室 + 日期」在任何一次启动、任何一台机器上都得到同一份。**禁止 `Math.random()`**：演示要能提前彩排，回归要按号源 id 断言。为此各科室的 3 个放号日**固定、不随周次变化**——曾考虑做成「每周重抽」，但那会让「体检日 = 下周三」「改期日 = 下周五」两个日期坐标随机漂移，连带 `DemoSeedDataTests` 的口播断言与 `MockAppointmentAlternativesTests` 的三天窗口一起变红，代价远超收益。
+- 决定五（两处不能随手改的放号日）：**d001（市第一医院·心内科）的放号日必须含周三**——冲突演示把「下周三体检 + 当天 10:30 心内科号源」钉在那天（`DemoSeedDataTests`）；**必须含周五**——「下周六无号 → 往后三天的附近日期」这条降级路径才取得到号（`MockAppointmentAlternativesTests`）。只有周一/周三填不满这个三天窗口。
+- 决定六（医生编制）：**每科室 3 位医生，全院 18 位**——01 主任医师（`EXPERT`）/ 02 主治医师（`NORMAL`）/ 03 副主任医师（`EXPERT`）；**不再设住院医师**（原住院医师统一并入主治医师）。3 个放号日 × 上午/下午 = 10 个「医生·半天」/周/科室，摊到 3 位医生约 **3~4 个半天**。`data.sql` 少一位时 `RollingAppointmentSlotInitializer.doctorOf()` 直接抛错，不静默少排一班（`d004` / `d005` 本次各补了一位副主任医师）。
+- 决定七（`clinic_weekdays` 列下线）：`doctors.clinic_weekdays` 从表上移除（`schema.sql` 里配 `DROP COLUMN IF EXISTS` 兜旧库）。出诊日是**算**出来的，不落库——落库就又多一处会与生成器不一致的状态，而这类不一致没有便宜的自检手段。
+- 决定八（「医保自付」不新增字段）：口播里那句「医保报销后预估自付」**就是 `fee_cents` 本身**（普通号 ¥25 / 专家号 ¥40），不引入医保类型模型、也不加报销比例字段。演示口径是「这个价就是预估自付」。
+- 连带：`DemoSeed.laterDay()` 从「体检日 +1/+2 天」改成「从体检日起找第一个**心内科与内分泌科同时放号**的日子」；`DemoSeed.slot()` 改用 `RollingAppointmentSlotInitializer.doctorsAt()` 反推号源 id（反推不到直接抛错，不再悄悄编一条）。`RollingUserScheduleInitializer` 的注释同步（体检日仍是「下周三」）。
+- 影响面：`06-mock-data-design.md`（号源一节整段重写）已同步；`INTERFACE_CHANGES.md`、`PITFALLS.md` 追加本次两条坑（H2 `DAY_OF_WEEK` 是 ISO 起点；同名科室在两院各一份，按科室**名字**分组会把两家并成一组）。
+- 没做：**没有**给助手加任何选医交互，也没有改预约漏斗（仍是「科室 → 日期 → 上午/下午 → 候选」）。本次只动数据层。
+
+## DEC-023 撤销 DEC-022 决定六：03 号医生从「副主任医师/EXPERT」改回「主治医师/NORMAL」
+
+- 日期：2026-09-13（同日内再次调整排班口径）。
+- 状态：已采用，**数据层已实施**；助手侧的选医交互（阶段 2）仍待定。
+- 背景：按「号源供给数量占比」原则——**普通号号源总量 ≥ 专家号号源总量、专家号经常约满、普通号相对好挂**——发现 DEC-022 的「1 专家 + 2 普通、下午 [3]/[2]/[1,3]」会让**专家号反而比普通号多**：上午 1:1 锁死 6:6，下午排 1+0+2=3 位专家 vs 0+1+0=1 位普通 → 专家 12、普通 8 = **60% : 40%**，与该原则相反。结构上无法靠调整下午排班来翻盘——只有 1 位普通医生（02 号），上午三天都已经被她占满，下午没有"普通号医生可加排"。**唯一的杠杆是医生编制本身**。
+- 决定一（编制）：**每科室改为「1 位专家 + 2 位普通」**——01 主任医师（`EXPERT`）、02 主治医师（`NORMAL`）、03 主治医师（`NORMAL`）。DEC-022 决定六中的「03 副主任医师/EXPERT」**作废**，由此撤销。
+- 决定二（排班）：上午 `[1, role==1 ? 3 : 2]`（始终 1 位专家 + 1 位普通，02/03 号轮换）；下午全部为普通号——`[2]` / `[3]` / `[2, 3]`。同一时刻最多 2 条号源的不变式不变。**⚠️ 已被 DEC-026 决定三废止**：排班改成「一天 4 格、每格 1 人、号别按格固定（09:00 / 14:00 专家格）」，`morningDoctors` / `afternoonDoctors` 下线。
+- 决定三（数据落地）：03 号医生名字按科室重排（d001-03 陈凤兰、d002-03 黄志强、d003-03 郑国华、d004-03 沈国安、d005-03 范丽娟、d006-03 高志明）；intro / good_at 同步去「副主任」字样；`slot_type` 由 `EXPERT` 改 `NORMAL`。
+- 决定四（数量与占比）：每周每科室 **6 条专家 + 14 条普通 = 30% : 70%**；全院一个月 ≈ 522 条（不变），其中专家 ≈ 157、普通 ≈ 365。**新增 `everyDepartmentHasMoreNormalSlotsThanExpertSlots` 用例**把这比例钉死——任何把 03 号偷偷改回专家、或下午加上专家号的改动都立刻红。
+- 决定五（演示坐标）：`d001` 下周三（role1）上午 `[1, 3]` 第一位仍是 01 号主任医师（`EXPERT`），**冲突演示 / 体检冲突 / 普通办理等所有 `DemoSeed.*Slot()` 用例的医生指向和号别都成立**，不需要改任何一个演示文本。
+- 决定六（顺带收益）：下午全部为普通号，「老人指定日期要专家号、当天下午没有」可以直接在**开放日**上演示，不必再绕到不排班的日期——这条规则的演示素材更真实。
+- 影响面：`06-mock-data-design.md` 排班表重写、`data.sql` 表头注释改写、`RollingAppointmentSlotInitializer` 类 Javadoc 与 `MAX_DOCTORS_PER_DEPARTMENT` 注释同步更新；回归用例 `DoctorSlotModelTests` 由 14 例扩到 15 例（新增 1、新更名 1）。全量回归 **359 例，仅余 1 例已知抖动**（`HealthReportTests.aValueWithoutANumberStillGetsCounted`，根因是 `daysAgo=0` 的窗口边界问题，PITFALLS-2026-09-13 已记）。
+- 没做：**没有**触碰助手的选医交互 / 排序规则 / 口播文案；阶段 2 仍待验收后开工。
+
+## DEC-024 推荐未点名时按医生去重上移为共享纯函数；下午专家号加第二道闸门；照护端号源带医生信息
+
+- 日期：2026-09-14。
+- 状态：已采用，已实施；**数据库结构未改**。
+- 背景：业务侧反馈两类问题——① 同一位医生上午坐整班（09:00 / 10:30 各一条），职称排序又让主任医师稳居第一，「最多 2 个候选」会全被同一个人占满，老人看到的是同一位医生重复出现；② 推荐卡片上那一条时段容易被当成该医生的唯一时段。同时排查中发现照护端号源按钮存在一个**真实缺陷**。本决定是这三处的最小改动收口。
+- 决定一（推荐去重上移）：把「未点名医生 → 每位医生只留最靠前一条；点名医生 → 展示该医生全部时段」这条规则上移为 `SlotRecommender.bestPerDoctor(List<Slot>)` **纯函数**，`FollowupAgentService.recommendPeriod` 改调它并删除原私有实现。规则本身不变（原本就在那行三元开关里），变的是**出处唯一**：原先这条规则埋在 4883 行的编排类私有方法里，外部拿不到、也无法单独钉住。
+- 决定二（其它时段提示）：单候选回包时，若该医生当天还有别的可约时段，补一句「还有其他时段」——推荐卡片上的时段只是**该医生的最优时段预览**，不是唯一时段。点击进入详情才展开该医生全部时段。
+- 决定三（下午专家号第二道闸门）：`MockAppointmentTool` 新增 `requireAfternoonIsNotExpert(slotId)`，在 `submit` 与 `reschedule` **写入前**拦截「下午 + EXPERT」。第一道闸门仍是排班侧的 `afternoonDoctors` 只排普通号医生；第二道保证即使绕过排班（脚本 / SQL 插入脏数据），业务层也不接受下午专家号。判断只看号源自身的 `slotType` 与时刻，**不看医生职称**；上下午分界复用 `RollingAppointmentSlotInitializer.NOON`（12:00），不另写字面量——因此这条约束与「下午排几格」无关，是「整个下午」的约束。
+- 决定四（照护端号源带医生）：`CareBookingService.DateWindow.SlotOption` 补 `doctorName / doctorTitle / slotType / feeCents`；前端按钮从「09:00」改为「09:00 / 张建国 主任医师 · 专家号 · 挂号费 ¥40」，拼法复用 `frontend/lib/appointment-display.ts` 的 `doctorLine()`。**这是修真实缺陷**：同一上午两位医生各一条 09:00，原来只给 `time`，页面上并排两个一模一样的「09:00」按钮，家属分不清点哪个（DEC-022 决定三之后「同一时刻只有一条号源」已不再成立）。
+- 决定五（排班时段**保持 4 格**）：上午 09:00 / 10:30、下午 14:00 / 15:30 维持现状，**不**改成需求稿里的 3 格（09:00 / 10:30 / 14:30）。理由：三格无任何业务收益；且下午容量减半（2 格 × 1~2 位医生 = 2~4 条 → 1 格 × 1~2 位 = 1~2 条），单日号源总量从 6~8 掉到 5~6，老人约下午号更难。需求侧真正有价值的那条「下午不放专家号」与格数无关，两方案下都成立（即决定三）。
+- 明确不做（本次刻意保留现状，非疏漏）：
+  1. **不引入 `stock` / `capacity` 容量字段。** 需求稿假设「同一医生 + 同一天 + 同一时段允许 3 条 slot」在本项目**物理上插不进去**——`slotId` 拼法 `r-<医生id>-<日期>-<时刻>` 已含医生，第二条直接撞主键（`DoctorSlotModelTests.noDoctorHasTwoSlotsAtTheSameMoment` 钉着）。故「stock 聚合」没有对应的数据前提，未实现。
+  2. **不改照护端「就诊人名下只保留一个进行中预约」**（`CareBookingService.hasUpcoming()`，`secondBookingWhileUpcomingExistsIsRejected` 钉着）。老人端助手路径本就允许「同一天约不同时段」，两端口径差见「待后续」。
+- 影响面：`SlotRecommender`、`FollowupAgentService`、`MockAppointmentTool`、`CareBookingService`，前端 `types/domain.ts` + `features/care/care-booking-view.tsx`。测试**只新增、未改动任何既有断言**：新文件 `AfternoonExpertGuardTests`（4 例）、`SlotRecommenderTests` 追加 4 例（含「主任医师 + NORMAL 仍是普通号」）、`CareBookingServiceTests` 追加 `windowsCarryTheDoctorSoTheSameMomentCanBeToldApart`（1 例）。
+- 回归：前端 `tsc --noEmit` 0 错误；后端全量 **383 例，仅余 1 例已知抖动**。抖动甄别过程：全量那次挂 `HealthReportTests.sendingWritesOneNotificationToThePrimaryContact:129`（`sent()` 为 false）；单跑该类 4 次得 **2 绿 2 红**，红的那两次换成 `aValueWithoutANumberStillGetsCounted:108`（`text()` 为 null）。同一份代码两次运行间自己翻转、且挂的方法不固定 → 与改动无关。注意本次挂的两个方法**不在** PITFALLS-2026-09-13 原文列举的方法里，但根因同形（造在 `daysAgo=0` 的记录被关在窗口外），「`sent()` 为 false」是同一根因的另一种落点。
+- 待后续（属重构问题，本次不动）：① 照护端「一个进行中预约」与老人端「同一天可约多个时段」的口径差，需产品拍板；② ~~`MockAppointmentTool.submit` 开头那句**会话级幂等**查询（按 `conversation_id + user_id + status=CONFIRMED`）会让「同一段会话里先约 09:00 再约 10:30」时 `checkDuplicate` 放行、`submit` 却返回旧预约 id——确认卡显示新时间，实际没落库~~ **该条已由 DEC-025 修复**（幂等键补上号源这一维）；③ `FollowupAgentService` 仍是 4830+ 行的编排巨类（DEC-018 遗留）。
+
+## DEC-025 `submit` 的幂等键补上号源：同一次提交才幂等，同一段会话换个时段必须真的新建
+
+- 日期：2026-09-14。
+- 状态：已采用，已实施；**数据库结构未改**；**未改动任何产品规则**。
+- 背景：`MockAppointmentTool.submit` 开头那句查重是
+  `WHERE conversation_id=? AND user_id=? AND status='CONFIRMED'`，找到就直接返回它——等于把
+  「这段会话里已经约过一次」当成了「这一次提交是重复的」。老人端「新建办理」按钮走
+  `restartInCurrentConversation` → `clearDraft`，会把 `state.appointmentId` 清空，所以同一段会话里的
+  第二次办理**确实会走到 `submit`**：前置的 `checkDuplicate`（患者 + 日期 + 时段）明明放行了 10:30，
+  `submit` 却把 09:00 那条原样返回——**页面显示 10:30 办成了，库里还是 09:00 那一条**。
+  这是一处数据一致性 bug，不是口径问题。
+- 决定：幂等键改成「**会话 + 就诊人 + 号源**」（`conversation_id + user_id + slot_id + status='CONFIRMED'`）。
+  换了号源就必须真的新建一条、返回新 id；只有同一次提交重复落下来才返回已存在的那条。
+- 理由（为什么键里放号源）：**一条号源就是一个号**——`appointment_slots` 只有 `available` 布尔列，
+  没有容量字段，扣减是 `WHERE id=? AND available=TRUE` 的二值翻转（见项目长期记忆与 DEC-024）。
+  所以「同一位就诊人 + 同一个号源」只可能是同一次提交，**不会误伤「同一天换个时段再约一次」**——
+  那本来就是两条不同的号源。号源 id 里已含医生 + 日期 + 时刻（`RollingAppointmentSlotInitializer.slotId`），
+  时间维度因此天然包含在键里。
+- 没有新增幂等键，也不需要：全链路**不存在** `requestId` / `toolCallId` 这类能标识「同一次提交」的字段
+  （`CareBookingService` 里那个 `bookingId` 是每次调用现生成的追踪号，标识不了重复请求）。
+  当前这个键已经够用，**不为此加库表字段**。
+- 明确不做：
+  1. **不把「患者 + 日期 + 时段」的冲突判定搬进 `submit`。** 那是
+     `FollowupAgentService.checkDuplicate` 的职责，搬进来等于同一条规则两处实现。本次只修幂等，
+     业务冲突规则原样不动（DEC-024「明确不做」第 2 条也依然不动）。
+  2. **不改照护端 `CareBookingService` 的任何规则**（`hasUpcoming()` / 「名下只保留一个进行中预约」
+     原样；`secondBookingWhileUpcomingExistsIsRejected` 未改动）。照护端走 `booking.book(...)`，
+     每次一个现生成的 `bookingId` 当 `conversationId`，新键在那边与旧键行为一致（都查不到），
+     **那边没有行为变化**。
+  3. 不做「预约表加 request_id 列」这类结构改动。
+- 影响面：生产代码只两处——`MockAppointmentTool.submit`（一句 SQL 换成三条件版 + 注释）、
+  `AppointmentTool` 接口的 `submit` 补一段契约 javadoc（写明幂等键是什么、冲突判定不在这里）。
+- 测试：新增 `AppointmentSubmitIdempotencyTests`（**6 例，全为新增，未改动任何既有断言**）。
+  **修复前先跑过一遍，3 例红**，其中端到端那条复现的正是用户看到的那一幕（第二次也返回
+  `COMPLETED`、库里只有第一条）；修好后 6/6 绿。6 例分别对应：换号源要新建（工具层 / 端到端）、
+  同一次提交重复落下来只建一条、幂等键里带就诊人（换人拿不到别人那条）、
+  同一天同一时刻换成**另一位医生的号源**仍算冲突、以及「两条号源确实分处上下午」的前提自检。
+- 回归：后端全量 **389 例，仅余 1 例已知抖动**
+  （`HealthReportTests.sendingWritesOneNotificationToThePrimaryContact`，PITFALLS 2026-09-13/14 那条
+  时钟边界抖动，本次单跑该类反复翻转已确认与改动无关）。与本次改动相关的既有用例全绿：
+  `SilverAgentApplicationTests` 36/36（含 `concurrentConfirmationWritesOnce` 与
+  `duplicateAppointmentIsExplainedBeforeAnotherConfirmationCanBeCreated`）、
+  `CareBookingServiceTests` 12/12、`CaregiverSessionTests` 11/11、`AfternoonExpertGuardTests` 4/4、
+  `DoctorSlotModelTests` 15/15、`CancelScopeTests` 4/4、`DemoScenarioTests` 5/5。
+- 没做：没有触碰排班、号源生成、照护端代约链路、推荐排序与口播文案；没有改 `schema.sql`。
+
+## DEC-026 科室扩到两院各 6 科；每科室 4 位医生、一天 4 格；号源加名额（capacity / booked）
+
+- 日期：2026-09-14。
+- 状态：已采用，**数据层已实施**（`schema.sql` / `data.sql` / 生成器 / 号源扣减与释放）。
+  **助手交互逻辑未动**——推荐排序、按医生去重、口播文案、候选卡片数量、`SET_PERIOD` 漏斗全部原样。
+  分期方式与 DEC-021 那次一致。
+- 背景（需求侧三件事）：
+  ① 两家医院都要有 心内科 / 神经内科 / 内分泌科 / 骨科 / 呼吸内科 / 消化内科 六个科室；
+  ② 每个科室要有**两位**主任（原来只有一位——只有一位时他 3 个放号日每天都要出诊、一天还坐 2 格，
+     比主治医师忙一倍）；
+  ③ 一天 4 格要**上午、下午都有专家号和普通号**，且同一时段专家号放 3 个名额、普通号放 4 个名额。
+- 决定一（科室：只追加）：`departments` 追加 `d007`~`d012`，补上原来缺的 6 个「(医院, 科室)」组合，
+  于是**两院各 6 科、科室名集合完全相同**。现有 `d001`~`d006`、`loc-*`、`doc-*`、所有测试常量**一个都不动**；
+  `data.sql` 里 `DemoSeed.CARDIOLOGY`(d001) / `ENDOCRINOLOGY`(d003) 也不受影响。
+  代价是 id 顺序不再连续（h001 拥有 d001/d002/d005/d007/d008/d009），这是「零破坏」的既定取舍。
+- 决定二（医生编制：每科室 4 位，全院 18 → 48）：
+  **01 主任医师（`EXPERT`）/ 02 主治医师（`NORMAL`）/ 03 主治医师（`NORMAL`）/ 04 副主任医师（`EXPERT`）**。
+  `MAX_DOCTORS_PER_DEPARTMENT` 3 → 4。新增 30 位 = 现有 6 个已建科室各补 1 位 04 号 + 新增 6 个科室各 4 位。
+  04 号是**副主任医师**（贴近真实科室「1 位正高 + 1 位副高」的构成；`SlotRecommender.titleRank`
+  的「副主任医师 = 2」这一档由此真正用上）。新增医生的姓名一律**避开同科室已有的姓氏**——
+  `matchDoctorId` 的规则是「全名精确，或姓氏唯一才认」，同科室两个姓会触发反问。
+- 决定三（排班形状：一天 4 格，每格 1 位医生，号别按格固定）：
+  09:00 / 14:00 是**专家格**，10:30 / 15:30 是**普通格**——于是上午、下午都各有一格专家号和一格普通号。
+  主任只出专家号、主治只出普通号，所以 2 个专家格只能由 01 / 04 分、2 个普通格只能由 02 / 03 分，
+  **每人每天恰好 1 格**。第 2 个放号日（`role == 1`）两组医生**上下午对调**，第 1、3 个放号日相同：
+  | 医生 | 第 1 天 | 第 2 天 | 第 3 天 | 合计 |
+  |---|---|---|---|---|
+  | 01 主任 | 09:00 | 14:00 | 09:00 | 3 格 |
+  | 04 副主任 | 14:00 | 09:00 | 14:00 | 3 格 |
+  | 02 主治 | 10:30 | 15:30 | 10:30 | 3 格 |
+  | 03 主治 | 15:30 | 10:30 | 15:30 | 3 格 |
+  四位工作量**完全相等**，每人 3 个放号日都在诊——这正是「加第二位主任」要的效果。
+  落在 `RollingAppointmentSlotInitializer.expertAt(role, time)` / `normalAt(role, time)` 两个纯函数里；
+  原来的 `morningDoctors` / `afternoonDoctors`（按**半天**返回两位医生）作废，`doctorsAt` 改按**时刻**返回单序号。
+- 决定四（号源加名额，`available` 降级为派生位）：
+  ```sql
+  ALTER TABLE appointment_slots ADD COLUMN IF NOT EXISTS capacity INT NOT NULL DEFAULT 1;
+  ALTER TABLE appointment_slots ADD COLUMN IF NOT EXISTS booked   INT NOT NULL DEFAULT 0;
+  ```
+  一条号源从「一个号」变成「一位医生在一个时刻里的一班」。**`available` 保留但降级为派生位**
+  （`available = booked < capacity`）——这是「只改数据库、助手侧零改动」能成立的**唯一**做法：
+  4 处查询（`queryAvailableSlots` / `queryUpcomingSlots` / `queryAlternatives` /
+  `CareCatalogRepository.availableDates`）都按 `available=TRUE` 过滤，**一行都不用改**。
+  `DEFAULT 1` 是刻意的：旧库存量行、以及测试里手工 `INSERT` 的号源都自动等价于旧模型。
+  不做成 H2 计算列（计算列不可写，而写入侧要维持它）。`doctors` 表**不加列**：名额是「这一班放几个」
+  的属性，属于号源层，挂着会重犯「挂号费不能挂医生」那条错误（DEC-024 决定三同源）。
+- 决定五（名额按号别取 3 / 4）：`EXPERT_CAPACITY = 3`、`NORMAL_CAPACITY = 4`，与 `feeCentsFor` 同源，
+  写在生成器里按 `slot_type` 映射，并在 `seed()` 末尾加一次幂等自愈（按实际预约数回填 `booked`、
+  按号别修正 `capacity`、重算 `available`）。「普通号 > 专家号」这条供给侧约束**口径从「条数」改成「名额」**：
+  按条数是 2 : 2 相等，按名额才是 8 : 6（`everyDepartmentHasMoreNormalCapacityThanExpertCapacity`）。
+- 决定六（放号日唯一性降级为「同院内不重复」）：`{周一..周五}` 里选 3 天只有 **C(5,3) = 10** 种组合，
+  而全院有 **12** 个科室——「全院两两不同」**数学上不可能**。改成「同一家医院内 6 个科室两两不同」
+  （10 选 6，绰绰有余），跨医院允许撞同一天。`d001` 仍锁死 `{1,3,5}`（含周三＝体检冲突演示、
+  含周五＝`laterDay()` 的三天窗口），这两条不能动。
+- 决定七（**废止**「下午不排专家号」）：DEC-023 决定二/六、DEC-024 决定三建立的
+  「下午一律不排专家号」被本次需求直接推翻——14:00 现在**就是**专家格。
+  连带处置：`MockAppointmentTool.requireAfternoonIsNotExpert()` 及其两处调用（`submit` / `reschedule`）
+  **删除**；上一轮新增的 `AfternoonExpertGuardTests`（4 例）**整份删除**。
+  R1 的**时段级**降级能力本身还在（`expertOnlyInOtherPeriodReply` 原样），只是演示它要靠
+  **手工把下午的专家号约满**（新用例 `soldOutAfternoonExpertFallsBackToTheMorningExpert`）。
+- 写入侧（全仓 `available` 的写点只有 4 处，都在 `MockAppointmentTool`，加 1 处重置）：
+  - 建立预约：`SET booked = booked + 1, available = CASE WHEN booked + 1 < capacity THEN TRUE ELSE FALSE END
+    WHERE id=? AND booked < capacity` —— `changed != 1` 仍抛「该号源刚刚已不可用」，
+    语义从「这一个号被抢了」变成「**这一班约满了**」，仍是一条并发安全的乐观锁。
+  - 取消：`SET booked = CASE WHEN booked > 0 THEN booked - 1 ELSE 0 END, available = TRUE`。
+  - 改期：新号源走扣减、旧号源走释放，顺序与失败语义（「新号源不可用，原预约保留」）不变。
+  - 场景重置：`DemoScenarioService` 由 `SET available=TRUE` 改成 `SET booked=0, available=TRUE`
+    —— 不改这一句就是个真 bug（`booked` 留着，重置后再约就变 2、3……不变式当场破掉）。
+- 明确不做（阶段边界）：
+  1. **不动助手交互**：推荐排序、按医生去重（DEC-024 决定一）、口播文案、候选卡片数量、`SET_PERIOD` 漏斗。
+  2. **不改接口字段**：`Slot` / `AppointmentView` / `DateWindow.SlotOption` 都**不加** `capacity` / `remaining`
+     ⇒ `INTERFACE_CHANGES.md` 本次不需要登记。名额要露出给前端是阶段 2 的事。
+  3. **不改冲突规则**（仍是「患者 + 日期 + 医院 + 科室 + 时段」，在 `checkDuplicate` 里），
+     **也不改**照护端 `hasUpcoming()`「名下只保留一个进行中预约」。
+  4. **不建 `doctor_schedules` 排班表**、不把出诊日 / 名额落库到医生行（DEC-022 决定七不变）。
+  5. **不动 `appointments` 表结构**（DEC-025 的幂等键继续够用；`appointments` 对 `slot_id`
+     本来就没有唯一约束，所以多条预约指向同一条号源在物理上没问题）。
+  6. 不修「`data.sql` 里回填 `clinic_location_id` 的 UPDATE 跑在生成器之前，新号源当次拿不到诊室」
+     这条既有行为（要修得动生成器的 INSERT，超出「只改数据层」）。
+- 量级（每一格 1 位医生 ⇒ 每放号日 4 条号源）：号源 / 科室 / 月 ≈ 52 条，**全院 ≈ 624 条**
+  （现状 6 科室 ≈ 520 条，仍在既有 `200~1200` 断言内）；名额 / 全院 / 月 ≈ **2184 个**。
+- 代价（**产品规则变了，不是掩盖问题**），三处演示场景消失或改口径：
+  1. **「下午没有专家号」消失**（见决定七）——R1 时段级降级改由「手工约满下午专家号」来演；
+  2. **「点名本科室医生、他当天不出诊」消失**——新排班里每位医生每个放号日都在岗
+     （4 格必须 4 个人坐满），本科室内造不出来。用例改法选**把该医生当天那班约满**
+     （`namingADoctorWhoseSlotsAreGoneStillReportsTheOnDutyListAndHerNextDay`），
+     这样 `doctorNotFoundReply` 的「7 天内最近出诊日」分支照旧走通，且 `reset` 会自动还原；
+  3. **「各位医生同一时刻只有一条号源」在演示里变得更重要**——同一时刻现在只有一位医生，
+     `noDoctorHasTwoSlotsAtTheSameMoment` 反而更稳。
+- 影响面（数据层与测试）：
+  - 生产：`schema.sql`、`data.sql`、`RollingAppointmentSlotInitializer`、`MockAppointmentTool`、
+    `DemoScenarioService`。
+  - 既有断言改动（**均为产品规则变了**）：`DoctorSlotModelTests` 4 条
+    （`everyEnabledDepartmentHasFourDoctorsIncludingTwoExperts` 由 3 位/1 专家改成 4 位/2 专家、
+    `everyMorningHasExactlyOneExpertAndOneNormal` 改成按**半天跨格**合计、
+    `everyDepartmentHasMoreNormalCapacityThanExpertCapacity` 改成按名额比、
+    `everyDepartmentOpensExactlyThreeFixedWeekdays` 改成**同院内**不重复）；
+    `DoctorIntentTests` 6 条（周三上午的专家由张建国换成 04 号王建华·副主任医师，
+    及随新排班变化的出诊名单 / 点名 / 销号场景）；`AppointmentSubmitIdempotencyTests` 2 条
+    （「09:00 排两位医生」的前提不再成立 → 手工插一条同刻另一位医生的号源；
+    「号源只有一格」→ 一班还有名额，改验「别把别人那条返回回来」）；
+    `SilverAgentApplicationTests` 1 处手工占号改 `booked=capacity`；
+    `@BeforeEach` 里 `SET available=TRUE` → `SET booked=0, available=TRUE` 共 **12 个测试文件**。
+  - 改用 `booked` 读断言：`CareBookingServiceTests` 2 处、`DemoScenarioTests` 1 处（`slotTaken`）、
+    `ElderCancelEndpointTests` 3 处（`slotBooked`）。
+  - **删除** `AfternoonExpertGuardTests`（整份）；**新增** `DepartmentScheduleAndCapacityTests`（8 例）
+    ——钉住新口径本身：每放号日 4 格 4 位不同医生、号别按格固定、两位主任轮流坐专家格、
+    名额 3/4 落库、名额的扣减与释放、全表不变式、R1 时段级降级的新演法、两院科室名集合相同。
+  - 文档：`06-mock-data-design.md`、`PROGRESS.md`、`docs/05-api-contracts.md`（「每科室固定 3 位医生」一句）。
+- 待后续（口径不变）：① 名额露出给前端（阶段 2）；② 照护端「一个进行中预约」与老人端「同一天可约多个时段」
+  的口径差仍需产品拍板；③ `FollowupAgentService` 仍是 4800+ 行的编排巨类（DEC-018 遗留）。
+  ④ **已收口（同日）**：`CatalogEntityResolver.DEPARTMENT_ALIASES` 补上「呼吸科 → 呼吸内科」
+  「消化科 → 消化内科」两对（`心血管内科` / `心脏内科 → 心内科` 本来就有）。这两个科室是本决定才有的，
+  而简称与全称**互不为子串**，包含匹配两个方向都兜不住、只能落 `NOT_FOUND`，所以必须进别名表。
+  属**目录别名**不是交互逻辑：别名只是「一级先行跳转」，命中后仍回真实目录核对**恰好一条**同名科室，
+  目录里没有或有两条就落空——**补别名不放宽科室校验**。新增 `CatalogEntityResolverTests`（9 例）钉住。
+  详见 `PROGRESS.md` 同日条目。
+
+## DEC-027 推荐话术与时段可见性：自动推荐轮说「推荐」、报当天另一半、推荐轮按钮 ≤3
+
+- 日期：2026-09-14。
+- 状态：已采用，**已实施**（`FollowupAgentService` + `DoctorIntentTests`）。收口
+  `docs/proposals/推荐标记与时段可见性方案.md` 的 R7 / R8 / R9；该方案初稿里
+  「`QuickReply` 加 `recommended` 字段 + 前端徽标」的写法**作废**。
+- 背景：用户澄清「推荐是指在科室日期确定之后给用户**说**『推荐…』，记得医生信息顺带时间」，
+  并提「不要让老人觉得只有推荐的几个时段」。**排序规则与候选上限一行不改**（用户：「基本还是按照原来的规则」）。
+- 决定一（「推荐」是**话术**，不是接口字段）：**否**掉初稿的 `QuickReply` 第 4 分量 `recommended` 与前端
+  「推荐」徽标——用户要的是助手**说出来**的话，按钮标签不是话术；加字段还要动 `AgentTurnResponse` 的 record
+  与 `INTERFACE_CHANGES.md`，为一个话术需求扩大改动面不划算。⇒ 本次**接口一个字段都没加**，
+  `quickReplies` 仍是 `label / action / value`；`INTERFACE_CHANGES.md` **无需登记**
+  （按钮/回复**文案**变了，但那是文案不是契约）。
+- 决定二（说的**轮次边界**）：只有**自动推荐轮**（老人没点名医生、也没指定具体时刻，助手替他挑候选的那一轮）
+  说「推荐」。**点名医生之后**（`state.doctorId != null`）是「按您说的给」，**指定具体时刻**
+  （`recommendSpecificTime`）、清单页（`showPeriodSlots`）同理，都不说。落点是 `recommendPeriod` 按
+  `state.doctorId == null` 分流到新的 `autoRecommendReply`，非自动轮**沿用原文案一字不改**。
+  措辞：**医生信息在前、时间顺带跟在后面**（用户原话），复用现成的 `doctorBrief(slot)`：
+  - 双候选：`我先推荐王建华副主任医师（专家号），09:00；另一位是陈凤兰主治医师（普通号），10:30。〈另一半提示〉您想约哪位？`
+  - 单候选：`我推荐张建国主任医师（专家号），14:00。〈另一半提示〉这个时间可以吗？`
+  - **不报排序依据**（「因为您要专家号」）：老人要的是结论，不是算法说明，且依据在 R2 的六条里常常不止一条。
+- 决定三（R8 报的是**当天的另一半**，不是「这个半天有几个」）：DEC-026 之后一天 4 格、每格 1 位医生，
+  未点名时半天的候选数（≤2）**恒等于**该半天的号源数——「上午一共有 2 个可约时段」只是把老人已经看到的
+  两个又数一遍，**没有信息量**；真正被藏起来的是**另一个半天**。新增 `dayScopeHint()` 报另一半的条数：
+  `今天下午还有2个时段。` 条数**按 `state.date` 现数、不写死**（排班哪天改成半天 3 格，这句自动变得有意义）；
+  按日期过滤不是多余的——`alternatives` 在「这一天没号、查附近日期」的分支里装的是跨日期号源。
+  本决定**取代 DEC-024 决定二**的「这位医生还有其它可预约时段」：现行排法每位医生每天只有 1 格，
+  那句话已不可能触发（`otherSlotHint()` 随之删除）。
+  **只在未点名医生时加**：点名之后 `alternatives` 已被 `resolveDoctorWish` 收缩到这位医生名下，
+  此刻数「当天还有几个时段」数出来的是**别的医生**的号，与老人刚说出口的诉求正好相反。
+  明确**不报**「我挑了其中 M 个」：当前排班下候选数恒等于半天条数，那个子句永远不成立，
+  写进去就是一段无法回归的死分支；等半天排到 3 格以上再补。
+- 决定四（R9 推荐轮按钮 **≤3 个**，把「改选另一半」并进「看全部」）：前端快捷按钮是**写死的每屏 3 个**
+  （`assistant-view.tsx` 的 `slice(choicePage * 3, +3)`，>3 才出现「查看更多选项」）。双候选时后端原本生成
+  **4 个**（2 候选 +「看看其他X时间」+「改选X」），被折掉的第 4 个恰好是「改选另一半」——而它正是
+  **另一个半天那两个时段的唯一入口**，与 R8 想解决的问题正面相撞。⇒ 后端只发 **3 个**：
+  2 个候选 + `看全部{上午|下午}时间`；`SET_PERIOD` 不再出现在推荐轮，**出口一个没丢**——
+  `showPeriodSlots` 那一页本来就带「改选X」（半天 2 条 + 改选 1 条 = 3 条，一屏放得下）。
+  **前端一行都没改**（它按数量分页，发 3 个就不会折叠）。
+  按钮文案取「看全部**上午**时间」而非方案里的「看全部可约时间」：老人看按钮时不该再回想上一句说的是
+  上午还是下午；原按钮「看看其他上午时间」本来就带时段前缀，这样改动面更小。
+- 决定五（口播）：`candidatesSpeech` 加 `recommended` 开关，自动推荐轮在**最前面加一次**「我推荐，」。
+  **只说一次**——逐条念「推荐」会把「这几条是我替您挑的」读成「每一条都更值得约」，而双候选本来就是请老人
+  在两条里选一条。**口播不带条数**：R8 的数字只落在卡片文字上，老人主要靠听，一句话里再塞计数只会
+  变长难记，与 R3 的简化口径（不读全名、不读原价）相冲。
+- 明确不做：不改排序规则（`SlotRecommender` 六条）、不改 `MAX_OFFERED_SLOTS = 2`、不改 `QuickReply` /
+  `Slot` / `AgentTurnResponse` 任何 record、不改前端渲染与分页、不碰确认门禁与写路径
+  （`SELECT_SLOT` 之后仍走完整确认卡）、不碰家属代约 Web（`care-booking-view.tsx`）。
+- 影响面：
+  - 生产：`FollowupAgentService`（`recommendPeriod` 的按钮与分流、新增 `autoRecommendReply`、
+    `otherSlotHint` → `dayScopeHint`、`recommendSpecificTime` 补另一半提示、`candidatesSpeech` 加开关）。
+  - 测试：`DoctorIntentTests` 由 7 例增至 **9 例**——原推荐用例补上 R7 / R8 / R9 断言，点名医生那条补上
+    「不说推荐、不报别的医生的号」负向断言；新增 `aLoneCandidateStillSaysRecommendedAndPointsAtTheOtherHalfDay`
+    （手工把 09:00 那格约满，构造出自动推荐轮的**单候选**；**必须先约满再定日期**——`alternatives` 是
+    定日期那一步查出来后缓存的）与 `aRequestedTimeKeepsTheOldWordingAndStillReportsTheOtherHalfDay`
+    （「下午3点的号」→ 不说「推荐」，落到最接近的 15:30）。
+  - 文档：`PROGRESS.md`、`docs/user-manual.md`（4. 选时间一段的按钮名与话术）、方案文档状态行改为「已实施」。
+- 待后续：沿用 DEC-026 清单的 ① 名额露给前端、② 照护端口径差、③ `FollowupAgentService` 巨类。
+
+## DEC-028 模型链路与规则链路对齐：日期清单与半天档位由 Java 出、口语时间在模型链路补槽、钟点口径与备忘共用
+
+- 日期：2026-09-14。
+- 状态：已采用，**已实施**。收口 `docs/proposals/模型链路与规则链路对齐方案.md` 的 A1 / A2 / A3 / B / C。
+- 背景（演示中暴露的三件事）：① 助手列了三个日期，**下面一个按钮都没有**；② 助手列了
+  「【上午可选】…【下午可选】…」，老人回「我要下午的三点半的」，助手口头应了「这就帮您改成下午3点半」，
+  下一轮却说「我还没有确认您想要的时间」；③ 回一句「可以」被弹回上一轮的问题。
+  ① 是按钮缺口，②③ 是同一根因的两个面。
+- 决定一（**机制澄清，不改代码**）：这**不是两条并行模式**，是同一入口 `chatInternalBody` 上的一个开关，
+  按 `agentRuntime.modelAvailable()` 分叉，**每轮现算**。开关 = `gateway.available()`
+  （`AGENT_MODEL_ENABLED` + base-url + key 三者齐）。运行环境里 `AGENT_MODEL_ENABLED` 有**两处来源**：
+  `devcontainer.json` 的 `containerEnv`（`"false"`，创建容器时注入）与 `.devcontainer/.env`（**`"true"`**，
+  后端任务的 command 里 `set -a && . .env && set +a`）——**`.env` 覆盖容器注入值**，所以演示环境实际是**模型链路**。
+  ⚠️ 普通终端 `echo $AGENT_MODEL_ENABLED` 看到的是注入值 `false`，**不能当判据**；判据是「回复里出现了
+  全仓零命中的文字」（「【上午可选】」这类只能是模型写的），或后端控制台的
+  `Conversation planner failed; using rule fallback`（那一轮走了规则链路）。
+  **关键推论**：模型链路下 Java **不解析自然语言**，「模型嘴上说了 15:30」与「Java 记下了 15:30」是两件事。
+- 决定二（A1：日期那一步改由 **Java** 出清单）：`modelWorkflowReply` 插一条分支——医院、科室都已确定而
+  日期为空时，直接走 `showAvailableSlots`。理由：**日期是权威数据，不能让模型复述**；它随口编出一个库里
+  没有的日子，老人照着点、下一轮查到「这天没有号」，白跑一趟，而这一步本来只要把真实日期摆出来。
+  代价：这一轮改用 Java 文案，模型给的过渡语不再使用——**安全优先，接受**。
+- 决定三（A2：半天档位接到模型链路）：`modelSuggestedReplies` 在原来那个「有号源就给号源按钮」的分支
+  **之前**插入 `SELECT_PERIOD → periodReplies(...)`（上午 / 下午 / 直接选择具体时间）。
+  这一步老人要答的是「上午还是下午」，直接把号源摆出来等于跳过了他的问题。**不是新做按钮**——
+  `periodReplies` 是规则链路早就写好、由 `querySlots` 与 `advance` 在用的那一套。
+- 决定四（A3：收紧前置分支）：原分支**不看 stage**，只要「还没选号 + 有候选号源」就返回号源按钮。
+  现在只有 `SELECT_SLOT` / `CONFIRM_SLOT` 才挂号源按钮，按钮与「这一轮真正在问的问题」一致。
+  ⚠️ **本决定的初稿（原方案 §四 A3）把理由说错了，这里更正**：原文写「`switch` 里 `ASK_ALTERNATIVE` /
+  `ASK_COMPANION` / `ASK_TRAVEL` / `ASK_TRANSPORT` / `ASK_NOTIFY` 五个 case 永远走不到、是死代码」——
+  **不成立**。`syncPresentationStage` 里这五个阶段的前提都是 `selectedSlot != null`，而原前置分支的条件是
+  `selectedSlot == null`，两者**互斥**，所以那些 case 一直是可达的（`ASK_ALTERNATIVE` 等由 `advance()` 直接
+  置位的路径同理，它也在 `selectedSlot == null` 的早返回之后）。真正的成因是 B 那个坑：
+  `selectedSlot` 为空使 stage 只能停在 `SELECT_PERIOD` / `SELECT_SLOT`，**而模型嘴上在问陪同**——
+  于是回复是「需要人陪您去吗」、按钮却是三个时间段。所以这一条的实际作用是**收窄号源按钮的适用阶段**
+  （`stage` 与按钮严格对齐，`NO_SLOT` 等阶段不再从这条旁路拿到跨日期号源按钮），**不是让死代码复活**。
+  改错的是我（方案与初稿都照抄了这个判断），实现与测试都按更正后的口径走。
+- 决定五（B：口语时间在**模型链路**补槽）：落点选 **`AgentRuntime.plan`**，不是 4800 行的
+  `FollowupAgentService`——`AgentRuntime` 已经注入了 `RuleFactExtractor`，改动集中在一个类里。
+  规则：**只补空、绝不覆盖**——模型给了 `selectedTime` 或 `timePreference` 就一个字不动，两个都空时才用
+  Java 的解析器从原话里再抽一次，抽不到就原样返回。配套 `ExtractedFacts.withSelectedTime(LocalTime)`
+  （17 分量原样拷贝只换一个），免得在调用点摆一串 17 参构造。
+  为什么必须有这层：`facts` 是模型链路唯一的事实源，模型漏一个字段**没有任何东西去补**，而这一漏的后果
+  就是「老人刚答过的问题被退回给他」。
+- 决定六（C：钟点口径**与备忘共用一份**，不写第二份）：`MemoParser` 已有成熟实现（中文数字一点~十二点、
+  半点 / 一刻 / 三刻 / 零X分、时段词折算、`差一点` 护栏，`MemoParserClockTests` 钉着），本次只把它提成
+  公开入口 `MemoParser.clockIn`，并让 `RuleFactExtractor` 的钟点抽取收敛成唯一入口 `spokenTime`
+  （`parseTime` 委托给它）。项目既有规矩：**词表写两遍，迟早只剩一份是对的**（`MedicalBoundaryRules` 注释）。
+  两条口径细节：
+  - **「下午」按整句判，不只看紧挨着钟点的那几个字**：老人说「我要下午的三点半的」，「下午」与「三点半」
+    中间隔着一个「的」，只看紧邻时段词会算成凌晨 3:30，再按最近号源推荐就把下午的号推成上午的号。
+  - **「3点半」与「三点半」对齐**：阿拉伯数字那条原本不认「半」，两种写法会落到不同时刻。
+  阿拉伯数字正则**仍先走**，行为一字不变，只是失配时才兜底。**不引入**「晚上 / 中午」的新折算规则——
+  它们随 `MemoParser` 复用而来，不是本次新增的语义。
+- 明确不做：**不改** 3.3 那条兜底话术的文案依据（`clarificationDraft` 拿**展示用**的 `state.stage`
+  决定对老人说什么，应改成按「当前真正在问的那一步」——留着，见待后续）；不重构 `FollowupAgentService`；
+  不改照护端预约规则；不改排班 / 名额 / 号源模型；不把名额露给前端。
+- 影响面：
+  - 生产：`FollowupAgentService`（`modelWorkflowReply` 插日期分支、`modelSuggestedReplies` 插半天档位 +
+    收紧前置分支）、`AgentRuntime`（新增 `withSpokenTimeFallback`）、`ExtractedFacts`（新增
+    `withSelectedTime`）、`RuleFactExtractor`（`parseTime` → 公开 `spokenTime` + 中文数字兜底）、
+    `MemoParser`（`clockTime` 提为公开 `clockIn`）。
+  - **接口零变化**：`QuickReply` 仍是 `label / action / value`，`AgentTurnResponse` 不变
+    ⇒ `INTERFACE_CHANGES.md` **无需登记**；**前端零变化**（按钮由后端下发，前端按数量分页渲染）。
+  - 测试：`DoctorIntentTests` 9 → **10 例**（新增 `aSpokenChineseTimeAlsoLandsOnTheRightSlot`：
+    「我要下午的三点半的」→ 15:30 并进 `CONFIRM_SLOT`）；新增 `RuleFactExtractorClockTests`（6 例）
+    与 `AgentRuntimeSpokenTimeFallbackTests`（4 例，纯 JUnit + 假规划器，**现有测试里第一条走模型链路的用例**）。
+    全量 **415 例 0 失败**（基线 404 + 新增 11）。
+  - 文档：`PROGRESS.md`、`docs/user-manual.md`（选日期一段补「也可以直接点日期」）、方案文档状态行改为「已实施」。
+- 待后续：① 3.3 那条兜底话术错位；② 沿用 DEC-026 清单的名额露前端、照护端口径差、巨类重构；
+  ③ 三处过时措辞（`docs/proposals/选医交互方案（阶段2）.md` 状态行、`INTERFACE_CHANGES.md` 与
+  `CareBookingServiceTests` 注释里的「上午 09:00 天然两条」、`docs/13` 的「01 号医生的出诊日」）。
+
+## DEC-029 医院记忆由 Java 说出、也由 Java 认；科室候选一次摆全 6 个
+
+- 日期：2026-09-14。
+- 状态：已采用，**已实施**。
+- 背景（同一段演示里暴露的两件事）：① 助手问医院时说了「还是像以前那样去市人民医院吗？」，
+  老人答「是的」，助手却回「我还没有确认您说的是哪家医院」；② 科室快捷按钮摆的是
+  「前 3 个科室 + 我自己说科室」，而前端一屏只渲染 3 个（`assistant-view.tsx` 的
+  `slice(choicePage*3, +3)`），第 4 个正好被折进「查看更多选项」——翻开只有一个按钮，
+  既不像“更多”，也把后面那 3 个真科室挡在外面。
+- 决定一（**说这句的人必须就是认这句的人**）：长期记忆里的常去医院改由 **Java 读出来并用**，
+  读法与写入时的措辞严格对齐（`MemoryStore.remember` 写「常去的医院是X」，这里按
+  `MEMORY_HOSPITAL_PREFIX` 取回医院名再回目录核对）。`askHospital` 命中记忆时追加
+  「还是像以前那样去X吗？」，并给「是的，X」/「换一家医院」两个按钮，按钮走既有的 `SET_HOSPITAL`，
+  不新造动作、不新开接口。此前的问题是**这句由模型复述、却要 Java 认领**：模型看到
+  `memoryNote` 就照说，Java 手上没有任何候选，老人顺着回答的「是的」无处可落。
+- 决定二（**兜底认领**）：`chatInternalBody` 在 `handlePendingEntityConfirmation` **之后**插一条
+  `confirmRememberedHospital`——仍在 `ASK_HOSPITAL`、老人给的是短肯定（`isShortAffirmative`）、
+  记忆里确实有一家，三者同时成立才采用。**排在待确认候选之后**：刚问出口的那一个永远比长期记忆优先。
+  没有记忆时它返回 null，链路与加这个功能之前逐字相同（`aShortYesWithoutMemoryStillAsksForTheName`
+  钉住：这时必须老老实实再问一次，不能凭一句「是的」凭空认下一家医院）。
+- 决定三（**记忆只是线索，不是授权**）：记忆的全部作用就是让 Java 少问一句；真正落库仍然要过确认门禁。
+  目录里已经没有这家（记忆过期）时 `rememberedHospital` 返回空，一个字的猜测都不说——
+  与 DEC-013「记忆只记办成的事」配套：**记得住 ≠ 可以替他办事**。
+- 决定四（**科室候选一次摆全**）：`askDepartment` 从「目录前 3 个 + 我自己说科室」改为
+  「目录前 6 个」（现在每院正好 6 科，`data.sql` 的 d001~d012）。「我自己说科室」不再占位：
+  老人本来就能直接打字或说科室名（`resolveDepartmentInput` 对任意输入生效），腾出的位置正好让
+  「查看更多选项」恢复意义。**前端零改动**就拿到这个效果。
+  ⚠️ **初稿曾打算在 `modelSuggestedReplies` 里补 `ASK_HOSPITAL` / `ASK_DEPARTMENT` 两个分支，
+  实施时撤回**：那两处按钮会让 `chatInternalBody` 里「没被接住的话就先重复问一遍」这条分支的
+  `waitingReplies` 变成非空，于是「任务挂起（PAUSED）」不再发生——
+  `SilverAgentApplicationTests.unrelatedConversationPausesTaskWithoutLosingItsStage` 当场就红了。
+  真正需要修的只是**按钮内容**（3 个科室变 6 个），不是**有没有按钮**；判断「该不该挂起」的依据
+  不该被这一步的新候选顺手改掉。
+- 决定五（**根因更正：那句回填是润色加的，不是规划模型**）：演示里「好的，王阿姨，那咱们这就开始办…
+  还是像以前那样去市人民医院吗？」这一整段，走的是**规则链路 + 润色**——演示开头的「开始复诊办理」
+  是按钮动作，`act("CONTINUE")` 直接进 `advance → askHospital`（不经过规划模型），
+  话术再由 `finish()` 里的 `answerGenerator` 润色；润色模型看到 `knownFacts` 里的 `memoryNote`，
+  就顺手补了那句医院名。**这正是问题所在：写这句的环节（润色）读得到记忆，认领的环节
+  （`ASK_HOSPITAL` 的 Java 分支）却拿不到任何候选**，于是老人答「是的」只能被反问一次。
+  修法就是把候选交回 Java 手上（决定一 + 决定二），而不是去约束润色模型别说话。
+- 决定六（**前端删掉同一屏说两遍的卡**）：`assistant-view.tsx` 删掉「复诊办理待继续」卡——它与
+  顶部状态行（「办理步骤：X」）说的是同一件事，同一屏出现两遍；「取消本次办理」入口挪到状态行右侧，
+  只在办理中出现。绿色的「复诊事项卡」从对话流里移出，摆在原卡片的位置：办完之后老人会反复回头看
+  这张卡（几点、哪个院区、几点出发），放在消息列表里会被后来的消息一直往上顶。
+- 明确不做：不改照护端预约规则，也不动照护端助手布局（`care-assistant-view.tsx` 保留它自己的卡片
+  与按钮，本次只改老人端）；「换医院」与「不选择X」这两处问医院传 `offerMemory = false`——
+  老人刚把这家否掉，再顺口问一次「还是去X吗」会自相矛盾；不动排班 / 名额 / 号源模型；
+  不碰 `modelSuggestedReplies`（理由见决定四）。
+- 影响面：
+  - 生产：`FollowupAgentService`（`askHospital` 加重载与记忆候选；新增 `rememberedHospital` /
+    `hospitalNameOfMemory` / `departmentReplies` / `dateReplies` / `confirmRememberedHospital`；
+    `askDepartment` / `askDate` 改用抽出的按钮方法；`changeHospital` 与「不选择X」传
+    `offerMemory = false`；`modelSuggestedReplies` 一字未动）。
+  - **前后端接口零变化**：`QuickReply` 仍是 `label / action / value` ⇒ `INTERFACE_CHANGES.md` 无需登记。
+  - 前端：`assistant-view.tsx`（删重复卡、取消入口移位、事项卡移出对话流）。
+  - 测试：新增 `RememberedHospitalTests`（5 例，覆盖「有记忆时说出并给按钮」「是的话由 Java 认领」
+    「没有记忆时一个字不多说」「没有记忆时仍要问名字」「科室候选 6 个且不含我自己说科室」）。
+  - 文档：`PROGRESS.md`、`docs/user-manual.md`（快捷回答一段补科室一次摆全）。
+
+## DEC-030 「照旧」也算答了；同一时刻的冲突不再分医院科室
+
+- 日期：2026-09-14。
+- 状态：已采用，**已实施**。
+- 背景（同一段演示里暴露的两件事）：① 助手问「还是像以前一样，去市人民医院吗？」，老人答
+  「和上次一样」，助手却回「我还没有确认您说的是哪家医院」（紧接着改口说「是的」才被认下来）；
+  ② 事项页上同一位老人名下出现两条 **9月15日 10:30**——骨科沈国安 / 呼吸内科潘晓丽，
+  一个身子同时坐进两个科室。
+- 决定一（**「照旧」和「是的」同等对待**）：`confirmRememberedHospital` 的入口判据从
+  `isShortAffirmative` 换成新的 `confirmsRememberedHospital`——先认短肯定，再认
+  `SAME_AS_BEFORE`（「和上次一样 / 跟以前一样 / 还是那家 / 老样子 / 照旧 / 老规矩」，
+  整句匹配、去标点后 ≤8 字、带否定词一律不认）。**只放宽「问医院」这一步**：`isShortAffirmative`
+  一字未动——它还被完成播报（「需要我打开地图吗」）和确认卡共用，动它等于顺手改掉那两处。
+  没有记忆时「和上次一样」照样无处可落，回落成问名字（`sameAsLastTimeWithoutMemoryStillAsksForTheName`）。
+- 决定二（**同一时刻的冲突口径收成「患者 + 日期 + 时刻」**）：`checkDuplicate` 的检索不再带医院和
+  科室（`myAppointmentTool.search(id, userId, date, null, null)`），只按日期取回这位老人的全部已确认
+  预约，再按时刻相等过滤。**这是本次唯一的产品规则变更**，它推翻了 DEC-026「明确不做 3」里的
+  「不改冲突规则：仍是患者 + 日期 + 医院 + 科室 + 时段」——那句只是当时划的阶段边界，不是对口径的论证。
+  理由：老人只有一个身子，同一时刻不可能同时出现在两个科室；原来带着医院和科室，等于只在
+  「同一个科室里重复约」时才拦得住，换个科室（甚至换家医院）同一时刻照样放行。
+  - **同一天换时段仍然放行**：号源时刻是「这一班从几点开始」，一天看两个科室是正常需求，
+    只有时刻撞上才自相矛盾。`MockAppointmentTool.submit` 的幂等键注释里本来也写着这句。
+  - 改期时仍把 `originalAppointmentId` 自己排除掉，否则「原时间不动、只换医生」会被自己拦下。
+  - 照护端不受影响，**不动它**：`CareBookingService.book` 有自己的 `hasUpcoming`
+    （同一位老人名下只留一个进行中预约），比这条更严。
+- 决定三（**改了话术，因为「相同」不再准确**）：`checkDuplicate` 的提示从「您已经有一条相同的复诊
+  预约：…」改成「这个时间您已经有一条复诊预约：…。同一个人同一时刻只能看一个科室…」。跨科室时
+  「相同」是错的（两条并不相同，只是撞了时间）。按钮仍是 `保留已有预约 / 重新选择时间 / 查看我的预约`
+  三个，**没有新增「仍保留这个时间」**：同一时刻看两个科室不存在「保留」的合理场景，
+  日程冲突那条（`user_schedules`）才有。
+- 明确不做：不加照护端检查（见决定二）；不在 `MockAppointmentTool.submit` 里再判一次冲突
+  （DEC-025 已定「冲突只有 `checkDuplicate` 一处实现」，双写会漂）；不动排班 / 名额 / 号源模型；
+  不动 `modelSuggestedReplies`。
+- 影响面：
+  - 生产：`FollowupAgentService`（新增 `SAME_AS_BEFORE` 与 `confirmsRememberedHospital`；
+    `confirmRememberedHospital` 改判据；`checkDuplicate` 改检索条件与话术）、
+    `ToolRegistry`（`appointment.checkDuplicate` 的工具说明同步改成「同一就诊人同一天同一时刻、
+    不分医院科室」，那份说明是给模型看的，不能留着旧口径）。
+  - **前后端接口零变化** ⇒ `INTERFACE_CHANGES.md` 无需登记。
+  - 测试：`RememberedHospitalTests` 5 → 8 例（「和上次一样」被认领 / 没有记忆时仍要问名字 /
+    带否定的说法不被当成确认）；`AppointmentSubmitIdempotencyTests` 新增
+    `theSameMomentIsRejectedEvenInAnotherDepartment`（手工插一条 d007 骨科 09:00 的号源，
+    断言跨科室也被拦下），`draft` 加科室参数重载；
+    `SilverAgentApplicationTests.duplicateAppointmentIsExplainedBeforeAnotherConfirmationCanBeCreated`
+    的断言随话术改成 `"已经有一条"`。
+  - 文档：`PROGRESS.md`。
+
+## DEC-031 「这个时段约不上」在号源锁定时就说，不再等陪同、出行和通知都问完
+
+- 日期：2026-09-15。
+- 状态：已采用，**已实施**；前后端接口零变化。
+- 背景：完整走了一遍办理——老人选定 9月15日 10:30 呼吸内科潘晓丽之后，助手接着问「需要家属陪同吗」
+  →「需要出行提醒吗」→「您准备怎样去医院」→「需要通知您的家属吗」→「就通知女儿小丽吗」，
+  等这一整轮都答完，才说「您在2026年9月15日上午10点30分，已经有一个去市人民医院看骨科的预约了……
+  我没法帮您把这次呼吸内科的约也定上」。老人白答一轮，而且早就把这件事当成了定局。
+- 根因：**两道「这个时段能不能约」的检查都挂在 `ready()` 之后**，而 `ready()` 要求陪同、出行、
+  交通、通知、材料全部就位，所以 `checkSchedule`（日程冲突）和 `checkDuplicate`（同一时刻重复预约）
+  必然排在最后。两条链路各有一份同样的顺序，不是模型链路独有的毛病：
+  - 规则链路 `advance()`：acceptAlternative → companion → travel → transport → notify → materials → `checkSchedule`；
+  - 模型链路 `modelWorkflowReply()`：`readyForMaterialLookup(state)` 成立才 `checkSchedule`，那个条件同样是全字段非空。
+- 决定一（**校验提前到 `selectSlot()`**）：号源锁定的唯一出口是 `selectSlot`（按钮 `SELECT_SLOT`、
+  模型链路 `acceptRecommendedTime`、推荐后的确认三处都汇到它），所以在这里、`acceptAlternative`
+  落定之后立刻调新增的 `slotBlocked(state)`：
+  - `slotConflicts(state)` 查到日程冲突 → `conflictReply`，进度置 `CONFLICT`，按钮仍是
+    「当天其他号源 / 重新选择日期 / 仍保留这个时间」三个；
+  - 否则 `slotDuplicates(state)` 查到同一时刻已有预约 → `duplicateReply`，进度仍停在 `SELECT_SLOT`；
+  - 都没有 → 返回 null，照原样 `advance()` 去问陪同。
+- 决定二（**文案与按钮只有一份**）：冲突分支整段抽成 `conflictReply`、重复分支抽成 `duplicateReply`，
+  预检和确认卡前检查两处共用。`checkSchedule` / `checkDuplicate` 的提示文字和按钮**一字未改**。
+- 决定三（**「仍保留」之后不能再弹第二次**）：预检提前弹冲突时 `ready()` 还不成立，老人按「仍保留这个时间」
+  之后 `buildConfirmation` 会因 `!ready` 回落到 `advance`，把剩下的问完，最后照样走到 `checkSchedule`
+  ——那时冲突还在，会**第二次**弹同一个提示，老人永远到不了确认卡。收口三处：
+  - `ConversationState` 新增 `conflictKept`。它随 `state_json` 走 Jackson（`ConversationStore.Snapshot`
+    加一个组件），旧快照缺这个字段时补 `false`，正好是「还没保留过」——**不动数据库结构**。
+  - `keepConflict` 在 `!ready(state)` 时改为 `advance(state, ExtractedFacts.empty())` 继续问，不再直接进
+    `checkDuplicate`；置 `conflictKept = true`，并在 `slotBlocked`（换了号源）、`conflictReply`（重新问了一遍）、
+    `clearDraft`（新建办理）三处置回 `false`。`actInternal` 的按钮分支 `case "KEEP_CONFLICT"` 改为共用
+    `keepConflict` 一处实现——原先它自己另写了一遍 `scheduleChecked = true` + `buildConfirmation`。
+    **顺带收口一条以前走不到的路径**：`keepConflict` 原来直接调 `checkDuplicate`，而 `checkDuplicate`
+    要求 `ready()`，不 ready 时会回落到 `validateDraftForModel` 报「还缺少：陪同需求」这种对老人没法
+    执行的话；改动前冲突只在 `ready()` 之后才弹，这条路径碰不到，提前预检之后它会变成必经之路。
+    非冲突态的守卫两条路径本来就有——按钮路径在 `actInternal` 里已被「请先检查当前日程」拦下，
+    `keepConflict` 自己那句管的是 `chat` 那条——所以**行为不变**。
+  - `checkSchedule` 开头加短路 `if (state.conflictKept && !state.conflicts.isEmpty()) return checkDuplicate(state);`
+    两个条件一起成立才短路，语义就是「检查过了，而且这条冲突是老人明确要保留的」；无冲突通过时 `conflicts`
+    是空表，不会短路。
+  - **第一版借的是 `scheduleChecked`，被新加的那条用例当场抓出来**：`invalidate` 会被每一个 `SET_*` 动作
+    触发（`actInternal` 里那句 `invalidate(state)`），老人一答「需要陪同」，标记就没了，答完通知之后冲突
+    照样弹第二次。所以 `invalidate` **刻意不清** `conflictKept`——陪同、出行和通知答了什么，都不改变
+    「时间没变」这件事。
+- 明确不做：
+  - **不删、不挪** `checkSchedule` / `checkDuplicate` 本身：老人在中途改了时间后，它们仍是提交前的最后一道防线。
+  - **不为「提前查过一次」省掉末尾那一次**：`schedule.checkConflict` 走 `callTool` 会记 trace
+    （`appointment.checkDuplicate` 直接调 `myAppointmentTool.search`，本来就不记）。两条只读记录各自成立
+    ——一条是「选定时查过」，一条是「提交前查过」，审计上反而更完整；而 `SELECT_SLOT` 本来就会触发
+    `invalidate`，也没有合适的字段去标记它。
+  - 不在 `MockAppointmentTool.submit` 里再判一次（DEC-025 / DEC-030 已定「冲突只有 `checkDuplicate` 一处实现」）。
+  - 不动 `modelSuggestedReplies`、不动 `ready()`、不动号源与名额模型、不动照护端。
+- 影响面：
+  - 生产：`FollowupAgentService`（`selectSlot` 末尾加预检；新增 `slotBlocked` / `slotConflicts` /
+    `slotDuplicates` / `conflictReply` / `duplicateReply`；`checkSchedule` 改调 `slotConflicts` + `conflictReply`
+    并加短路；`checkDuplicate` 改调 `slotDuplicates` + `duplicateReply`；`keepConflict` 补 `!ready` 分支并置
+    `conflictKept`；`actInternal` 的 `KEEP_CONFLICT` 改为共用前者；`clearDraft` 清 `conflictKept`）、
+    `ConversationState`（新增 `conflictKept` 字段与注释）、`ConversationStore`（`Snapshot` 加同名组件，
+    record 定义 / `from` / `toState` 各一处）、`DemoScenarioService`（场景三 steps：冲突提示从
+    「最后一步答完」改到「点完 10:30 当场」，并把「仍保留」之后的继续追问写进步骤）。
+  - **数据库结构未改**（`conflictKept` 走 `state_json`，不加列）；**前后端接口零变化**
+    ⇒ `INTERFACE_CHANGES.md` 无需登记。
+  - 测试：`SilverAgentApplicationTests` 新增 `selectingAConflictingSlotIsBlockedBeforeCompanionOrTravelIsAsked`
+    （断言 `SELECT_SLOT` 当场返回 `CONFLICT`、`KEEP_CONFLICT` 后接着问陪同、答完直接进确认卡且
+    不再重复弹冲突）。既有用例 `noSlotAndConflictAcceptNaturalRecoveryInstructions`、
+    `changingTimeClearsAnAcknowledgedConflictFromTheCard`、`rescheduleKeepsOriginalUntilConfirmed`、
+    `failedRescheduleKeepsOriginalBookingAndReminders`、`missingInformationCannotBeBypassed`
+    **断言一字未改**。
+  - 文档：`PROGRESS.md`。
+
+## DEC-032 业务时区与「今天/现在」收成一份 BusinessClock；「这半天没号」必须说出真实理由
+
+- 背景（演示里真实出过一次，用户当场质疑）：老人问「9月15日」（就是当天），助手答「只有下午有空位，
+  具体是 15 点 30 分」；追问「啊上午没有吗」，答的是「**上午已经约满了**」。可数据库里当天上午那两格
+  `available` 全是 TRUE，没被别人占——真正的原因是**当天上午的时间已经走掉了**。老人自己名下只有
+  一条 10:30 的预约，于是画面变成「明明那天上午有号，却说只有下午才有」。
+- 根因有**两层**，两层要一起修：
+  1. **时钟**：容器镜像没配时区，JVM 默认走 GMT（比北京慢 8 小时）；四个查号查询又都用 H2 的
+     `CURRENT_DATE / CURRENT_TIME` 滤掉「当天已过的时段」。北京 22:58 在它眼里才 14:58，
+     于是当天上午整片被判成已过去，只剩 15:30。**这不是「美国的钟」，是 UTC**，与 locale（`user.country=US`）无关。
+     更隐蔽的是：**H2 2.3.232 的 `CURRENT_DATE / CURRENT_TIME` 不吃 `TimeZone.setDefault`**
+     （同进程实测：改默认时区后 Java 的「现在」变了、H2 的没变——它在这个 JVM 第一次连库时就把时区定死了）。
+     容器里 `TZ=Asia/Shanghai` 与 JDBC URL 的 `;TIME ZONE=Asia/Shanghai` 都能纠回来，但两者都是
+     **环境/连接串上的巧合**，代码本身没说清业务上「今天」是哪一天。
+  2. **理由留白**：权威草稿里只写「共查到 N 个可预约时段，下午最早 15:30」，没说上午为什么没有。
+     「约满」两个字**全仓零命中**，是模型给这个空档补的理由。
+- 决定一（**时钟只认一份**）：新增 `application.BusinessClock`（`@Component`，时区取
+  `demo.zone`，默认 `Asia/Shanghai`；`BusinessClock.DEMO_ZONE` 是**全仓唯一**的时区字面量）。
+  业务意义上的「今天 / 现在」一律走它，不再出现 `LocalDate.now()`。
+  静态上下文（`ApplicationRunner` 种子、`DemoSeed`）用 `BusinessClock.demoToday()/demoNow()`，同一份时区。
+  `MemoParser.DEMO_ZONE` 改为引用 `BusinessClock.DEMO_ZONE`（备忘链路原本就有时区，这次只是不再各写一份）。
+  `devcontainer.json` 的 `TZ=Asia/Shanghai` **保留**：它是环境兜底，覆盖 `created_at` / `last_active_at`
+  这类**纯记录时间戳**（它们记的是「这行是什么时候写的」，不是业务判断）。业务判断走 `BusinessClock`，
+  审计时间戳走 JVM 现在——这条边界是刻意的。
+- 决定二（**SQL 不再碰数据库时钟**）：`MockAppointmentTool` 的三个窗口查询和
+  `CareCatalogRepository.availableDates` 去掉 `CURRENT_DATE / CURRENT_TIME`，改为把「这一天/这一段」的
+  号源取回后在 Java 侧按 `BusinessClock.isPast(...)` 过滤。判据只此一处，
+  容器、CI、开发机跑出来都一样。口径与旧 SQL 一致：**到点即算过**（`!moment.isAfter(now)`）。
+- 决定三（**把「已经过了」和「没有号」分开说**）：新增 `AppointmentTool.queryDaySlots(...)`
+  ——「这一天仍可预约的号源，**不看时刻**」（当天已过的也在里面）。它**不登记进工具清单**：
+  模型要的是「能不能约」，它回的是「为什么不能约」，属于 Java 侧的话术依据。
+  服务层据此产出三句话（都不再是笼统的「暂无号源」）：
+  - `halfReason(period, slots, passed)`：`periodSummary` / `recommendPeriod` / `showPeriodSlots` 共用，
+    没有可约时段的那半天说「今天上午 9 点、10 点半的号已经过了」（`passed` 非空，必然意味着「今天」），
+    否则说「上午暂时没有可约的时段」——**不编「约满」，也不编「没有排班」**。
+  - `noSlotLead(date, passed)`：整天都约不到时说「今天（2026年9月15日）的号都已经过了：上午9点、……」。
+  - 问句跟着候选走：只有下午有号时不再问「您想上午去还是下午去」，改问「您看下午可以吗」。
+- 决定四（**重复预约的话术**）：`duplicateReply` 改成「〈今天 / 具体日期〉**这个时段您已经预约过了**：……」。
+  当天的那条说「今天这个时段已经预约过了」——老人脑子里装的正是「我今天上午不是约过了吗」，
+  回一句完整日期他还要自己换算一遍。与日程冲突那句「这个时间与您的…冲突」也分得开：
+  一个是「您自己已经约了」，一个是「您那天有别的事」。
+- 决定五（**提示词同步**）：`AgentSystemPrompt` 的「异常情况」补两条——当天已过的时段说「已经过了」
+  不许说「约满」（「约满」指名额被占完，与时间走掉是两件事，只有工具明说名额满才能说约满）；
+  重复预约当天的那条说「今天这个时段已经预约过了」。`toolResultAnswer()` 补一句：
+  结果里写明的理由要照说，工具没给理由就只说结果，不要补理由。
+- 影响面：`FollowupAgentService`（全部 `now()` 收口 + 上面四句话）、`MockAppointmentTool`、
+  `CareCatalogRepository`、`CareBookingService`、`CareService`、`RollingAppointmentSlotInitializer`、
+  `RollingUserScheduleInitializer`、`MemoParser`、`AgentSystemPrompt`、`application.yml`（`demo.zone`）、
+  `devcontainer.json`（`TZ`）。
+- 测试：`SilverAgentApplicationTests` 新增 `aMorningThatAlreadyPassedIsExplainedAsElapsedNotAsFullyBooked`
+  与 `aWholeDayThatAlreadyPassedIsExplainedWithTheElapsedTimes`——把 `BusinessClock` 用
+  `@MockitoSpyBean` 拨到当天 15:00 / 20:00（当天号源手工插，演示的「当天」多半不是心内科的放号日），
+  断言回复里有「已经过了」+ 具体钟点、且**不含**「约满」。既有两处重复预约断言随话术改成
+  「这个时段您已经预约过了」。
+- **数据库结构未改、前后端接口零变化** ⇒ `INTERFACE_CHANGES.md` 无需登记。

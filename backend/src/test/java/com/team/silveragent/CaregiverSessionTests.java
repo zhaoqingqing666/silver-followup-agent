@@ -42,7 +42,7 @@ class CaregiverSessionTests {
         for (String table : List.of("memos", "care_notifications", "family_notifications", "reminders", "appointments")) {
             jdbc.update("DELETE FROM " + table);
         }
-        jdbc.update("UPDATE appointment_slots SET available=TRUE");
+        jdbc.update("UPDATE appointment_slots SET booked=0, available=TRUE");
     }
 
     /** 女儿小丽替王阿姨 user-001 代约一份下周三的心内科复诊。 */

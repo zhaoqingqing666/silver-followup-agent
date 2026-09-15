@@ -46,7 +46,9 @@ final class ToolRegistry {
                 List.of("hospital", "department", "date"), AgentOrchestrator.Route.QUERY_AVAILABLE_SLOTS);
         register("appointment.queryNearbySlots", "指定日期无号时查询前后日期的真实模拟号源；只读",
                 List.of("hospital", "department", "date"), AgentOrchestrator.Route.QUERY_NEARBY_SLOTS);
-        register("appointment.checkDuplicate", "提交前查询同一用户是否已有相同医院、科室、日期和时间的预约；只读",
+        register("doctor.list", "查询科室当天或未来几天的出诊医生、职称、号别与挂号费；只读，不推荐具体医生",
+                List.of("hospital", "department", "date"), AgentOrchestrator.Route.QUERY_DOCTORS);
+        register("appointment.checkDuplicate", "提交前查询同一位就诊人同一天同一时刻是否已有预约（不分医院科室）；只读",
                 List.of("hospital", "department", "date", "time"), AgentOrchestrator.Route.CHECK_DUPLICATE);
         register("schedule.checkConflict", "查询当前预约草稿选择的时间是否与用户已有日程冲突；只读",
                 List.of("date", "time"), AgentOrchestrator.Route.CHECK_CONFLICT);

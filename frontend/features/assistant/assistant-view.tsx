@@ -1,7 +1,7 @@
 'use client';
 
 import { FormEvent, useEffect, useRef, useState, type ChangeEvent } from 'react';
-import { CalendarSearch, Camera, ClipboardCheck, History, Image as ImageIcon, LoaderCircle, Lock, NotebookPen, Plus, RefreshCw, Send, Sparkles, SquarePen, X } from 'lucide-react';
+import { Ban, CalendarSearch, Camera, ClipboardCheck, History, Image as ImageIcon, LoaderCircle, Lock, NotebookPen, Plus, RefreshCw, Send, Sparkles, SquarePen, X } from 'lucide-react';
 import { PageHeader } from '@/components/common/page-header';
 import {
   closeAgentConversation, confirmAgentActions, getConversationHistory,
@@ -466,6 +466,14 @@ export function AssistantView({ active, onNavigate, onOpenTravel, voicePreferenc
           <Sparkles className="size-4 shrink-0 text-primary" aria-hidden="true" />
           <span className="truncate">{readOnly ? '这段对话已经结束' : turn?.task?.active ? `办理步骤：${stageLabels[turn.stage] ?? '正在处理'}` : '当前可以自由交流'}</span>
         </div>
+        {/* 「取消本次办理」原来挂在对话下面那张「复诊办理待继续」卡上，而那张卡和这一行的
+            「办理步骤」说的是同一件事，等于同一屏说两遍。卡撤掉，入口挪到状态行右侧：
+            办理中才出现，其它时候不占地方。 */}
+        {!readOnly && turn?.task?.active && <button type="button" disabled={busy}
+          onClick={() => void sendAction('CANCEL_TASK', '', '取消本次办理')}
+          className="flex min-h-10 shrink-0 items-center gap-1.5 rounded-xl border border-[#dfb98f] bg-white px-3 text-sm font-bold text-[#6c3d24] disabled:opacity-40">
+          <Ban className="size-4 text-primary" aria-hidden="true" />取消办理
+        </button>}
         <button type="button" onClick={() => setHistoryOpen(true)}
           className="flex min-h-10 shrink-0 items-center gap-1.5 rounded-xl border border-[#dfb98f] bg-white px-3 text-sm font-bold text-[#6c3d24]">
           <History className="size-4 text-primary" aria-hidden="true" />历史记录
@@ -491,18 +499,25 @@ export function AssistantView({ active, onNavigate, onOpenTravel, voicePreferenc
         </button>
       </div>
     </section>}
-    <div className="border-b bg-[#fffaf3] px-5 py-3">
+    {/* 操作按钮区跟着状态行一起吸顶：往上滚对话时这一排按钮始终停在状态行下面，
+        老人不必滑回顶部才点得到「继续办理」。
+        top 的 141px = 标题栏 76px + 状态行自身高度 65px（py-3×2 + min-h-10 按钮 + 1px 分隔线）。
+        状态行的高度是被按钮的 min-h-10 撑住的，字号放大也不会变，这个数值是稳的。 */}
+    <div className="sticky top-[141px] z-30 border-b bg-[#fffaf3]/95 px-5 py-3 backdrop-blur">
       <div className="grid grid-cols-2 gap-2">
         {/* 只读态下「预约复诊」直接禁用：后端一定会拒收，让它可点只是诱着老人白按一次。 */}
         <button disabled={busy || readOnly} onClick={() => void sendAction('CONTINUE', '', turn?.task?.active ? '继续刚才的办理' : '我想预约复诊')} className="flex min-h-12 items-center justify-center gap-2 rounded-2xl bg-primary text-base font-bold text-white disabled:opacity-40"><CalendarSearch className="size-5" />{turn?.task?.active ? '继续办理' : '预约复诊'}</button>
         <button onClick={() => onNavigate('tasks')} className="flex min-h-12 items-center justify-center gap-2 rounded-2xl border bg-white text-base font-bold"><ClipboardCheck className="size-5 text-primary" />事项查询</button>
       </div>
+    </div>
+
+    {/* 朗读设置与快捷话术属于滚动内容的一部分，不吸顶：往上滑会被顶走，滑回顶部重新出现。
+        它们跟在按钮区后面，只是位置挨着，不参与吸顶。 */}
+    <div className="border-b bg-[#fffaf3] px-5 py-3">
       {/* 朗读设置就放在两个主按钮下面：老人觉得「念得太快 / 声音不好听」时，
           顺着页面往下看一眼就能找到，不必翻到别的页面去。 */}
-      <div className="mt-2">
-        <TtsSettings voicePreference={voicePreference} busy={voicePreferenceBusy}
-          error={voicePreferenceError} onChange={patch => onSpeechRateChange?.(patch)} />
-      </div>
+      <TtsSettings voicePreference={voicePreference} busy={voicePreferenceBusy}
+        error={voicePreferenceError} onChange={patch => onSpeechRateChange?.(patch)} />
       <div className="mt-2 rounded-2xl border border-dashed border-[#dba976] bg-white px-3 py-2 shadow-sm">
         <p className="flex items-center gap-2 text-sm font-semibold text-[#6c3d24]"><NotebookPen className="size-4 text-primary" aria-hidden="true" />记数值、记提醒、看看有哪些提醒，都可以说一句</p>
         <div className="mt-1.5 flex flex-wrap gap-2">
@@ -513,11 +528,12 @@ export function AssistantView({ active, onNavigate, onOpenTravel, voicePreferenc
       </div>
     </div>
 
-    {!readOnly && turn?.task?.active && <section className="border-b bg-[#fff4e7] px-5 py-3">
-      <div className="rounded-2xl border border-[#e6bc8c] bg-white px-4 py-3 shadow-sm">
-        <div className="flex items-start justify-between gap-3"><div><p className="text-sm font-bold text-primary">复诊办理待继续</p><p className="mt-1 text-base font-semibold">{turn.task.summary}</p>{turn.task.missingField && <p className="mt-1 text-sm text-muted-foreground">下一步：确认{turn.task.missingField}</p>}</div><span className="rounded-full bg-[#fff0dc] px-3 py-1 text-sm font-bold text-primary">{turn.task.status === 'PAUSED' ? '已暂停' : '进行中'}</span></div>
-        <div className="mt-3 flex gap-2"><button disabled={busy} onClick={() => void sendAction('RETURN_TO_FLOW', '', '继续刚才的办理')} className="min-h-11 flex-1 rounded-xl bg-primary px-3 font-bold text-white">继续办理</button><button disabled={busy} onClick={() => void sendAction('CANCEL_TASK', '', '取消本次办理')} className="min-h-11 flex-1 rounded-xl border px-3 font-semibold">取消本次办理</button></div>
-      </div>
+    {/* 复诊事项卡摆在这里，不进对话流：办完之后老人会反复回头看这张卡（几点、哪个院区、
+        几点出发），放在消息列表里会被后来的消息一直往上顶，看着就像"卡片跟着动"。
+        它占的是原「复诊办理待继续」卡的位置——同一块地方，办理中由顶部状态行说，
+        办完由这张卡说，不会同时出现两处在讲同一件事。 */}
+    {turn?.result && <section className="border-b bg-[#f0f9ec] px-5 py-3">
+      <ResultCardView result={turn.result} partial={turn.stage === 'PARTIAL'} onOpenTravel={onOpenTravel} />
     </section>}
     <div className="flex-1 space-y-4 px-5 py-5">
       <section aria-label="对话记录" className="space-y-3">
@@ -532,7 +548,7 @@ export function AssistantView({ active, onNavigate, onOpenTravel, voicePreferenc
       {visiblePlan && <PlanCard plan={visiblePlan} />}
       {/* 结束了的会话不摆确认卡：后端已经不放行，一张按不动的「确认办理」比没有卡片更糟。 */}
       {!readOnly && turn?.confirmation && <ConfirmationCardView card={turn.confirmation} busy={busy} onConfirm={() => void confirm(true)} onCancel={() => void confirm(false)} />}
-      {turn?.result && <ResultCardView result={turn.result} partial={turn.stage === 'PARTIAL'} onOpenTravel={onOpenTravel} />}
+      {/* 复诊事项卡不在这里：它移到对话流外面了（见上面的固定槽位），免得被后来的消息顶着走。 */}
       {/* 工具调用过程由后端每轮返回（toolTraces），这里原样渲染，不写死任何一条。
           办理中换成实时进度：这时上一轮的 toolTraces 已经不是「正在发生的事」了，
           混在一起会让人误以为旧步骤是本轮在跑的。 */}

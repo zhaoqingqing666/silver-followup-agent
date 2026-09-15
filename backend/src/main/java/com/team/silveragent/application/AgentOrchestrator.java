@@ -37,6 +37,8 @@ final class AgentOrchestrator {
         QUERY_CARE_GUIDE, MULTI_READ_TOOLS, QUERY_HOSPITALS, QUERY_DEPARTMENTS, RECOMMEND_HOSPITAL,
         RESOLVE_HOSPITAL, RESOLVE_DEPARTMENT, VALIDATE_DRAFT,
         QUERY_AVAILABLE_SLOTS, QUERY_NEARBY_SLOTS, CHECK_CONFLICT, CHECK_DUPLICATE,
+        // 出诊医生查询：按医院+科室（+日期）列出当天或未来几天的出诊医生、号别与挂号费；只读。
+        QUERY_DOCTORS,
         ASK_MATERIALS, QUERY_TRAVEL_GUIDE, QUERY_LOCATION_GUIDE,
         // 药品知识查询：命中的是知识库里的真实条目，查不到就如实说没查到。
         QUERY_DRUG_KNOWLEDGE,
@@ -103,6 +105,7 @@ final class AgentOrchestrator {
             case "REQUEST_RECOMMENDATION" -> Route.RECOMMEND_HOSPITAL;
             case "QUERY_AVAILABLE_SLOTS" -> Route.QUERY_AVAILABLE_SLOTS;
             case "QUERY_NEARBY_SLOTS" -> Route.QUERY_NEARBY_SLOTS;
+            case "QUERY_DOCTORS" -> Route.QUERY_DOCTORS;
             case "CHECK_CONFLICT" -> Route.CHECK_CONFLICT;
             case "CHECK_DUPLICATE" -> Route.CHECK_DUPLICATE;
             case "ASK_MATERIALS" -> Route.ASK_MATERIALS;

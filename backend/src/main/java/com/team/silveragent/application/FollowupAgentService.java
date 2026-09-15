@@ -72,6 +72,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
@@ -99,6 +100,8 @@ public class FollowupAgentService {
     private static final String DEFAULT_IMAGE_QUESTION = "请帮我看看这些图片里的药品或材料是什么、有什么要注意的。";
     private static final DateTimeFormatter DATE_LABEL = DateTimeFormatter.ofPattern("yyyy年M月d日");
     private static final DateTimeFormatter TIME_LABEL = DateTimeFormatter.ofPattern("HH:mm");
+    /** 口播里的日期不带年份（R3：播报从简），「9月16日」比「2026年9月16日」更像人话。 */
+    private static final DateTimeFormatter SPEECH_DATE = DateTimeFormatter.ofPattern("M月d日");
     private static final Pattern SPOKEN_DATE = Pattern.compile("(\\d{1,2})月(\\d{1,2})[日号]?");
     /** 取消筛选同时接受“9月12日”和老人常说/常输的“9.12号”。 */
     private static final Pattern CANCELLATION_DATE =
@@ -112,6 +115,17 @@ public class FollowupAgentService {
     /** 完成播报后只回一个“要/好的”时的整句肯定句式，见 isShortAffirmative。 */
     private static final Pattern AFFIRMATIVE =
             Pattern.compile("(是|要|好|行|可以|需要|看看|看一下|听听|嗯|对)(的|了|吧|啊|呀|看|一下)*");
+    /**
+     * 「和上次一样」「还是那家」「照旧」这类**按记忆里那家来**的整句说法，见 {@link #confirmsRememberedHospital}。
+     *
+     * <p>老人被问「去哪家医院」时很少报全名，只会说一句「和上次一样」。Java 手上恰好有候选
+     * （记忆里那家），这类说法就得和「是的」同等对待，否则老人答了等于没答，还要被反问一遍。
+     * 整句匹配，前后只允许这些连接词与语气词；带否定的说法（「上次那家不好」）一律不认。
+     */
+    private static final Pattern SAME_AS_BEFORE = Pattern.compile(
+            "(?:和|跟|与|同|就|还是|像|象)*"
+                    + "(?:上次|上回|以前|之前|原来|往常|平时|老样子|照旧|老规矩)"
+                    + "(?:一样|相同|一致|那样|那家|的那个|的那家|的|吧|了|就行|都可以)*");
     private static final DateTimeFormatter MEMO_LABEL = DateTimeFormatter.ofPattern("M月d日 HH:mm");
     private static final DateTimeFormatter MEMO_DAY_ONLY = DateTimeFormatter.ofPattern("M月d日");
     /** 回答“几点”时表示“不想到点提醒、只记下”的说法，命中则存长期备忘。 */
@@ -180,6 +194,11 @@ public class FollowupAgentService {
     private final TurnProgress turnProgress;
     private final MemoryStore memories;
     private final ConfirmationInteractionTool confirmationInteraction;
+    /**
+     * 业务意义上的「今天 / 现在」。所有日期与时段判断都走它，不直接写 {@code clock.today()}：
+     * 容器镜像默认是 UTC，而 H2 的时钟又不吃 {@code TimeZone.setDefault}（详见 {@link BusinessClock}）。
+     */
+    private final BusinessClock clock;
     private final String defaultUserId;
     private final Map<String, ConversationState> sessions = new ConcurrentHashMap<>();
     /** 工具循环中的中间响应不能写入对话，也不能提前再调用一次回答模型。 */
@@ -220,6 +239,7 @@ public class FollowupAgentService {
             TurnProgress turnProgress,
             MemoryStore memories,
             ConfirmationInteractionTool confirmationInteraction,
+            BusinessClock clock,
             @Value("${demo.user-id:user-001}") String defaultUserId) {
         this.appointmentTool = appointmentTool;
         this.careGuideTool = careGuideTool;
@@ -255,6 +275,7 @@ public class FollowupAgentService {
         this.turnProgress = turnProgress;
         this.memories = memories;
         this.confirmationInteraction = confirmationInteraction;
+        this.clock = clock;
         this.defaultUserId = defaultUserId;
     }
 
@@ -456,7 +477,7 @@ public class FollowupAgentService {
             }
         }
         AgentContext context = new AgentContext(state.stage.name(), knownFacts(state),
-                LocalDate.now(), conversations.recentMessages(state.id), identityOf(state),
+                clock.today(), conversations.recentMessages(state.id), identityOf(state),
                 conversations.recentVision(state.id));
         // 「把图上的字念一遍」不走模型：这种问题只要求逐字照抄，让语言模型过一手反而可能
         // 把规格、文号、日期改写掉。识别结果本身就是权威的，直接念。
@@ -525,6 +546,10 @@ public class FollowupAgentService {
         }
         AgentTurnResponse entityConfirmation = handlePendingEntityConfirmation(state, value, facts);
         if (entityConfirmation != null) return entityConfirmation;
+        // 老人对「还是像以前那样去X吗？」回一句「是的」时，Java 手上得真有一个候选才认得住。
+        // 排在待确认候选之后：刚问出口的那一个永远比长期记忆优先。
+        AgentTurnResponse rememberedPick = confirmRememberedHospital(state, value);
+        if (rememberedPick != null) return rememberedPick;
         if ("CANCEL_EXISTING_APPOINTMENT".equals(state.sideTask) && !structuredConfirmationCall) {
             // “都取消 / 9月12日前的都取消”是在承接上一轮预约列表，不应重新掉回意图识别，
             // 也不能被单条候选解析抢先消费；这里只生成整组确认卡，仍不直接写库。
@@ -850,6 +875,7 @@ public class FollowupAgentService {
                 yield showAvailableSlots(state);
             }
             case QUERY_NEARBY_SLOTS -> queryNearbySlots(state);
+            case QUERY_DOCTORS -> showOnDutyDoctors(state, facts);
             case CHECK_CONFLICT -> checkSchedule(state);
             case CHECK_DUPLICATE -> checkDuplicate(state);
             case ASK_MATERIALS -> showMaterials(state, facts);
@@ -929,7 +955,7 @@ public class FollowupAgentService {
 
             String evidence = toolLoopEvidence(round, freshCalls, latestToolResponse);
             AgentContext nextContext = new AgentContext(state.stage.name(), knownFacts(state),
-                    LocalDate.now(), conversations.recentMessages(state.id), identityOf(state),
+                    clock.today(), conversations.recentMessages(state.id), identityOf(state),
                     conversations.recentVision(state.id));
             turnProgress.mark(state.id, TurnProgress.Kind.PLANNING);
             current = agentRuntime.continueAfterTools(originalMessage, nextContext, state, evidence);
@@ -1006,6 +1032,7 @@ public class FollowupAgentService {
             case "department.list" -> AgentOrchestrator.Route.QUERY_DEPARTMENTS;
             case "appointment.querySlots" -> AgentOrchestrator.Route.QUERY_AVAILABLE_SLOTS;
             case "appointment.queryNearbySlots" -> AgentOrchestrator.Route.QUERY_NEARBY_SLOTS;
+            case "doctor.list" -> AgentOrchestrator.Route.QUERY_DOCTORS;
             case "appointment.checkDuplicate" -> AgentOrchestrator.Route.CHECK_DUPLICATE;
             case "schedule.checkConflict" -> AgentOrchestrator.Route.CHECK_CONFLICT;
             case "appointment.queryMine" -> AgentOrchestrator.Route.QUERY_MY_APPOINTMENTS;
@@ -1070,6 +1097,10 @@ public class FollowupAgentService {
         }
         state.dialogueMode = ConversationState.DialogueMode.FOLLOWUP_FLOW;
         applyFacts(state, facts);
+        if (facts.doctor() != null && state.date != null && state.selectedSlot == null) {
+            // 模型模式下同样：中途点名医生 → 收缩候选（见 continueCurrentFlow 同款分支）。
+            return querySlots(state);
+        }
         // 老人说了家属但目录里对不上（“我闺女”“老张”）：不能当作没听见再问一遍“要通知谁”，
         // 那样同一句话会被反复问。把数据库里真实登记的人摆出来让他挑。
         if (Boolean.TRUE.equals(state.notifyFamily) && state.contact == null
@@ -1108,6 +1139,12 @@ public class FollowupAgentService {
                     () -> materialTool.checklist(state.id, state.hospital, state.department));
             return checkSchedule(state);
         }
+        // 医院、科室都定了但日期还没定：这一步的清单由 Java 出（showAvailableSlots 自带 SET_DATE 按钮）。
+        // 日期是权威数据，不能让模型复述——它随口编出一个库里没有的日子，老人照着点，
+        // 下一轮查到「这天没有号」，白跑一趟；而这一轮本来只要把真实日期摆出来就行。
+        if (state.hospitalId != null && state.department != null && state.date == null) {
+            return showAvailableSlots(state);
+        }
         syncPresentationStage(state);
         if (replyDraft != null && !replyDraft.isBlank()) {
             return respondWithoutModel(state, replyDraft, modelSuggestedReplies(state));
@@ -1126,11 +1163,21 @@ public class FollowupAgentService {
 
     private List<QuickReply> modelSuggestedReplies(ConversationState state) {
         if (state.stage == ConversationState.Stage.AWAITING_CONFIRMATION) return List.of();
-        if (state.selectedSlot == null && !state.alternatives.isEmpty()) {
+        // 半天还没定：给「上午 / 下午 / 直接选择具体时间」这一档，与规则链路用同一套
+        // （periodReplies）。这一步老人要答的是「上午还是下午」，直接把号源摆出来等于跳过了他的问题。
+        if (state.stage == ConversationState.Stage.SELECT_PERIOD && !state.alternatives.isEmpty()) {
+            return periodReplies(state.alternatives);
+        }
+        // 只有真的在选时间时才挂号源按钮。以前这个分支不看阶段，「还没选号 + 有候选号源」就发号源按钮，
+        // 于是当草稿里没有号源（模型没回传 selectedTime 时，stage 只能停在 SELECT_PERIOD / SELECT_SLOT）
+        // 而模型嘴上在问别的事（“需要人陪您去吗”）时，底下挂的却是三个时间段，老人只能照着错的按钮点。
+        // 号源按钮与「这一轮在问什么」对齐之后，这种错配就没有了。
+        boolean selectingTime = state.stage == ConversationState.Stage.SELECT_SLOT
+                || state.stage == ConversationState.Stage.CONFIRM_SLOT;
+        if (selectingTime && state.selectedSlot == null && !state.alternatives.isEmpty()) {
             return slotReplies(state.alternatives.stream().limit(3).toList());
         }
-        // 按钮要跟着这一轮真正问的问题走。以前这里只认号源，模型问“需要人陪您去吗”时
-        // 底下却还挂着三个时间段，老人只能照着错的按钮点。
+        // 按钮要跟着这一轮真正问的问题走。
         return switch (state.stage) {
             case ASK_ALTERNATIVE -> List.of(q("可以换日期", "SET_ALTERNATIVE", "true"),
                     q("只要这一天", "SET_ALTERNATIVE", "false"));
@@ -1245,8 +1292,8 @@ public class FollowupAgentService {
             return respond(state, "当前有一项重要操作等待确认。请明确选择确认或返回修改。", List.of());
         }
         discardInterruption(state);
-        if (facts.date() != null && (facts.date().isBefore(LocalDate.now())
-                || facts.date().isAfter(LocalDate.now().plusMonths(1)))) {
+        if (facts.date() != null && (facts.date().isBefore(clock.today())
+                || facts.date().isAfter(clock.today().plusMonths(1)))) {
             return respond(state, "目前可以查询今天到一个月后的模拟号源，请在这个日期范围内重新选择。",
                     List.of(q("查看可预约日期", "SHOW_AVAILABLE_DATES", ""),
                             q("我自己说日期", "ASK_HUMAN_INPUT", "")));
@@ -1254,6 +1301,11 @@ public class FollowupAgentService {
 
         ConversationState.Stage previousStage = state.stage;
         applyFacts(state, facts);
+        // 老人在漏斗中途点名医生（“找张建国”）：日期已定时重新查一遍号源，
+        // 让候选收缩到这位医生——这句新线索比停在原地问「上午还是下午」更重要。
+        if (facts.doctor() != null && state.date != null && state.selectedSlot == null) {
+            return querySlots(state);
+        }
         if (previousStage == ConversationState.Stage.CONFIRM_SLOT && state.recommendedSlot != null) {
             if (Boolean.TRUE.equals(facts.acceptRecommendedTime())) return selectSlot(state, state.recommendedSlot.id());
             if (Boolean.FALSE.equals(facts.acceptRecommendedTime())) return showPeriodSlots(state, state.timePreference);
@@ -1411,13 +1463,20 @@ public class FollowupAgentService {
             case "SET_TRAVEL" -> state.needTravel = Boolean.parseBoolean(safeValue);
             case "SET_TRANSPORT" -> state.transport = safeValue;
             case "SET_NOTIFY" -> { state.notifyFamily = Boolean.parseBoolean(safeValue); if (!state.notifyFamily) state.contact = null; }
+            case "SET_EXPERT" -> {
+                // R1 的「改约普通号」出口：只关掉号别诉求，日期原封不动，重新走一遍正常漏斗。
+                state.wantsExpert = Boolean.parseBoolean(safeValue);
+                if (!state.wantsExpert && state.date != null && state.selectedSlot == null) return querySlots(state);
+            }
             case "SET_CONTACT" -> { state.contact = catalog.contacts(state.userId).stream().filter(c -> c.id().equals(safeValue)).findFirst().orElseThrow(() -> new IllegalArgumentException("请选择当前用户的家属")); }
             case "EDIT_PREFERENCES" -> { state.needCompanion = null; state.needTravel = null; state.notifyFamily = null; state.contact = null; invalidate(state); }
             case "START_PLAN" -> { return ready(state) ? checkSchedule(state) : advance(state, ExtractedFacts.empty()); }
             case "RETRY_QUERY" -> { return querySlots(state); }
             case "SHOW_AVAILABLE_DATES" -> { return showAvailableSlots(state); }
             case "SELECT_SLOT" -> { return selectSlot(state, safeValue); }
-            case "KEEP_CONFLICT" -> { state.scheduleChecked = true; return buildConfirmation(state); }
+            // 与阶段分派那条共用 keepConflict 一处实现：按钮只有冲突提示才会渲染，
+            // 非冲突态点它本就是无效操作，如实说一句比静默产出确认卡好。
+            case "KEEP_CONFLICT" -> { return keepConflict(state); }
             case "CHANGE_DATE" -> {
                 discardInterruption(state);
                 resetAfterDate(state);
@@ -2041,7 +2100,7 @@ public class FollowupAgentService {
             return List.of(rows.stream().min(Comparator.comparing(this::appointmentAt)).orElseThrow());
         }
         if (rows.size() > 1 && "NEAREST".equals(selection.position())) {
-            LocalDateTime now = LocalDateTime.now();
+            LocalDateTime now = clock.nowDateTime();
             return List.of(rows.stream().min(Comparator.comparingLong(item ->
                     Math.abs(java.time.Duration.between(now, appointmentAt(item)).toMinutes()))).orElseThrow());
         }
@@ -2144,7 +2203,7 @@ public class FollowupAgentService {
         try {
             // 这里筛的是数据库里已经存在的预约，过去两天也可能仍是 CONFIRMED。
             // 因此“9月10日”按今年理解，不能套新建预约的“过去日期顺延到明年”规则。
-            return LocalDate.of(LocalDate.now().getYear(), Integer.parseInt(matcher.group(1)),
+            return LocalDate.of(clock.today().getYear(), Integer.parseInt(matcher.group(1)),
                     Integer.parseInt(matcher.group(2)));
         } catch (RuntimeException ignored) {
             return modelDate;
@@ -2191,7 +2250,7 @@ public class FollowupAgentService {
                     resumeReplies(state, q("查询我的预约", "QUERY_APPOINTMENTS", "")));
         }
         if (candidates.size() > 1 && latest) {
-            LocalDateTime now = LocalDateTime.now();
+            LocalDateTime now = clock.nowDateTime();
             candidates = List.of(candidates.stream().min(Comparator.comparingLong(item ->
                     Math.abs(java.time.Duration.between(now, appointmentAt(item)).toMinutes()))).orElseThrow());
         } else if (candidates.size() > 1 && earliest) {
@@ -2212,7 +2271,7 @@ public class FollowupAgentService {
         Matcher matcher = SPOKEN_DATE.matcher(message);
         if (!matcher.find()) return null;
         try {
-            return LocalDate.of(LocalDate.now().getYear(), Integer.parseInt(matcher.group(1)),
+            return LocalDate.of(clock.today().getYear(), Integer.parseInt(matcher.group(1)),
                     Integer.parseInt(matcher.group(2)));
         } catch (RuntimeException ignored) {
             return null;
@@ -2307,7 +2366,7 @@ public class FollowupAgentService {
         discardInterruption(state);
         resetAfterDate(state);
         if (facts.date() == null) return askDate(state, "好的，请告诉我新的复诊日期。");
-        if (facts.date().isBefore(LocalDate.now()) || facts.date().isAfter(LocalDate.now().plusMonths(1))) {
+        if (facts.date().isBefore(clock.today()) || facts.date().isAfter(clock.today().plusMonths(1))) {
             return respond(state, "目前可以查询今天到一个月后的模拟号源，请重新选择日期。",
                     List.of(q("查看可预约日期", "SHOW_AVAILABLE_DATES", "")));
         }
@@ -2420,7 +2479,7 @@ public class FollowupAgentService {
         clearPendingEntity(state);
         if (rejected) {
             return "HOSPITAL".equals(type)
-                    ? askHospital(state, "好的，不选择“" + name + "”。请重新说医院全名或院区。")
+                    ? askHospital(state, "好的，不选择“" + name + "”。请重新说医院全名或院区。", false)
                     : askDepartment(state, "好的，不选择“" + name + "”。请重新说医生安排的复诊科室。");
         }
         if ("HOSPITAL".equals(type)) chooseHospital(state, id);
@@ -2682,7 +2741,7 @@ public class FollowupAgentService {
         }
         if (referenced && rows.size() > 1) {
             // “上次 / 最近”本身就是筛选条件：按离现在最近的一条收敛，仍然只认数据库里的真实记录。
-            LocalDateTime now = LocalDateTime.now();
+            LocalDateTime now = clock.nowDateTime();
             rows = List.of(rows.stream().min(Comparator.comparingLong(
                     item -> Math.abs(Duration.between(now, appointmentAt(item)).toMinutes()))).orElseThrow());
         }
@@ -2826,7 +2885,7 @@ public class FollowupAgentService {
     private String latestEffectiveAppointmentId(ConversationState state) {
         List<AppointmentSummary> rows = myAppointmentTool.search(state.id, state.userId, null, null, null);
         if (rows.isEmpty()) return null;
-        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime now = clock.nowDateTime();
         List<AppointmentSummary> upcoming = rows.stream()
                 .filter(item -> !appointmentAt(item).isBefore(now))
                 .sorted(Comparator.comparing(this::appointmentAt)).toList();
@@ -3041,24 +3100,36 @@ public class FollowupAgentService {
 
     private AgentTurnResponse querySlots(ConversationState state) {
         if (state.hospitalId == null || state.department == null || state.date == null) return advance(state, ExtractedFacts.empty());
-        if (state.date.isBefore(LocalDate.now())) { resetAfterDate(state); return askDate(state, "这个日期已经过去，请重新选择复诊日期。"); }
+        if (state.date.isBefore(clock.today())) { resetAfterDate(state); return askDate(state, "这个日期已经过去，请重新选择复诊日期。"); }
         List<Slot> slots = callTool(state, "appointment.querySlots", Map.of("hospitalId", state.hospitalId, "department", state.department, "date", state.date),
                 () -> appointmentTool.queryAvailableSlots(state.id, state.hospitalId, state.department, state.date));
+        // 这一天「今天已经过去」的时段。只在当天可能非空，但它是下面每一句话的理由依据：
+        // 少了它，「上午一个都没有」就只能笼统说成「暂无号源」，理由空着就有人去编——
+        // 演示里那句「上午已经约满了」正是这么来的（「约满」在全仓代码里一个字都没有）。
+        List<Slot> passed = passedSlots(state);
         state.selectedSlot = null;
         state.recommendedSlot = null;
         if (!slots.isEmpty()) {
             state.alternatives = slots;
+            resolveDoctorWish(state, slots);
+            if (state.doctorQuery != null) return doctorNotFoundReply(state, slots);
+            if (state.wantsExpert && state.alternatives.stream().noneMatch(SlotRecommender::isExpert)) {
+                // R1：老人要专家号而这一天没有——明说，并主动给 7 天内最近的专家号，
+                // 绝不静默把日期换成别的日子。
+                return noExpertOnDateReply(state);
+            }
             if (state.requestedTime != null) return recommendSpecificTime(state, state.requestedTime);
             if (state.timePreference != null) return recommendPeriod(state, state.timePreference);
             state.stage = ConversationState.Stage.SELECT_PERIOD;
-            return respondWithPlan(state, periodSummary(state.date, slots), periodReplies(slots));
+            return respondWithPlan(state, periodSummary(state.date, state.alternatives, passed), periodReplies(state.alternatives));
         }
 
         state.stage = ConversationState.Stage.NO_SLOT;
         state.alternatives = List.of();
-        if (state.acceptAlternative == null) return respondWithPlan(state, "这一天暂无号源。您接受附近的其他日期吗？",
+        String none = noSlotLead(state.date, passed);
+        if (state.acceptAlternative == null) return respondWithPlan(state, none + "您接受附近的其他日期吗？",
                 List.of(q("接受其他日期", "SET_ALTERNATIVE", "true"), q("只要这一天", "SET_ALTERNATIVE", "false")));
-        if (!state.acceptAlternative) return respondWithPlan(state, "这一天暂无号源，已保留只选这一天的意愿。",
+        if (!state.acceptAlternative) return respondWithPlan(state, none + "已保留只选这一天的意愿。",
                 List.of(q("稍后再查", "RETRY_QUERY", ""), q("主动修改日期", "CHANGE_DATE", ""), q("换医院", "CHANGE_HOSPITAL", "")));
         state.alternatives = callTool(state, "appointment.queryAlternatives", Map.of("hospitalId", state.hospitalId, "date", state.date),
                 () -> appointmentTool.queryAlternatives(state.id, state.hospitalId, state.department, state.date));
@@ -3066,11 +3137,11 @@ public class FollowupAgentService {
             List<QuickReply> choices = new ArrayList<>(
                     slotReplies(state.alternatives.stream().limit(3).toList()));
             choices.add(q("重新选择日期", "CHANGE_DATE", ""));
-            return respondWithPlan(state, state.date.format(DATE_LABEL) +
-                    "暂时没有可预约时段。我查到了附近日期的真实模拟号源，请选择一个，或重新选日期。", choices);
+            return respondWithPlan(state, none +
+                    "我查到了附近日期的真实模拟号源，请选择一个，或重新选日期。", choices);
         }
-        return respondWithPlan(state, state.date.format(DATE_LABEL) +
-                "暂时没有可预约时段。我保留了其他信息，您可以修改日期或医院。",
+        return respondWithPlan(state, none +
+                "我保留了其他信息，您可以修改日期或医院。",
                 List.of(q("重新选择日期", "CHANGE_DATE", ""),
                         q("查看其他医院", "CHANGE_HOSPITAL", ""),
                         q("稍后再查", "RETRY_QUERY", "")));
@@ -3085,14 +3156,16 @@ public class FollowupAgentService {
         state.alternatives = callTool(state, "appointment.queryAlternatives",
                 Map.of("hospitalId", state.hospitalId, "department", state.department, "date", state.date),
                 () -> appointmentTool.queryAlternatives(state.id, state.hospitalId, state.department, state.date));
+        // 同样是「今天已过」还是「本来没号」：理由不同，话不能混着说。
+        String none = noSlotLead(state.date, passedIfWholeDayIsOver(state));
         if (state.alternatives.isEmpty()) {
-            return respondWithPlan(state, state.date.format(DATE_LABEL)
-                            + "没有号，接下来三天也没有查到可预约时段。您可以换日期、换医院或稍后再查。",
+            return respondWithPlan(state, none
+                            + "接下来三天也没有查到可预约时段。您可以换日期、换医院或稍后再查。",
                     List.of(q("换日期", "CHANGE_DATE", ""), q("换医院", "CHANGE_HOSPITAL", ""),
                             q("稍后再查", "RETRY_QUERY", "")));
         }
-        return respondWithPlan(state, state.date.format(DATE_LABEL)
-                        + "没有号。我查询了附近日期，下面这些时间目前可以预约，请选择一个。",
+        return respondWithPlan(state, none +
+                        "我查询了附近日期，下面这些时间目前可以预约，请选择一个。",
                 slotReplies(state.alternatives.stream().limit(4).toList()));
     }
 
@@ -3103,12 +3176,12 @@ public class FollowupAgentService {
         if (state.department == null) {
             return askDepartment(state, "要查询号源，还需要先选择复诊科室。");
         }
-        if (state.date != null && !state.date.isBefore(LocalDate.now())
-                && !state.date.isAfter(LocalDate.now().plusMonths(1))) {
+        if (state.date != null && !state.date.isBefore(clock.today())
+                && !state.date.isAfter(clock.today().plusMonths(1))) {
             return querySlots(state);
         }
 
-        LocalDate from = LocalDate.now();
+        LocalDate from = clock.today();
         LocalDate to = from.plusMonths(1);
         List<Slot> slots = appointmentTool.queryUpcomingSlots(
                 state.id, state.hospitalId, state.department, from, to);
@@ -3135,11 +3208,14 @@ public class FollowupAgentService {
 
     private AgentTurnResponse recommendPeriod(ConversationState state, String preference) {
         String normalized = "AFTERNOON".equalsIgnoreCase(preference) ? "AFTERNOON" : "MORNING";
-        List<Slot> candidates = filterByPeriod(state.alternatives, normalized);
+        List<Slot> candidates = SlotRecommender.sort(filterByPeriod(state.alternatives, normalized), state.wantsExpert);
         if (candidates.isEmpty()) {
             String other = "MORNING".equals(normalized) ? "AFTERNOON" : "MORNING";
             List<Slot> otherSlots = filterByPeriod(state.alternatives, other);
-            return respondWithPlan(state, periodLabel(normalized) + "暂时没有号。" +
+            // 「这半天没有号」得说清是哪种没有：今天已经过了，还是本来就没排班。
+            // 只有一句「上午暂时没有号」时，老人追问「啊上午没有吗」听到的还是同一句，
+            // 理由就留给模型去编了——演示里它编出的是「上午已经约满了」。
+            return respondWithPlan(state, halfReason(normalized, state.alternatives, passedSlots(state)) + "。" +
                     (otherSlots.isEmpty() ? "请重新选择日期。" :
                             periodLabel(other) + "最早" + otherSlots.get(0).time().format(TIME_LABEL) + "还有号。"),
                     otherSlots.isEmpty()
@@ -3147,16 +3223,83 @@ public class FollowupAgentService {
                             : List.of(q("选择" + periodLabel(other), "SET_PERIOD", other),
                                     q("重新选择日期", "CHANGE_DATE", "")));
         }
+        if (state.wantsExpert && candidates.stream().noneMatch(SlotRecommender::isExpert)) {
+            return expertOnlyInOtherPeriodReply(state, normalized);
+        }
         state.timePreference = normalized;
-        state.recommendedSlot = candidates.get(0);
+        // R3：单轮最多摆 2 个候选，按钮直接带「时间 + 医生 + 号别」，老人不用再猜哪条是哪位。
+        // 候选要按医生去重：上午坐诊的同一位医生本来就有 09:00 / 10:30 两个时刻，直接取排序
+        // 前两条会变成「同一个人您约几点」——老人根本没点名医生，摆两个同一个人的号毫无信息量。
+        // 没点名时两个候选给两位不同的医生（各取该医生最靠前的一条）；点名医生时才保留
+        // 他的两个时刻让老人挑时间。
+        List<Slot> packed = (state.doctorId != null ? candidates : SlotRecommender.bestPerDoctor(candidates))
+                .stream().limit(SlotRecommender.MAX_OFFERED_SLOTS).toList();
+        state.recommendedSlot = packed.get(0);
         state.stage = ConversationState.Stage.CONFIRM_SLOT;
-        return respondWithPlan(state, periodLabel(normalized) + "最早" +
-                        state.recommendedSlot.time().format(TIME_LABEL) +
-                        "还有预约号，这个时间可以吗？",
-                List.of(q("这个时间可以", "SELECT_SLOT", state.recommendedSlot.id()),
-                        q("看看其他" + periodLabel(normalized) + "时间", "SHOW_PERIOD_SLOTS", normalized),
-                        q("改选" + periodLabel("MORNING".equals(normalized) ? "AFTERNOON" : "MORNING"),
-                                "SET_PERIOD", "MORNING".equals(normalized) ? "AFTERNOON" : "MORNING")));
+        // R9（DEC-027）：推荐轮的按钮恒 ≤3 个。前端每屏只渲染 3 个（assistant-view 的
+        // slice(choicePage * 3, +3)），第 4 个会被折进「查看更多选项」——而双候选时被折掉的
+        // 恰好是「改选另一半」，它却是**另一个半天那两个时段**的唯一入口。
+        // 所以把「看看其他X时间」与「改选X」并成一个入口：出口一个没少（「改选X」在
+        // showPeriodSlots 那一页本来就有一条），按钮数从 4 降到 3。
+        List<QuickReply> choices = new ArrayList<>();
+        if (packed.size() == 1) {
+            choices.add(q("这个时间可以", "SELECT_SLOT", packed.get(0).id()));
+        } else {
+            for (Slot slot : packed) {
+                choices.add(q(slot.time().format(TIME_LABEL) + " " + doctorBrief(slot), "SELECT_SLOT", slot.id()));
+            }
+        }
+        choices.add(q("看全部" + periodLabel(normalized) + "时间", "SHOW_PERIOD_SLOTS", normalized));
+        // R7（DEC-027）：「推荐」只在**自动推荐轮**说——老人没点名医生，这几个候选是助手替他挑的。
+        // 点名医生之后（doctorId 已定）是「按您说的给」，沿用旧话术，一个字不提「推荐」。
+        boolean autoRecommended = state.doctorId == null;
+        String reply = autoRecommended
+                ? autoRecommendReply(state, normalized, packed)
+                : packed.size() == 1
+                        ? periodLabel(normalized) + "最早" + packed.get(0).time().format(TIME_LABEL)
+                                + "还有预约号，" + doctorBrief(packed.get(0)) + "，这个时间可以吗？"
+                        : periodLabel(normalized) + "有这几位医生的号，您想约哪位？"
+                                + packed.stream().map(slot -> slot.time().format(TIME_LABEL) + doctorBrief(slot))
+                                        .collect(java.util.stream.Collectors.joining("、")) + "。";
+        return respondWithSpeech(state, reply, choices, candidatesSpeech(state.date, packed, autoRecommended));
+    }
+
+    /**
+     * R7 + R8（DEC-027）：自动推荐轮的话术——「推荐」+ <b>医生信息在前、时间顺带跟在后面</b>
+     * （用户原话「医生信息顺带时间」），末尾再补一句「今天另一半还有几个时段」。
+     *
+     * <p>例：`我先推荐王建华副主任医师（专家号），09:00；另一位是陈凤兰主治医师（普通号），10:30。今天下午还有2个时段。您想约哪位？`
+     *
+     * <p>只说「我替您挑的」，不暗示这个号更优——排序依据（号型匹配 → 职称 → 时间 → 同档位低价）
+     * 不写进话术：老人要的是结论，不是算法说明，而且依据常常不止一条。
+     */
+    private String autoRecommendReply(ConversationState state, String preference, List<Slot> packed) {
+        Slot first = packed.get(0);
+        String head = packed.size() == 1
+                ? "我推荐" + doctorBrief(first) + "，" + first.time().format(TIME_LABEL) + "。"
+                : "我先推荐" + doctorBrief(first) + "，" + first.time().format(TIME_LABEL)
+                        + "；另一位是" + doctorBrief(packed.get(1)) + "，"
+                        + packed.get(1).time().format(TIME_LABEL) + "。";
+        return head + dayScopeHint(state, preference)
+                + (packed.size() == 1 ? "这个时间可以吗？" : "您想约哪位？");
+    }
+
+    /** R1 的时段级分支：老人要专家号，选的这个时段全是普通号——问一句，不擅自换。 */
+    private AgentTurnResponse expertOnlyInOtherPeriodReply(ConversationState state, String preference) {
+        String other = "MORNING".equals(preference) ? "AFTERNOON" : "MORNING";
+        Slot otherExpert = SlotRecommender.sort(filterByPeriod(state.alternatives, other), true).stream()
+                .filter(SlotRecommender::isExpert).findFirst().orElse(null);
+        if (otherExpert == null) {
+            // 全天都没有专家号：这个分支只在「上午有专家、下午没有」的日子进不来（querySlots 已拦），
+            // 真进来就是排班整体没有专家，按 R1 的降级话术走。
+            return noExpertOnDateReply(state);
+        }
+        return respondWithPlan(state, "您要的是专家号，" + periodLabel(preference) + "的号都是普通号。"
+                        + "专家号在" + periodLabel(other) + otherExpert.time().format(TIME_LABEL) + "，"
+                        + doctorBrief(otherExpert) + "，要改吗？",
+                List.of(q("改选" + periodLabel(other) + "专家号", "SET_PERIOD", other),
+                        q("就看普通号", "SET_EXPERT", "false"),
+                        q("重新选择日期", "CHANGE_DATE", "")));
     }
 
     private AgentTurnResponse recommendSpecificTime(ConversationState state, LocalTime requestedTime) {
@@ -3172,15 +3315,19 @@ public class FollowupAgentService {
         state.timePreference = requestedTime.isBefore(LocalTime.NOON) ? "MORNING" : "AFTERNOON";
         state.recommendedSlot = recommendation;
         state.stage = ConversationState.Stage.CONFIRM_SLOT;
-        String reply = exact != null
-                ? requestedTime.format(TIME_LABEL) + "还有预约号，这个时间可以吗？"
+        // R8（DEC-027）：这里不说「推荐」——老人自己指定了时刻，是「按您说的给」；但同样补一句
+        // 当天另一半的条数：他要的那个点恰好没号，正是最需要知道「还有别的时段」的时候。
+        String reply = (exact != null
+                ? requestedTime.format(TIME_LABEL) + "还有预约号，" + doctorBrief(recommendation) + "。"
                 : "您想要的" + requestedTime.format(TIME_LABEL) + "暂时没有号。最接近的" +
-                recommendation.time().format(TIME_LABEL) + "还有号，这个时间可以吗？";
-        return respondWithPlan(state, reply, List.of(
+                recommendation.time().format(TIME_LABEL) + "还有号，" + doctorBrief(recommendation) + "。")
+                + dayScopeHint(state, state.timePreference) + "这个时间可以吗？";
+        return respondWithSpeech(state, reply, List.of(
                 q("这个时间可以", "SELECT_SLOT", recommendation.id()),
-                q("看看其他" + periodLabel(state.timePreference) + "时间",
+                q("看全部" + periodLabel(state.timePreference) + "时间",
                         "SHOW_PERIOD_SLOTS", state.timePreference),
-                q("重新选择日期", "CHANGE_DATE", "")));
+                q("重新选择日期", "CHANGE_DATE", "")),
+                candidatesSpeech(state.date, List.of(recommendation), false));
     }
 
     private AgentTurnResponse showPeriodSlots(ConversationState state, String preference) {
@@ -3190,8 +3337,11 @@ public class FollowupAgentService {
         List<QuickReply> choices = new ArrayList<>(slotReplies(candidates));
         String other = "MORNING".equals(normalized) ? "AFTERNOON" : "MORNING";
         choices.add(q("改选" + periodLabel(other), "SET_PERIOD", other));
-        return respondWithPlan(state, "以下是" + periodLabel(normalized) +
-                "仍可预约的时间，请选择一个。", choices);
+        // 一个候选都没有时说「以下是上午仍可预约的时间」就成了空话：先把没有的理由讲清楚。
+        String lead = candidates.isEmpty()
+                ? halfReason(normalized, state.alternatives, passedSlots(state)) + "。"
+                : "以下是" + periodLabel(normalized) + "仍可预约的时间，请选择一个。";
+        return respondWithPlan(state, lead, choices);
     }
 
     /** 在真实号源里找等于 wanted 的时段，没有就取时间上最接近的一个；绝不凭空造号。 */
@@ -3210,6 +3360,31 @@ public class FollowupAgentService {
                 : !slot.time().isBefore(LocalTime.NOON)).toList();
     }
 
+    /**
+     * R8（DEC-027）：把「这一天还有另一半时段」说出来。
+     *
+     * <p>背景：DEC-026 的排班是一天 4 格、每格 1 位医生，而未点名医生时半天的候选数（≤2）
+     * 恒等于该半天的号源数——「上午一共有 2 个可约时段」等于把老人已经看到的两个又数一遍，
+     * 没有信息量。真正被藏起来的是**另一个半天**，所以这句话报的是另一半，不是眼前这一半。
+     *
+     * <p><b>只在未点名医生时加</b>（{@code state.doctorId == null}）：点名之后
+     * {@code alternatives} 已被 {@link #resolveDoctorWish} 收缩到这位医生名下，此刻再数
+     * 「当天还有几个时段」，数出来的是**别的医生**的号——与老人刚说出口的诉求正好相反，
+     * 宁可不提。这条边界取代了 DEC-024 决定二的「这位医生还有其它时段」：现行排法下
+     * 每位医生每天只有 1 格，那句话已不再可能触发。
+     *
+     * <p>条数**按 {@code state.date} 现数**、不写死：某天排班改成半天 3 格时，这句话自动变得
+     * 有意义，不用回来改文案。按日期过滤不是多余的——{@code alternatives} 在「这一天没号、
+     * 查附近日期」的分支里装的是跨日期的号源。
+     */
+    private String dayScopeHint(ConversationState state, String preference) {
+        if (state.doctorId != null || state.date == null) return "";
+        String other = "MORNING".equals(preference) ? "AFTERNOON" : "MORNING";
+        long count = filterByPeriod(state.alternatives, other).stream()
+                .filter(slot -> state.date.equals(slot.date())).count();
+        return count == 0 ? "" : "今天" + periodLabel(other) + "还有" + count + "个时段。";
+    }
+
     private List<QuickReply> periodReplies(List<Slot> slots) {
         List<QuickReply> replies = new ArrayList<>();
         if (!filterByPeriod(slots, "MORNING").isEmpty()) {
@@ -3223,18 +3398,315 @@ public class FollowupAgentService {
         return replies;
     }
 
-    private String periodSummary(LocalDate date, List<Slot> slots) {
+    private String periodSummary(LocalDate date, List<Slot> slots, List<Slot> passed) {
         List<Slot> morning = filterByPeriod(slots, "MORNING");
         List<Slot> afternoon = filterByPeriod(slots, "AFTERNOON");
         List<String> descriptions = new ArrayList<>();
         if (!morning.isEmpty()) descriptions.add("上午最早" + morning.get(0).time().format(TIME_LABEL));
         if (!afternoon.isEmpty()) descriptions.add("下午最早" + afternoon.get(0).time().format(TIME_LABEL));
+        // R6：日期定了先把「这天谁出诊、放什么号」说清楚，老人点名医生就不用再绕一轮。
+        String onDuty = onDutyBrief(slots);
+        // 没有号的那半天要把理由说在前面：老人听到「只有下午」时，第一个问题一定是「上午呢」。
+        // 理由空着那一问就没人答得上来（演示里被答成了「上午已经约满了」）。
+        String gaps = java.util.stream.Stream.of(
+                        halfReason("MORNING", slots, passed), halfReason("AFTERNOON", slots, passed))
+                .filter(item -> !item.isBlank())
+                .collect(java.util.stream.Collectors.joining("，"));
+        // 问句也要跟着候选走：只有下午有号时还问「您想上午去还是下午去」，
+        // 等于把刚刚说过约不到的半天重新摆到老人面前。
+        String question = !morning.isEmpty() && !afternoon.isEmpty() ? "您想上午去还是下午去？"
+                : morning.isEmpty() ? "您看下午可以吗？" : "您看上午可以吗？";
         return date.format(DATE_LABEL) + "共查到" + slots.size() + "个可预约时段，" +
-                String.join("，", descriptions) + "。您想上午去还是下午去？";
+                String.join("，", descriptions) + "。" + (gaps.isEmpty() ? "" : gaps + "。") + onDuty + question;
+    }
+
+    /**
+     * 这半天为什么没有可约的时段——如实说出理由，不留白。
+     *
+     * <p>两种理由必须分开：**今天已经过了**（时间走掉了）和**暂时没有可约的时段**（没排班 / 名额满了）。
+     * 以前一律说「上午暂时没有号」，老人追问「啊上午没有吗」得到的还是同一句，
+     * 理由就空在那里——演示里它被补成了「上午已经约满了」，而「约满」在全仓代码里一个字都没有。
+     *
+     * <p>过没过的判据只有一份（{@link BusinessClock}）：{@code passed} 里全是当天已经开始的时段，
+     * 所以非空必然意味着「今天」。
+     */
+    private String halfReason(String period, List<Slot> slots, List<Slot> passed) {
+        if (!filterByPeriod(slots, period).isEmpty()) return "";
+        List<Slot> passedHalf = filterByPeriod(passed, period);
+        if (passedHalf.isEmpty()) return periodLabel(period) + "暂时没有可约的时段";
+        return "今天" + periodLabel(period) + passedHalf.stream()
+                .map(slot -> spokenTime(slot.time()))
+                .collect(java.util.stream.Collectors.joining("、")) + "的号已经过了";
+    }
+
+    /** 「这一天一个可约时段都没有」的那句话。有已过的时段就必须说清，不能含糊成「没有号」。 */
+    private String noSlotLead(LocalDate date, List<Slot> passed) {
+        if (passed.isEmpty()) return date.format(DATE_LABEL) + "暂时没有可预约时段。";
+        String times = passed.stream()
+                .map(slot -> (slot.time().isBefore(LocalTime.NOON) ? "上午" : "下午") + spokenTime(slot.time()))
+                .collect(java.util.stream.Collectors.joining("、"));
+        return "今天（" + date.format(DATE_LABEL) + "）的号都已经过了：" + times + "。";
+    }
+
+    /**
+     * 这一天里**今天已经过去**的可约号源——只在当天可能非空。
+     *
+     * <p>这是把「已经过了」和「没有号」分开说的唯一依据（见 {@link AppointmentTool#queryDaySlots}）。
+     * 只在当天查：别的日期根本不存在「今天的时刻已经走掉」这件事。
+     */
+    private List<Slot> passedSlots(ConversationState state) {
+        if (state.date == null || !state.date.equals(clock.today())
+                || state.hospitalId == null || state.department == null) {
+            return List.of();
+        }
+        return appointmentTool.queryDaySlots(state.id, state.hospitalId, state.department, state.date).stream()
+                .filter(slot -> clock.isPast(LocalDateTime.of(slot.date(), slot.time())))
+                .toList();
+    }
+
+    /** 这一天「一个可约时段都没剩、而且原因就是今天已经过了」时，返回那些已过的时段；否则空表。 */
+    private List<Slot> passedIfWholeDayIsOver(ConversationState state) {
+        if (state.date == null || !state.date.equals(clock.today())
+                || state.hospitalId == null || state.department == null) {
+            return List.of();
+        }
+        List<Slot> daySlots = appointmentTool.queryDaySlots(state.id, state.hospitalId, state.department, state.date);
+        List<Slot> passed = daySlots.stream()
+                .filter(slot -> clock.isPast(LocalDateTime.of(slot.date(), slot.time())))
+                .toList();
+        return passed.size() == daySlots.size() ? passed : List.of();
     }
 
     private String periodLabel(String preference) {
         return "AFTERNOON".equals(preference) ? "下午" : "上午";
+    }
+
+    // ------------------------------------------------------------------
+    // 选医交互（阶段 2）：医生诉求解析、无专家号推荐、出诊医生查询、口播简化。
+    // 规则出处：docs/proposals/选医交互方案（阶段2）.md R1/R3/R6。
+    // ------------------------------------------------------------------
+
+    /** 把模型/规则抽出来的医生线索落到会话状态：号别诉求记 wantsExpert，具体医生记 doctorQuery。 */
+    private void applyDoctorFact(ConversationState state, String spoken) {
+        if (spoken == null || spoken.isBlank()) return;
+        String value = spoken.trim();
+        if (value.contains("专家") || value.contains("主任")) state.wantsExpert = true;
+        String name = value.replace("主任医师", "").replace("副主任医师", "")
+                .replace("主治医师", "").replace("主任", "").replace("医生", "")
+                .replace("专家", "").replace("号", "").trim();
+        // 剥完还剩点东西（“张”“张建国”）才算点名到人；“找专家”这类纯号别诉求不算。
+        if (!name.isEmpty() && name.length() <= 3) {
+            state.doctorQuery = name;
+        }
+    }
+
+    /**
+     * 在当天真实号源里解析老人的医生线索。对上号 → 候选收缩到这位医生；
+     * 对不上 → 保留 {@code doctorQuery}，由 {@link #doctorNotFoundReply} 兜底报出诊名单。
+     */
+    private void resolveDoctorWish(ConversationState state, List<Slot> slots) {
+        if (state.doctorQuery != null && state.doctorId == null) {
+            String matched = matchDoctorId(state.doctorQuery, slots);
+            if (matched != null) {
+                state.doctorId = matched;
+                state.doctorQuery = null;
+            }
+        }
+        if (state.doctorId != null) {
+            List<Slot> scoped = slots.stream()
+                    .filter(slot -> state.doctorId.equals(slot.doctorId())).toList();
+            // 只在真有这位医生的号时收缩候选；空了说明今天他不在（下一行兜底处理）。
+            if (!scoped.isEmpty()) state.alternatives = scoped;
+        }
+    }
+
+    /** 全名精确 → 姓氏唯一才认：两个“张”医生时会反问，不靠猜。 */
+    private String matchDoctorId(String spoken, List<Slot> slots) {
+        for (Slot slot : slots) {
+            if (slot.doctorId() != null && spoken.equals(slot.doctorName())) return slot.doctorId();
+        }
+        if (spoken.isEmpty()) return null;
+        String surname = spoken.substring(0, 1);
+        List<String> hits = slots.stream()
+                .filter(slot -> slot.doctorName() != null && slot.doctorName().startsWith(surname))
+                .map(Slot::doctorId).distinct().toList();
+        return hits.size() == 1 ? hits.get(0) : null;
+    }
+
+    /** 点名的医生这天没出诊：报出诊名单，并看看他 7 天内最近的出诊日（只问，不擅自换日期）。 */
+    private AgentTurnResponse doctorNotFoundReply(ConversationState state, List<Slot> slots) {
+        String spoken = state.doctorQuery;
+        state.doctorQuery = null;
+        String head = state.date.format(DATE_LABEL) + spoken + "医生没有出诊。"
+                + onDutyBrief(slots);
+        Slot next = appointmentTool.queryUpcomingSlots(state.id, state.hospitalId, state.department,
+                        state.date.plusDays(1), state.date.plusDays(7)).stream()
+                .filter(slot -> slot.doctorName() != null && slot.doctorName().startsWith(spoken))
+                .findFirst().orElse(null);
+        if (next != null) {
+            return respondWithPlan(state, head + "这位医生最近在" + next.date().format(DATE_LABEL)
+                            + "出诊，要看这一天的号吗？",
+                    List.of(q("看" + next.date().format(DATE_LABEL) + "的号", "SET_DATE", next.date().toString()),
+                            q("换日期", "CHANGE_DATE", ""),
+                            q("换科室", "CHANGE_DEPARTMENT", "")));
+        }
+        return respondWithPlan(state, head + "往后7天也没查到这位医生出诊，您可以换个日期或科室。",
+                List.of(q("换日期", "CHANGE_DATE", ""), q("换科室", "CHANGE_DEPARTMENT", "")));
+    }
+
+    /**
+     * R1：老人要专家号而这一天一条专家号都没有。
+     *
+     * <p>明说「当日无专家号」，主动查 7 天内最近的专家号来问；7 天内也没有就建议改普通号
+     * 或等新号源。所有出路都是**问句加按钮**——绝不在这一步替老人把日期改掉。
+     */
+    private AgentTurnResponse noExpertOnDateReply(ConversationState state) {
+        List<Slot> upcoming = appointmentTool.queryUpcomingSlots(state.id, state.hospitalId, state.department,
+                state.date.plusDays(1), state.date.plusDays(7));
+        Slot nearest = upcoming.stream().filter(SlotRecommender::isExpert).findFirst().orElse(null);
+        String head = state.date.format(DATE_LABEL) + "当日没有专家号。";
+        if (nearest != null) {
+            String when = nearest.date().format(DATE_LABEL)
+                    + weekdayCn(nearest.date().getDayOfWeek())
+                    + periodLabel(nearest.time().isBefore(LocalTime.NOON) ? "MORNING" : "AFTERNOON");
+            return respondWithPlan(state, head + "7天内最近的是" + when + "的"
+                            + doctorBrief(nearest) + "，要看这一天的号吗？",
+                    List.of(q("看" + nearest.date().format(DATE_LABEL) + "的号", "SET_DATE", nearest.date().toString()),
+                            q("改约普通号", "SET_EXPERT", "false"),
+                            q("稍后再查", "RETRY_QUERY", "")));
+        }
+        return respondWithPlan(state, head + "往后7天也没有专家号。您可以先约普通号，或等新的专家号放出。",
+                List.of(q("改约普通号", "SET_EXPERT", "false"),
+                        q("等新的号源", "RETRY_QUERY", ""),
+                        q("重新选择日期", "CHANGE_DATE", "")));
+    }
+
+    /**
+     * R6：这批号源里「谁出诊、上午还是下午、放什么号、多少钱」的一句话概括；
+     * 老人点名医生时也用它报名单。半天 + 两个时刻的排班里同一位医生会出现多次，
+     * 这里按医生聚合，上下午都出诊的写成「上午、下午」。
+     */
+    private String onDutyBrief(List<Slot> slots) {
+        LinkedHashMap<String, Slot> firstOf = new LinkedHashMap<>();
+        LinkedHashMap<String, java.util.LinkedHashSet<String>> periods = new LinkedHashMap<>();
+        for (Slot slot : slots) {
+            if (slot.doctorName() == null) continue;
+            firstOf.putIfAbsent(slot.doctorName(), slot);
+            periods.computeIfAbsent(slot.doctorName(), key -> new java.util.LinkedHashSet<>())
+                    .add(slot.time().isBefore(LocalTime.NOON) ? "上午" : "下午");
+        }
+        if (firstOf.isEmpty()) return "";
+        String names = firstOf.entrySet().stream()
+                .map(item -> {
+                    Slot slot = item.getValue();
+                    String type = SlotRecommender.isExpert(slot) ? "专家号" : "普通号";
+                    String fee = slot.feeCents() == null ? "" : "，挂号费" + slot.feeCents() / 100 + "元";
+                    String when = String.join("、", periods.get(item.getKey()));
+                    return item.getKey() + (slot.doctorTitle() == null ? "" : slot.doctorTitle())
+                            + "（" + type + "，" + when + "出诊" + fee + "）";
+                })
+                .collect(java.util.stream.Collectors.joining("、"));
+        return "这一天出诊的有" + names + "。";
+    }
+
+    /** 回复文本里的医生短描述（全名 + 号别）：「张建国主任医师（专家号）」。 */
+    private String doctorBrief(Slot slot) {
+        if (slot == null) return "";
+        String name = slot.doctorName();
+        if (name == null || name.isBlank()) return "这个号源可以预约";
+        String type = SlotRecommender.isExpert(slot) ? "专家号" : "普通号";
+        return name + (slot.doctorTitle() == null ? "" : slot.doctorTitle()) + "（" + type + "）";
+    }
+
+    /** 口播里的医生只说「姓氏 + 职称」，不读全名（R3）：「张主任医师」。 */
+    private String surnameTitle(Slot slot) {
+        String name = slot.doctorName();
+        if (name == null || name.isBlank()) return "医生";
+        return name.substring(0, 1) + (slot.doctorTitle() == null || slot.doctorTitle().isBlank()
+                ? "医生" : slot.doctorTitle());
+    }
+
+    /** 星期几的中文说法（口播与出诊日列表共用）。 */
+    private String weekdayCn(java.time.DayOfWeek day) {
+        return "周" + "一二三四五六日".charAt(day.getValue() - 1);
+    }
+
+    /** 时刻的口播说法：「9点」「10点半」「2点30分」（上下午前缀由调用方带上）。 */
+    private String spokenTime(LocalTime time) {
+        int hour = time.getHour() % 12 == 0 ? 12 : time.getHour() % 12;
+        int minute = time.getMinute();
+        if (minute == 0) return hour + "点";
+        if (minute == 30) return hour + "点半";
+        return hour + "点" + minute + "分";
+    }
+
+    /**
+     * R3 口播：日期时段 + 姓氏职称 + 预估自付，不读全名、不读原价；多条候选用「或者」串起来。
+     * 例如「9月16日周三上午9点，张主任医师，专家号，预估自付40元」。
+     *
+     * <p>R7（DEC-027）：自动推荐轮在最前面加一次「我推荐，」——**只说一次**。逐条念「推荐」会把
+     * 「这几条是我替您挑的」读成「每一条都更值得约」，而双候选本来就是请老人在两条里选一条。
+     * <b>口播不带条数</b>（R8 的数字只落在卡片文字上）：老人主要靠听，一句话里再塞进计数
+     * 只会变长、难记，与 R3 的简化口径相冲。
+     */
+    private String candidatesSpeech(LocalDate date, List<Slot> slots, boolean recommended) {
+        String body = slots.stream()
+                .map(slot -> date.format(SPEECH_DATE) + weekdayCn(date.getDayOfWeek())
+                        + (slot.time().isBefore(LocalTime.NOON) ? "上午" : "下午")
+                        + spokenTime(slot.time()) + "，" + surnameTitle(slot) + "，"
+                        + (SlotRecommender.isExpert(slot) ? "专家号" : "普通号")
+                        + (slot.feeCents() == null ? "" : "，预估自付" + slot.feeCents() / 100 + "元"))
+                .collect(java.util.stream.Collectors.joining("，或者"));
+        return recommended ? "我推荐，" + body : body;
+    }
+
+    /**
+     * 带独立口播文本的出口。reply 仍是全量展示文本（卡片要的信息一条不少），
+     * speechText 只在「与 reply 不同」时被朗读通道采用——机制见 {@link #authoritativeSpeech}。
+     */
+    private AgentTurnResponse respondWithSpeech(ConversationState state, String reply,
+                                                List<QuickReply> quickReplies, String speech) {
+        return finish(state, new AgentTurnResponse(state.id, state.stage.name(), reply, quickReplies,
+                plan(state), null, null, traces.findByConversation(state.id), null, speech, null));
+    }
+
+    /** 独立的「这科有哪些医生」查询（QUERY_DOCTORS / doctor.list 工具的落点）。 */
+    private AgentTurnResponse showOnDutyDoctors(ConversationState state, ExtractedFacts facts) {
+        if (facts.hospital() != null || facts.department() != null || facts.date() != null) {
+            applyFacts(state, facts);
+        }
+        if (state.hospitalId == null) return askHospital(state, "要查询出诊医生，请先告诉我想去哪家医院。");
+        if (state.department == null) return askDepartment(state, "还需要先选择科室，请告诉我您要挂哪个科。");
+        LocalDate from = state.date != null ? state.date : clock.today();
+        List<Slot> upcoming = appointmentTool.queryUpcomingSlots(state.id, state.hospitalId, state.department,
+                from, from.plusDays(6));
+        if (upcoming.isEmpty()) {
+            return respond(state, state.department + "接下来一周暂无排班。您可以换个科室，或稍后再查。",
+                    List.of(q("查看可预约日期", "SHOW_AVAILABLE_DATES", ""),
+                            q("换科室", "CHANGE_DEPARTMENT", "")));
+        }
+        LinkedHashMap<String, StringBuilder> doctors = new LinkedHashMap<>();
+        for (Slot slot : upcoming) {
+            if (slot.doctorName() == null) continue;
+            doctors.computeIfAbsent(slot.doctorName(), name -> new StringBuilder(
+                    name + (slot.doctorTitle() == null ? "" : slot.doctorTitle())
+                            + "（" + (SlotRecommender.isExpert(slot) ? "专家号" : "普通号")
+                            + (slot.feeCents() == null ? "" : "，挂号费" + slot.feeCents() / 100 + "元）")));
+            StringBuilder line = doctors.get(slot.doctorName());
+            String label = weekdayCn(slot.date().getDayOfWeek())
+                    + (slot.time().isBefore(LocalTime.NOON) ? "上午" : "下午");
+            if (line.indexOf(label) < 0) {
+                if (line.charAt(line.length() - 1) != '）') line.append("，");
+                line.append(label);
+            }
+        }
+        String body = state.date == null
+                ? state.department + "未来7天出诊：" : state.date.format(DATE_LABEL) + state.department + "出诊：";
+        String listing = doctors.values().stream().map(StringBuilder::toString)
+                .collect(java.util.stream.Collectors.joining("；"));
+        return respond(state, body + listing + "。号源以查询结果为准，需要的话我帮您接着挑时间。",
+                List.of(q("查看可预约日期", "SHOW_AVAILABLE_DATES", ""),
+                        q("继续办理预约", "CONTINUE", "")));
     }
 
     private AgentTurnResponse selectSlot(ConversationState state, String slotId) {
@@ -3247,34 +3719,106 @@ public class FollowupAgentService {
         state.selectedSlot = selected;
         state.recommendedSlot = null;
         state.requestedTime = null;
+        // 号源已锁定，选医诉求随之了结：留下的诉求会在下一轮查询里悄悄过滤候选，反而难撤销。
+        state.doctorQuery = null;
+        state.doctorId = null;
+        state.wantsExpert = false;
         state.date = selected.date();
         // 已经锁定一个真实可约的号源，“如果这天没号要不要看前后几天”就成了假设问题：
         // 每轮都问一遍，老人答了别的也会被同一句话再拦一次。这里直接记成“只要这一天”。
         // 真正需要问的场景（选的日期根本没号）在 querySlots 的 NO_SLOT 分支里照样会问。
         if (state.acceptAlternative == null) state.acceptAlternative = false;
+        // 号源一锁定就当场做「这个时段到底能不能约」的预检，通过了才继续问陪同、出行和通知。
+        // 以前这两道检查都挂在 ready() 之后，等于要老人把陪同下、出行、交通、通知全答完，
+        // 才告诉他「这个时间您已经有约了」——那些答案全白答，而且他已经把这件事当成了定局。
+        AgentTurnResponse blocked = slotBlocked(state);
+        if (blocked != null) return blocked;
         return advance(state, ExtractedFacts.empty());
+    }
+
+    /**
+     * 号源刚锁定时的只读预检：这个时段与已有日程冲突吗？同一就诊人同一时刻已有一条预约吗？
+     *
+     * <p>返回 {@code null} 表示这个时段可以继续办。两道检查都是只读的，提前问没有副作用；
+     * 进入确认卡之前 {@link #checkSchedule} 还会照原样再问一次——那次才是提交前的最后一道防线，
+     * 因为老人可能在中途改了时间。
+     *
+     * <p>冲突时置 {@link ConversationState.Stage#CONFLICT}，用户按「仍保留这个时间」后
+     * {@link #keepConflict} 会接着往下走；{@link #checkSchedule} 认这个态，不会再弹第二次。
+     */
+    private AgentTurnResponse slotBlocked(ConversationState state) {
+        // 时段一换，上一次的「已保留」就作废：冲突与否要按新时段重新问一遍。
+        state.conflictKept = false;
+        List<Conflict> conflicts = slotConflicts(state);
+        if (!conflicts.isEmpty()) return conflictReply(state, conflicts);
+        List<AppointmentSummary> duplicates = slotDuplicates(state);
+        if (duplicates.isEmpty()) return null;
+        // 时间还没有最终锁定（陪同、出行、通知都还没问），进度仍停在「选时间」这一档，
+        // 不能像 checkDuplicate 那样直接推到 READY_TO_PLAN。
+        state.stage = ConversationState.Stage.SELECT_SLOT;
+        return duplicateReply(state, duplicates.get(0));
+    }
+
+    /** 只读查询：这个时段与用户已有日程（体检之类）是否重叠。口径见 {@link #checkSchedule}。 */
+    private List<Conflict> slotConflicts(ConversationState state) {
+        LocalDateTime start = LocalDateTime.of(state.selectedSlot.date(), state.selectedSlot.time());
+        return callTool(state, "schedule.checkConflict", Map.of("userId", state.userId, "start", start),
+                () -> scheduleTool.findConflicts(state.id, state.userId, start, start.plusMinutes(APPOINTMENT_DURATION)));
+    }
+
+    /** 只读查询：同一就诊人同一天同一时刻是否已有别的预约。口径见 {@link #checkDuplicate}。 */
+    private List<AppointmentSummary> slotDuplicates(ConversationState state) {
+        return myAppointmentTool.search(state.id, state.userId, state.selectedSlot.date(), null, null)
+                .stream()
+                .filter(item -> item.time().equals(state.selectedSlot.time()))
+                .filter(item -> state.originalAppointmentId == null
+                        || !item.appointmentId().equals(state.originalAppointmentId))
+                .toList();
+    }
+
+    /** 日程冲突的回复。两处共用：号源锁定预检、确认卡前检查——文案与按钮必须只有一份。 */
+    private AgentTurnResponse conflictReply(ConversationState state, List<Conflict> conflicts) {
+        state.stage = ConversationState.Stage.CONFLICT;
+        // 又问了一遍，等老人重新表一次态：上一次的「已保留」不能替他答这一次。
+        state.conflictKept = false;
+        // 记住冲突本身：用户选「仍保留这个时间」后，确认卡要把它列出来，这是最后一道防线。
+        state.conflicts = conflicts;
+        List<Slot> sameDay = appointmentTool.queryAvailableSlots(state.id, state.hospitalId, state.department, state.date)
+                .stream().filter(item -> !item.id().equals(state.selectedSlot.id())).toList();
+        state.alternatives = sameDay;
+        // 当天候选只给一个：加上「重新选择日期」「仍保留这个时间」正好三个，一屏放得下。
+        // 给两个的话「仍保留这个时间」会被挤到第二页，老人根本翻不到。
+        List<QuickReply> choices = new ArrayList<>(slotReplies(sameDay.stream().limit(1).toList()));
+        choices.add(q("重新选择日期", "CHANGE_DATE", ""));
+        choices.add(q("仍保留这个时间", "KEEP_CONFLICT", ""));
+        return respondWithPlan(state, "这个时间与您的“" + conflicts.get(0).title() + "（" + conflicts.get(0).startAt() + " 至 " + conflicts.get(0).endAt() + "）" +
+                "”冲突。您可以选择其他号源，也可以明确保留当前时间。", choices);
+    }
+
+    /** 同一时刻重复预约的回复。两处共用：号源锁定预检、确认卡前检查。 */
+    private AgentTurnResponse duplicateReply(ConversationState state, AppointmentSummary duplicate) {
+        // 当天的那条说「今天这个时段已经预约过了」——老人脑子里装着的是「今天上午我不是约过了吗」，
+        // 回一句带完整日期的「2026年9月15日 10:30」他还要自己换算一遍；不是当天才报具体日期。
+        boolean sameDay = state.selectedSlot != null && state.selectedSlot.date().equals(clock.today());
+        return respondWithPlan(state, (sameDay ? "今天" : duplicate.date().format(DATE_LABEL))
+                        + "这个时段您已经预约过了：" + appointmentSummary(duplicate)
+                        + "。同一个人同一时刻只能看一个科室，我没有重复提交。"
+                        + "您想保留已有预约，还是重新选择时间？",
+                List.of(q("保留已有预约", "CANCEL_TASK", ""),
+                        q("重新选择时间", "CHANGE_TIME", ""),
+                        q("查看我的预约", "QUERY_APPOINTMENTS", "")));
     }
 
     private AgentTurnResponse checkSchedule(ConversationState state) {
         if (!ready(state)) return advance(state, ExtractedFacts.empty());
-        LocalDateTime start = LocalDateTime.of(state.selectedSlot.date(), state.selectedSlot.time());
-        List<Conflict> conflicts = callTool(state, "schedule.checkConflict", Map.of("userId", state.userId, "start", start),
-                () -> scheduleTool.findConflicts(state.id, state.userId, start, start.plusMinutes(APPOINTMENT_DURATION)));
-        if (!conflicts.isEmpty()) {
-            state.stage = ConversationState.Stage.CONFLICT;
-            // 记住冲突本身：用户选「仍保留这个时间」后，确认卡要把它列出来，这是最后一道防线。
-            state.conflicts = conflicts;
-            List<Slot> sameDay = appointmentTool.queryAvailableSlots(state.id, state.hospitalId, state.department, state.date)
-                    .stream().filter(item -> !item.id().equals(state.selectedSlot.id())).toList();
-            state.alternatives = sameDay;
-            // 当天候选只给一个：加上「重新选择日期」「仍保留这个时间」正好三个，一屏放得下。
-            // 给两个的话「仍保留这个时间」会被挤到第二页，老人根本翻不到。
-            List<QuickReply> choices = new ArrayList<>(slotReplies(sameDay.stream().limit(1).toList()));
-            choices.add(q("重新选择日期", "CHANGE_DATE", ""));
-            choices.add(q("仍保留这个时间", "KEEP_CONFLICT", ""));
-            return respondWithPlan(state, "这个时间与您的“" + conflicts.get(0).title() + "（" + conflicts.get(0).startAt() + " 至 " + conflicts.get(0).endAt() + "）" +
-                    "”冲突。您可以选择其他号源，也可以明确保留当前时间。", choices);
-        }
+        // 用户在号源锁定时就已经明确「仍保留这个时间」（见 slotBlocked / keepConflict）：
+        // 这里不能再查一遍、再弹一遍，否则他答完陪同、出行和通知之后会被同一个冲突拦第二次，
+        // 永远走不到确认卡。conflicts 里那条要原样留着，确认卡得把它列出来。
+        // 判据只认 conflictKept：每个 SET_* 动作都会触发 invalidate 清掉 scheduleChecked，
+        // 拿后者当判据的话，老人刚答完「需要陪同」，这个短路就已经失效了。
+        if (state.conflictKept && !state.conflicts.isEmpty()) return checkDuplicate(state);
+        List<Conflict> conflicts = slotConflicts(state);
+        if (!conflicts.isEmpty()) return conflictReply(state, conflicts);
         // 检查通过了就把上一次的冲突清掉：改完时间再回来，确认卡上不能再挂着已经解决的冲突。
         state.conflicts = List.of();
         state.scheduleChecked = true;
@@ -3286,26 +3830,37 @@ public class FollowupAgentService {
             return respond(state, "当前没有需要保留的冲突时间，请继续办理。", resumeReplies(state));
         }
         state.scheduleChecked = true;
+        // 记下「老人明确要保留这个时间」：答完陪同、出行和通知之后还会再走一遍 checkSchedule，
+        // 那次要认这个标记才不会把同一个冲突问第二遍。不能借 scheduleChecked——每一个 SET_*
+        // 动作都会触发 invalidate 把它清掉。
+        state.conflictKept = true;
+        // 冲突是在号源锁定时就提示的，那时草稿还没问完，这里要接着问陪同、出行和通知；
+        // 全部问完了才轮到重复预约检查和确认卡。
+        if (!ready(state)) return advance(state, ExtractedFacts.empty());
         return checkDuplicate(state);
     }
 
+    /**
+     * 提交前的「同一时刻重复预约」检查——本次提交前的最后一道业务闸门（确认门禁是另一道，见 C-02）。
+     *
+     * <p>口径是 **同一位就诊人 + 同一天 + 同一个时刻**，**不再比医院和科室**。老人只有一个身子，
+     * 同一时刻不可能同时坐在两个科室里；原来的条件里带着医院和科室，等于只在「同一个科室里重复约」
+     * 时才拦得住——换个科室（甚至换家医院）同一时刻照样能约上，演示里那两条 9月15日 10:30
+     * （骨科沈国安 / 呼吸内科潘晓丽）就是这么进来的。
+     *
+     * <p>同一天**换时段**仍然放行：号源时刻是「这一班从几点开始」，一天看两个科室是正常需求，
+     * 只有时刻撞上才自相矛盾。{@code AppointmentTool.submit} 的幂等键注释里也写着同一件事。
+     *
+     * <p>改期（{@code originalAppointmentId != null}）时把原来那条自己排除掉，否则「原时间不动、
+     * 只换医生」会被自己拦下。照护端不受影响：{@code CareBookingService.book} 有自己的
+     * {@code hasUpcoming}（同一位老人名下只留一个进行中预约），比这条更严。
+     */
     private AgentTurnResponse checkDuplicate(ConversationState state) {
         if (!ready(state)) return validateDraftForModel(state);
-        List<AppointmentSummary> matches = myAppointmentTool.search(
-                        state.id, state.userId, state.selectedSlot.date(), state.hospital, state.department)
-                .stream()
-                .filter(item -> item.time().equals(state.selectedSlot.time()))
-                .filter(item -> state.originalAppointmentId == null
-                        || !item.appointmentId().equals(state.originalAppointmentId))
-                .toList();
+        List<AppointmentSummary> matches = slotDuplicates(state);
         if (matches.isEmpty()) return buildConfirmation(state);
-        AppointmentSummary duplicate = matches.get(0);
         state.stage = ConversationState.Stage.READY_TO_PLAN;
-        return respondWithPlan(state, "您已经有一条相同的复诊预约：" + appointmentSummary(duplicate)
-                        + "。我没有重复提交。您想保留已有预约，还是重新选择时间？",
-                List.of(q("保留已有预约", "CANCEL_TASK", ""),
-                        q("重新选择时间", "CHANGE_TIME", ""),
-                        q("查看我的预约", "QUERY_APPOINTMENTS", "")));
+        return duplicateReply(state, matches.get(0));
     }
 
     private AgentTurnResponse buildConfirmation(ConversationState state) {
@@ -3420,7 +3975,7 @@ public class FollowupAgentService {
     private java.util.Optional<AppointmentRecordStore.AppointmentView> upcomingArranged(ConversationState state) {
         return appointmentRecords.allFor(state.userId).stream()
                 .filter(row -> "CONFIRMED".equals(row.status()))
-                .filter(row -> !row.date().isBefore(LocalDate.now()))
+                .filter(row -> !row.date().isBefore(clock.today()))
                 .filter(row -> row.arrangedBy() != null)
                 .findFirst();
     }
@@ -3429,7 +3984,7 @@ public class FollowupAgentService {
     private java.util.Optional<AppointmentRecordStore.AppointmentView> upcomingOwn(ConversationState state) {
         return appointmentRecords.allFor(state.userId).stream()
                 .filter(row -> "CONFIRMED".equals(row.status()))
-                .filter(row -> !row.date().isBefore(LocalDate.now()))
+                .filter(row -> !row.date().isBefore(clock.today()))
                 .filter(row -> row.arrangedBy() == null)
                 .findFirst();
     }
@@ -4495,30 +5050,67 @@ public class FollowupAgentService {
     }
 
     private AgentTurnResponse askHospital(ConversationState state, String message) {
+        return askHospital(state, message, true);
+    }
+
+    /**
+     * 问医院。
+     *
+     * <p>{@code offerMemory} 为真、且这位老人以前确实办成过某家医院时，把记忆里那家一并说出来，
+     * 并把「是 / 换一家」摆成按钮。这条记忆是 Java 自己读 {@code user_memories} 得到的，
+     * 所以老人下一句「是的」Java 认得住——曾经出现过反例：模型嘴上问「还是像以前那样去市人民医院吗？」，
+     * 老人答「是的」，Java 手上却没有任何候选，只能反问「我还没有确认您说的是哪家医院」。
+     * 记忆只是「少问一句」的线索，真正落库仍然要过确认门禁。
+     *
+     * <p>老人刚否掉一个候选再问时传 {@code false}：那句「好的，不选择 X」和「还是像以前那样去 Y 吗」
+     * 挨在一起会自相矛盾。
+     */
+    private AgentTurnResponse askHospital(ConversationState state, String message, boolean offerMemory) {
         state.taskStatus = ConversationState.TaskStatus.ACTIVE;
         state.managedMode = false; // 问到“哪家医院”=已转入本人新预约，离开代约开场
         state.stage = ConversationState.Stage.ASK_HOSPITAL;
         // 正常询问时不替老人预选医院，优先让其直接语音或文字回答；匹配失败时再做有依据的引导。
-        return respond(state, message, List.of());
+        CareCatalogRepository.Hospital remembered = offerMemory && state.hospitalId == null
+                ? rememberedHospital(state).orElse(null) : null;
+        if (remembered == null) return respond(state, message, List.of());
+        return respond(state, message + "还是像以前那样去" + remembered.name() + "吗？不是的话，直接说医院名字就行。",
+                List.of(q("是的，" + remembered.name(), "SET_HOSPITAL", remembered.id()),
+                        q("换一家医院", "ASK_HUMAN_INPUT", "")));
     }
 
     private AgentTurnResponse askDepartment(ConversationState state, String message) {
         state.taskStatus = ConversationState.TaskStatus.ACTIVE;
         state.stage = ConversationState.Stage.ASK_DEPARTMENT;
-        List<QuickReply> choices = new ArrayList<>(catalog.departments(state.hospitalId).stream()
-                .limit(3).map(item -> q(item.name(), "SET_DEPARTMENT", item.id())).toList());
-        choices.add(q("我自己说科室", "ASK_HUMAN_INPUT", ""));
-        return respond(state, message, choices);
+        List<QuickReply> choices = departmentReplies(state);
+        // 这家医院没配科室时不能给一排空按钮，指条能走的明路。
+        return respond(state, message, choices.isEmpty() ? List.of(q("查看其他医院", "CHANGE_HOSPITAL", "")) : choices);
+    }
+
+    /**
+     * 问科室时的候选按钮。
+     *
+     * <p>这家医院的科室一次摆全（目录里每院 6 个）：前端一屏 3 个，点「查看更多选项」翻到后 3 个。
+     * 以前是「前 3 个科室 + 我自己说科室」，第 4 个正好被折进「查看更多选项」——翻开只有一个按钮，
+     * 既不像“更多”，也把后面那 3 个真科室挡在外面。老人本来就能直接打字或说科室名，
+     * 那个按钮不是必需入口，让位给真科室更划算。
+     */
+    private List<QuickReply> departmentReplies(ConversationState state) {
+        return catalog.departments(state.hospitalId).stream().limit(6)
+                .map(item -> q(item.name(), "SET_DEPARTMENT", item.id())).toList();
     }
 
     private AgentTurnResponse askDate(ConversationState state, String message) {
         state.taskStatus = ConversationState.TaskStatus.ACTIVE;
         state.stage = ConversationState.Stage.ASK_DATE;
+        return respond(state, message, dateReplies(state));
+    }
+
+    private List<QuickReply> dateReplies(ConversationState state) {
         List<QuickReply> choices = new ArrayList<>(catalog.availableDates(
-                        state.hospitalId, state.department, LocalDate.now(), 3).stream()
+                        state.hospitalId, state.department, clock.today(), 3).stream()
                 .map(date -> q(date.format(DATE_LABEL), "SET_DATE", date.toString())).toList());
         choices.add(q("我自己说日期", "ASK_HUMAN_INPUT", ""));
-        return respond(state, message, choices);
+        return choices;
     }
 
     private AgentTurnResponse showHospitals(ConversationState state, String requestedHospital) {
@@ -4750,6 +5342,7 @@ public class FollowupAgentService {
         }
         if (facts.transport() != null) state.transport = facts.transport();
         if (facts.timePreference() != null) state.timePreference = facts.timePreference();
+        applyDoctorFact(state, facts.doctor());
         if (facts.selectedTime() != null) {
             state.requestedTime = facts.selectedTime();
             if (state.selectedSlot != null && !state.selectedSlot.time().equals(facts.selectedTime())) state.selectedSlot = null;
@@ -4788,6 +5381,7 @@ public class FollowupAgentService {
         state.departmentId = null;
         state.department = null;
         state.date = null;
+        clearDoctorWish(state);
         state.selectedSlot = null;
         state.recommendedSlot = null;
         state.timePreference = null;
@@ -4803,6 +5397,7 @@ public class FollowupAgentService {
         state.departmentId = null;
         state.department = null;
         state.date = null;
+        clearDoctorWish(state);
         state.selectedSlot = null;
         state.recommendedSlot = null;
         state.timePreference = null;
@@ -4818,6 +5413,13 @@ public class FollowupAgentService {
         state.stage = ConversationState.Stage.ASK_DEPARTMENT;
     }
 
+    /** 清空选医诉求。换医院/换科室时必须清：医生和号别是绑定在「医院+科室」上的。 */
+    private void clearDoctorWish(ConversationState state) {
+        state.doctorQuery = null;
+        state.doctorId = null;
+        state.wantsExpert = false;
+    }
+
     private void clearDraft(ConversationState state) {
         clearPendingEntity(state);
         state.hospitalId = null;
@@ -4830,6 +5432,7 @@ public class FollowupAgentService {
         state.needTravel = null;
         state.notifyFamily = null;
         state.transport = null;
+        clearDoctorWish(state);
         state.selectedSlot = null;
         state.recommendedSlot = null;
         state.timePreference = null;
@@ -4848,6 +5451,7 @@ public class FollowupAgentService {
         state.departureReminderDone = false;
         state.notificationDone = false;
         state.scheduleChecked = false;
+        state.conflictKept = false;
         clearInterruption(state);
     }
 
@@ -4958,6 +5562,72 @@ public class FollowupAgentService {
                 : "；这位老人以前办过的复诊情况（仅供参考，不要当成这次已经定好的安排，拿它少问一句就好）=" + digest;
     }
 
+    /** 「常去的医院」那句记忆的开头。写在这里就必须和 {@link #rememberBookingPreferences} 的写法一致。 */
+    private static final String MEMORY_HOSPITAL_PREFIX = "常去的医院是";
+
+    /**
+     * 记忆里「常去的医院」落回目录的那一家。
+     *
+     * <p>记忆存的是一句人话（「常去的医院是市人民医院」），不是 id；这里把医院名取出来再回目录核对。
+     * 目录里没有这家、或者老人已经把这条记忆忘掉时返回空——记忆只是少问一句的线索，
+     * 不能凭它编出一家医院，也不能绕过确认门禁。
+     */
+    private Optional<CareCatalogRepository.Hospital> rememberedHospital(ConversationState state) {
+        return memories.find(state.userId, MEMORY_HOSPITAL)
+                .map(MemoryStore.Memory::content)
+                .map(this::hospitalNameOfMemory)
+                .filter(name -> !name.isBlank())
+                .flatMap(catalog::hospital);
+    }
+
+    private String hospitalNameOfMemory(String content) {
+        String text = content == null ? "" : content.trim();
+        int at = text.indexOf(MEMORY_HOSPITAL_PREFIX);
+        return (at < 0 ? text : text.substring(at + MEMORY_HOSPITAL_PREFIX.length())).trim();
+    }
+
+    /**
+     * 老人回一句「是的」时，把 Java 手上那个候选认下来。
+     *
+     * <p>为什么要 Java 自己认：问医院这一步，Java 手上本来没有候选，老人的「是的」就无处可落——
+     * 模型模式曾经这样翻车：模型顺着长期记忆问「还是像以前那样去市人民医院吗？」，老人答「是的」，
+     * Java 却回「我还没有确认您说的是哪家医院」。现在只要还在等医院、老人给的是短肯定、
+     * 而记忆里确实有一家，Java 就直接采用它，不再把这句话当成没听懂。
+     *
+     * <p>认两种说法：短肯定（「是的」「对」）和「照旧」（「和上次一样」「还是那家」，见
+     * {@link #confirmsRememberedHospital}），且必须落在 ASK_HOSPITAL 阶段：医生、科室、日期各有各的
+     * 确认入口，这里不越界。候选本来就没有（没有记忆）时返回 null，交回原有链路。
+     */
+    private AgentTurnResponse confirmRememberedHospital(ConversationState state, String value) {
+        if (state.taskStatus != ConversationState.TaskStatus.ACTIVE
+                || state.stage != ConversationState.Stage.ASK_HOSPITAL
+                || state.hospitalId != null
+                || !confirmsRememberedHospital(value)) {
+            return null;
+        }
+        CareCatalogRepository.Hospital remembered = rememberedHospital(state).orElse(null);
+        if (remembered == null) return null;
+        chooseHospital(state, remembered.id());
+        return advance(state, ExtractedFacts.empty());
+    }
+
+    /**
+     * 「是的」和「和上次一样」——老人确认 Java 手上那个医院候选的两种说法。
+     *
+     * <p>为什么不直接放宽 {@link #isShortAffirmative}：那个方法还被完成播报（「需要我打开地图吗」）
+     * 和确认卡共用，把「和上次一样」塞进去，会让它在别的节点也成立，语义就串了。这里只服务于
+     * 「问医院」这一步，放宽也只放宽这一步。
+     *
+     * <p>带否定的说法（「上次那家不好」）不认，原样交回正常链路去解析。
+     */
+    private boolean confirmsRememberedHospital(String message) {
+        if (isShortAffirmative(message)) return true;
+        String value = message.replaceAll("[\\s，。、！？,.!?]", "");
+        if (value.isEmpty() || value.length() > 8) return false;
+        if (containsAny(value, "不", "别", "没有", "算了")) return false;
+        return SAME_AS_BEFORE.matcher(value).matches();
+    }
+
     /**
      * 把目录里真实登记的家属交给模型，由模型做语义落位：“我闺女”“老伴”“我儿子”都要落到具体的人。
      * 这里只提供候选，不做关键词匹配；模型也不允许落到名单以外的人身上。
@@ -5065,7 +5735,9 @@ public class FollowupAgentService {
 
     private boolean hasTaskFacts(ExtractedFacts facts) {
         return facts.hospital() != null || facts.department() != null || facts.date() != null
-                || facts.selectedTime() != null || facts.acceptAlternative() != null
+                || facts.selectedTime() != null || facts.timePreference() != null
+                || facts.doctor() != null
+                || facts.acceptAlternative() != null
                 || facts.needCompanion() != null || facts.needTravel() != null
                 || facts.notifyFamily() != null || facts.transport() != null
                 || facts.familyContact() != null;
@@ -5128,6 +5800,10 @@ public class FollowupAgentService {
     }
 
     private String slotLabel(Slot slot) {
-        return slot == null ? "待选择" : slot.date().format(DATE_LABEL) + " " + slot.time().format(TIME_LABEL);
+        if (slot == null) return "待选择";
+        String base = slot.date().format(DATE_LABEL) + " " + slot.time().format(TIME_LABEL);
+        // 同一时刻可能有多位医生的号（上午 09:00 天然两条），不带医生就没法分。
+        if (slot.doctorName() == null || slot.doctorName().isBlank()) return base;
+        return base + " " + slot.doctorName() + (slot.doctorTitle() == null ? "" : slot.doctorTitle());
     }
 }

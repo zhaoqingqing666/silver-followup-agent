@@ -129,7 +129,8 @@ public class LlmConversationPlanner implements ConversationPlanner {
                 nullableText(node, "transport"), time(nullableText(node, "selectedTime")),
                 nullableText(node, "timePreference"), nullableBoolean(node, "acceptRecommendedTime"),
                 nullableText(node, "acknowledgement"), nullableText(node, "emotion"),
-                nullableText(node, "concern"), nullableText(node, "familyContact"));
+                nullableText(node, "concern"), nullableText(node, "familyContact"),
+                first(nullableText(node, "doctor"), arguments.get("doctor")));
     }
 
     private Map<String, String> stringMap(JsonNode node) {

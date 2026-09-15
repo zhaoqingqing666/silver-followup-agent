@@ -1,11 +1,13 @@
 package com.team.silveragent;
 
+import com.team.silveragent.application.BusinessClock;
 import com.team.silveragent.application.FollowupAgentService;
 import com.team.silveragent.application.travel.TravelGuideService;
 import com.team.silveragent.agent.RuleFactExtractor;
 import com.team.silveragent.agent.AgentContext;
 import com.team.silveragent.domain.model.AgentTurnResponse;
 import com.team.silveragent.infrastructure.mock.MockScheduleTool;
+import com.team.silveragent.infrastructure.persistence.RollingAppointmentSlotInitializer;
 import com.team.silveragent.support.DemoSeed;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -14,6 +16,8 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.*;
@@ -34,12 +38,20 @@ class SilverAgentApplicationTests {
     @Autowired RuleFactExtractor extractor;
     @Autowired TravelGuideService travelGuides;
     @MockitoSpyBean MockScheduleTool schedule;
+    /** 业务时钟可以拨：把「现在」放到当天几点，就能确定性地演「今天已经过去」这类场景。 */
+    @MockitoSpyBean BusinessClock clock;
+
+    /** 手工为「今天」摆的号源都带这个前缀，{@link #resetData()} 负责清干净。 */
+    private static final String TODAY_SLOT_PREFIX = "t-today-";
 
     @BeforeEach void resetData() {
         for (String table : List.of("appointments", "reminders", "family_notifications")) jdbc.update("DELETE FROM " + table);
         // 周六本来就没有号源（滚动初始化刻意留出的空档），不用再手动关掉某一天。
-        jdbc.update("UPDATE appointment_slots SET available=TRUE");
+        // booked 一并归零：available 现在是派生位（booked < capacity）。
+        jdbc.update("UPDATE appointment_slots SET booked=0, available=TRUE");
+        jdbc.update("DELETE FROM appointment_slots WHERE id LIKE ?", TODAY_SLOT_PREFIX + "%");
         reset(schedule);
+        reset(clock);
     }
 
     AgentTurnResponse action(String id, String action, String value) { return service.act(id, action, value, action); }
@@ -81,7 +93,7 @@ class SilverAgentApplicationTests {
     @Test void duplicateAppointmentIsExplainedBeforeAnotherConfirmationCanBeCreated() {
         approve(prepare(false, false));
         // 模拟号源系统仍返回同一个时段，用来验证重复预约检查不是只依赖 available 标志。
-        jdbc.update("UPDATE appointment_slots SET available=TRUE WHERE id=?", SLOT);
+        jdbc.update("UPDATE appointment_slots SET booked=0, available=TRUE WHERE id=?", SLOT);
 
         String id = service.start().conversationId();
         action(id, "SET_HOSPITAL", "h001");
@@ -95,8 +107,79 @@ class SilverAgentApplicationTests {
         AgentTurnResponse duplicate = action(id, "SET_NOTIFY", "false");
 
         assertThat(duplicate.confirmation()).isNull();
-        assertThat(duplicate.reply()).contains("已经有一条相同", "没有重复提交", "重新选择时间");
+        // 冲突口径自 2026-09-14 起是「同一就诊人 + 同一天 + 同一时刻」，不再比医院和科室。
+        // 文案自 2026-09-15 起统一成「〈今天 / 日期〉这个时段您已经预约过了」——与日程冲突那句
+        // 「这个时间与您的…冲突」分得开：一个是「您自己已经约了」，一个是「您那天有别的事」。
+        assertThat(duplicate.reply()).contains("这个时段您已经预约过了", "没有重复提交", "重新选择时间");
         assertThat(count("appointments")).isEqualTo(1);
+    }
+
+    /**
+     * 今天已经过去的时段：必须说「已经过了」，不能说成「没有号」，更不能说成「约满」。
+     *
+     * <p>钉的是演示里真实出过的一幕——老人问 9月15日（就是当天），助手答「只有下午有空位」，
+     * 追问「啊上午没有吗」，答的是「上午已经约满了」。可那一格根本没被别人占，只是当天上午的
+     * 时间已经走掉了：当时容器时钟走 UTC，应用以为才下午两点多，上午整片被判成「已过去」。
+     * 而权威草稿里只写了「共查到 N 个可预约时段、下午最早…」，理由空着，就被补成了「约满」——
+     * 「约满」两个字在全仓代码里一个都没有。
+     *
+     * <p>「今天」由 {@link BusinessClock} 定，所以这里直接把钟拨到 15:00：当天上午两格必然过去、
+     * 下午还有一格。当天 09:00 与 15:30 各手工摆一条，是因为演示的「当天」多半不是心内科的放号日，
+     * 不手工插就造不出这个场景。
+     */
+    @Test void aMorningThatAlreadyPassedIsExplainedAsElapsedNotAsFullyBooked() {
+        LocalDate today = clock.today();
+        slotTodayAt(LocalTime.of(9, 0));
+        slotTodayAt(LocalTime.of(15, 30));
+        doReturn(LocalTime.of(15, 0)).when(clock).now();
+        doReturn(LocalDateTime.of(today, LocalTime.of(15, 0))).when(clock).nowDateTime();
+
+        String id = service.start().conversationId();
+        action(id, "SET_HOSPITAL", "h001");
+        action(id, "SET_DEPARTMENT", DemoSeed.CARDIOLOGY);
+        AgentTurnResponse listed = action(id, "SET_DATE", today.toString());
+
+        assertThat(listed.reply())
+                .as("当天上午没有可约时段时，理由要当场说出来，问句也不能还问「上午还是下午」")
+                .contains("今天上午", "已经过了", "您看下午可以吗")
+                .doesNotContain("约满", "您想上午去还是下午去");
+        assertThat(action(id, "SET_PERIOD", "MORNING").reply())
+                .as("老人追问「上午没有吗」时给的是同一个理由，不能退回「暂时没有号」")
+                .contains("已经过了", "还有号")
+                .doesNotContain("暂时没有号", "约满");
+    }
+
+    /** 当天一个可约时段都不剩、原因就是「今天已经过了」：说是过期，不能含糊成「暂无号源」。 */
+    @Test void aWholeDayThatAlreadyPassedIsExplainedWithTheElapsedTimes() {
+        LocalDate today = clock.today();
+        slotTodayAt(LocalTime.of(9, 0));
+        doReturn(LocalTime.of(20, 0)).when(clock).now();
+        doReturn(LocalDateTime.of(today, LocalTime.of(20, 0))).when(clock).nowDateTime();
+
+        String id = service.start().conversationId();
+        action(id, "SET_HOSPITAL", "h001");
+        action(id, "SET_DEPARTMENT", DemoSeed.CARDIOLOGY);
+        AgentTurnResponse turn = action(id, "SET_DATE", today.toString());
+
+        assertThat(turn.reply())
+                .as("说清「今天是几号、哪些时段过了」，而不是一句含糊的「暂无号源」")
+                .contains("今天", "的号都已经过了", "上午9点")
+                .doesNotContain("约满", "暂无号源");
+    }
+
+    /** 手工在「今天」摆一条 09:00 的号源；id 带专用前缀，{@link #resetData()} 负责清干净。 */
+    private void slotTodayAt(LocalTime time) {
+        String id = TODAY_SLOT_PREFIX + time.toString().replace(":", "");
+        jdbc.update("""
+                INSERT INTO appointment_slots
+                    (id,hospital_id,hospital_name,department,appointment_date,appointment_time,
+                     available,doctor_id,slot_type,department_id,fee_cents,capacity,booked)
+                SELECT ?,?,?,?,?,?,TRUE,?,?,?,?,?,0
+                WHERE NOT EXISTS (SELECT 1 FROM appointment_slots WHERE id=?)
+                """, id, "h001", "市第一医院（模拟）", "心内科", clock.today(), time,
+                "doc-d001-01", RollingAppointmentSlotInitializer.SLOT_TYPE_EXPERT, DemoSeed.CARDIOLOGY,
+                RollingAppointmentSlotInitializer.EXPERT_FEE_CENTS,
+                RollingAppointmentSlotInitializer.EXPERT_CAPACITY, id);
     }
 
     @Test void emergencyInvalidatesPendingConfirmationAndContinue() {
@@ -404,6 +487,36 @@ class SilverAgentApplicationTests {
         assertThat(count("appointments")).isZero();
     }
 
+    @Test void selectingAConflictingSlotIsBlockedBeforeCompanionOrTravelIsAsked() {
+        String id = service.start().conversationId();
+        action(id, "SET_HOSPITAL", "h001");
+        action(id, "SET_DEPARTMENT", "d001");
+        action(id, "SET_DATE", DAY);
+
+        // 号源一锁定就得说清「这个时间约不上」：陪同、出行、交通、通知一个都还没问过，
+        // 不能让老人把这一整轮答完才被告知，那些答案全白答。
+        AgentTurnResponse blocked = action(id, "SELECT_SLOT", CLASH_SLOT);
+        assertThat(blocked.stage()).isEqualTo("CONFLICT");
+        assertThat(blocked.reply()).contains("社区体检");
+        assertThat(blocked.quickReplies()).hasSize(3);
+        assertThat(blocked.quickReplies().get(2).action()).isEqualTo("KEEP_CONFLICT");
+
+        // 老人选择保留之后接着问没问完的那些，而不是回头再弹一次同一个冲突——
+        // 那样他永远走不到确认卡。冲突本身留在卡上，作为最后一道提醒。
+        AgentTurnResponse kept = action(id, "KEEP_CONFLICT", "");
+        assertThat(kept.stage()).as(kept.reply()).isEqualTo("ASK_COMPANION");
+        action(id, "SET_COMPANION", "false");
+        action(id, "SET_TRAVEL", "false");
+        action(id, "SET_TRANSPORT", "家属开车");
+        AgentTurnResponse plan = action(id, "SET_NOTIFY", "false");
+
+        assertThat(plan.stage()).as(plan.reply()).isEqualTo("AWAITING_CONFIRMATION");
+        assertThat(plan.reply()).doesNotContain("社区体检");
+        assertThat(plan.confirmation().operations())
+                .anyMatch(line -> line.contains("已知冲突") && line.contains("社区体检") && line.contains("已选择保留"));
+        assertThat(count("appointments")).isZero();
+    }
+
     @Test void changingTimeClearsAnAcknowledgedConflictFromTheCard() {
         String id = service.start().conversationId();
         action(id, "SET_HOSPITAL", "h001");
@@ -495,7 +608,8 @@ class SilverAgentApplicationTests {
         action(id, "SELECT_SLOT", CLASH_SLOT);
         action(id, "START_PLAN", "");
         AgentTurnResponse revised = action(id, "KEEP_CONFLICT", "");
-        jdbc.update("UPDATE appointment_slots SET available=FALSE WHERE id=?", CLASH_SLOT);
+        // 把新号源整班约满（名额口径），模拟「改期那一刻号刚好被抢光」。
+        jdbc.update("UPDATE appointment_slots SET booked=capacity, available=FALSE WHERE id=?", CLASH_SLOT);
         assertThat(approve(revised).stage()).isEqualTo("TOOL_ERROR");
         assertThat(jdbc.queryForObject("SELECT slot_id FROM appointments", String.class)).isEqualTo(SLOT);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM reminders WHERE status='CREATED'", Integer.class)).isEqualTo(2);

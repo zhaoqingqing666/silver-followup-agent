@@ -1,6 +1,7 @@
 package com.team.silveragent.application.care;
 
 import com.team.silveragent.application.AppointmentRecordStore;
+import com.team.silveragent.application.BusinessClock;
 
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -20,10 +21,12 @@ import java.util.Map;
 public class CareService {
     private final JdbcTemplate jdbc;
     private final AppointmentRecordStore records;
+    private final BusinessClock clock;
 
-    public CareService(JdbcTemplate jdbc, AppointmentRecordStore records) {
+    public CareService(JdbcTemplate jdbc, AppointmentRecordStore records, BusinessClock clock) {
         this.jdbc = jdbc;
         this.records = records;
+        this.clock = clock;
     }
 
     /** 我协同的长辈（照护总览）。 */
@@ -213,7 +216,7 @@ public class CareService {
         List<AppointmentRecordStore.AppointmentView> all = records.allFor(elderUserId);
         boolean cancelled = all.stream().anyMatch(item -> "CANCELLED".equals(item.status()));
         boolean hasUpcoming = all.stream().anyMatch(item -> "CONFIRMED".equals(item.status())
-                && !item.date().isBefore(LocalDate.now()));
+                && !item.date().isBefore(clock.today()));
         // 只有“取消了旧预约且没有再安排新的”才提示，避免已重新安排仍出现旧警告
         return cancelled && !hasUpcoming ? "有预约已取消，建议尽快重新安排" : null;
     }

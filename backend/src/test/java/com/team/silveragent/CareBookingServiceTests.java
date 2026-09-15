@@ -40,7 +40,7 @@ class CareBookingServiceTests {
         for (String table : List.of("care_notifications", "family_notifications", "reminders", "appointments")) {
             jdbc.update("DELETE FROM " + table);
         }
-        jdbc.update("UPDATE appointment_slots SET available=TRUE");
+        jdbc.update("UPDATE appointment_slots SET booked=0, available=TRUE");
     }
 
     private int count(String table) {
@@ -71,10 +71,10 @@ class CareBookingServiceTests {
                 "SELECT arranged_by FROM appointments WHERE id=?", String.class, view.appointmentId());
         assertThat(arrangedBy).isEqualTo("user-f001");
 
-        // 号源被占用
-        Integer available = jdbc.queryForObject(
-                "SELECT available FROM appointment_slots WHERE id=?", Integer.class, PLAIN);
-        assertThat(available).isZero();
+        // 号源被占用一格——名额口径下 booked 记 1，还剩 3 个名额，所以 available 仍是 TRUE。
+        Integer booked = jdbc.queryForObject(
+                "SELECT booked FROM appointment_slots WHERE id=?", Integer.class, PLAIN);
+        assertThat(booked).isEqualTo(1);
 
         // 提醒：材料准备(前1天) + 出发(前10分钟)
         assertThat(count("reminders")).isEqualTo(2);
@@ -145,8 +145,8 @@ class CareBookingServiceTests {
         AppointmentRecordStore.AppointmentView cancelled = booking.cancelUpcoming("user-f001", "user-001");
         assertThat(cancelled.appointmentId()).isEqualTo(made.appointmentId());
         assertThat(jdbc.queryForObject("SELECT status FROM appointments", String.class)).isEqualTo("CANCELLED");
-        assertThat(jdbc.queryForObject("SELECT available FROM appointment_slots WHERE id=?", Integer.class, PLAIN))
-                .isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT booked FROM appointment_slots WHERE id=?", Integer.class, PLAIN))
+                .as("取消要把这一班的名额放回去").isZero();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM reminders WHERE status='CREATED'", Integer.class))
                 .isZero();
         // 建约 book 回执 + 本次取消回执各一条，取消动态可见
@@ -220,9 +220,9 @@ class CareBookingServiceTests {
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM appointments", Integer.class)).isEqualTo(1);
         assertThat(jdbc.queryForObject("SELECT arranged_by FROM appointments", String.class)).isEqualTo("user-f001");
 
-        // 号源释放与占用互换
-        assertThat(jdbc.queryForObject("SELECT available FROM appointment_slots WHERE id=?", Integer.class, PLAIN)).isEqualTo(1);
-        assertThat(jdbc.queryForObject("SELECT available FROM appointment_slots WHERE id=?", Integer.class, CLASH)).isZero();
+        // 号源释放与占用互换：旧号源名额回落，新号源记上一位。
+        assertThat(jdbc.queryForObject("SELECT booked FROM appointment_slots WHERE id=?", Integer.class, PLAIN)).isZero();
+        assertThat(jdbc.queryForObject("SELECT booked FROM appointment_slots WHERE id=?", Integer.class, CLASH)).isEqualTo(1);
 
         // 旧提醒作废，新建材料+出发提醒
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM reminders WHERE status='CREATED'", Integer.class)).isEqualTo(2);
@@ -255,5 +255,35 @@ class CareBookingServiceTests {
         CareService.ElderSummary replaced = care.elders("user-f001").stream()
                 .filter(item -> item.elderId().equals("user-001")).findFirst().orElseThrow();
         assertThat(replaced.alert()).isNull();
+    }
+
+    /**
+     * 代约向导里列出的每条号源都必须说清「谁 · 什么号 · 多少钱」。
+     *
+     * <p>一个上午时段会同时有两位医生出诊（1 专家 + 1 普通），只给时间的话，页面上会并排
+     * 出现两个一模一样的「09:00」按钮，家属分不清点哪个、也不知道约的是谁。这条把它钉住：
+     * 同一时间的多条号源必须带上能区分开的医生信息。
+     */
+    @Test
+    void windowsCarryTheDoctorSoTheSameMomentCanBeToldApart() {
+        List<CareBookingService.DateWindow> windows = booking.windows("user-f001", "user-001", "h001", "d001");
+        assertThat(windows).as("心内科近期应当有可约日期").isNotEmpty();
+
+        List<CareBookingService.DateWindow.SlotOption> all = windows.stream()
+                .flatMap(window -> window.slots().stream()).toList();
+        assertThat(all).as("每一条可约号源都得带医生，否则页面上分不清谁是谁").allSatisfy(option -> {
+            assertThat(option.doctorName()).isNotBlank();
+            assertThat(option.slotType()).isNotBlank();
+            assertThat(option.feeCents()).isPositive();
+        });
+
+        // 真正的病根：同一个日期里，光是「时间」这一项是有重复的（上午 09:00 两位医生各一条）。
+        // 只要补上医生维度就能区分开——这条断言就是「重复」这件事本身存在的证据。
+        for (CareBookingService.DateWindow window : windows) {
+            List<String> sameTime = window.slots().stream()
+                    .map(option -> option.time() + "@" + option.doctorName()).toList();
+            assertThat(sameTime).as("%s 的号源按「时间 + 医生」不该有重复", window.date())
+                    .doesNotHaveDuplicates();
+        }
     }
 }

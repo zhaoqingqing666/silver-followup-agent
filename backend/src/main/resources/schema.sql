@@ -35,6 +35,32 @@ ALTER TABLE departments ADD COLUMN IF NOT EXISTS followup_scope VARCHAR(300);
 ALTER TABLE departments ADD COLUMN IF NOT EXISTS location VARCHAR(100);
 ALTER TABLE departments ADD COLUMN IF NOT EXISTS enabled BOOLEAN DEFAULT TRUE NOT NULL;
 
+-- 出诊医生。一个科室多名医生，号源挂在医生身上（见 appointment_slots.doctor_id）。
+-- slot_type 是这位医生出诊时放的号别，**手工指定**，不由职称推导——职称只用于展示。
+-- 之所以把号别也留在医生行上，是因为现阶段没有排班表，种子里「谁放什么号」只能写在医生上；
+-- 号源行自己另存一份 slot_type（生成时拷过去），将来要「同一位医生既出普通号又出专家号」，
+-- 只需加一张排班表覆盖号源那一列，这里的列不用动。
+-- **排班不存在这张表上**：每个科室每周放哪 3 天、一天 4 格各排谁坐诊，全部由
+-- RollingAppointmentSlotInitializer.openWeekdays / expertAt / normalAt 按
+-- 「科室 + 日期」算出来（纯函数、确定性，周末一律不放）。所以这里没有出诊星期列——
+-- 「第几个放号日坐哪一格」本来也不是一个「星期集合」能表达的。
+CREATE TABLE IF NOT EXISTS doctors (
+  id              VARCHAR(40)  PRIMARY KEY,
+  hospital_id     VARCHAR(40)  NOT NULL,
+  department_id   VARCHAR(40)  NOT NULL,
+  name            VARCHAR(40)  NOT NULL,
+  title           VARCHAR(40)  NOT NULL,
+  good_at         VARCHAR(300),
+  introduction    VARCHAR(300),
+  slot_type       VARCHAR(20)  NOT NULL DEFAULT 'NORMAL',
+  enabled         BOOLEAN DEFAULT TRUE NOT NULL
+);
+
+ALTER TABLE doctors ADD COLUMN IF NOT EXISTS slot_type VARCHAR(20) NOT NULL DEFAULT 'NORMAL';
+-- 排班搬进生成器、按「科室 + 日期」算之后，出诊星期这一列不再生效。老库上留着它只会让人
+-- 以为它还在管事，所以直接删掉（schema.sql 每次启动都跑，删不到也不会报错）。
+ALTER TABLE doctors DROP COLUMN IF EXISTS clinic_weekdays;
+
 CREATE TABLE IF NOT EXISTS clinic_locations (
   id VARCHAR(40) PRIMARY KEY,
   hospital_id VARCHAR(40) NOT NULL,
@@ -62,6 +88,26 @@ CREATE TABLE IF NOT EXISTS appointment_slots (
 );
 
 ALTER TABLE appointment_slots ADD COLUMN IF NOT EXISTS clinic_location_id VARCHAR(40);
+
+-- 号源现在多一维「医生」。同一天同一时段，不同医生各有一条号源（id 里带医生 id，见
+-- RollingAppointmentSlotInitializer.slotId）。四条一起加：
+--   doctor_id     出诊医生；旧号源上没有这一列的值（NULL），本次由生成器整批重建，不做回填
+--   slot_type     本条件号源放的是普通号还是专家号：NORMAL=普通号 / EXPERT=专家号
+--   department_id 科室外键。原来只有 department（科室**名字**），改个名字关联就断
+--   fee_cents     挂号费，**以分为单位**（整数存储，避免浮点误差）；普通号与专家号不同价
+ALTER TABLE appointment_slots ADD COLUMN IF NOT EXISTS doctor_id     VARCHAR(40);
+ALTER TABLE appointment_slots ADD COLUMN IF NOT EXISTS slot_type     VARCHAR(20);
+ALTER TABLE appointment_slots ADD COLUMN IF NOT EXISTS department_id VARCHAR(40);
+ALTER TABLE appointment_slots ADD COLUMN IF NOT EXISTS fee_cents     INT;
+
+-- 号源名额：一条号源 = 一位医生在一个时刻里的一班，capacity 是这一班能接几位，booked 是已经占了几位。
+-- 旧模型「一条号源 = 一个号」用 available 布尔表达；现在一条号源可以接多位，于是 available
+-- **降级为派生位**（available = booked < capacity），只保留给现有那 4 处查询继续用——
+-- 查询侧一行都不用改，这是「只改数据库、不动助手交互」能成立的前提。
+-- 默认 1 是刻意的：旧库上的存量行、以及测试里手工 INSERT 的号源，都自动等价于旧模型，
+-- 不会因为「新列没填」而变得不可约。不变式：0 <= booked <= capacity。
+ALTER TABLE appointment_slots ADD COLUMN IF NOT EXISTS capacity INT NOT NULL DEFAULT 1;
+ALTER TABLE appointment_slots ADD COLUMN IF NOT EXISTS booked   INT NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS user_schedules (
   id VARCHAR(40) PRIMARY KEY,
@@ -92,6 +138,15 @@ ALTER TABLE appointments ADD COLUMN IF NOT EXISTS transport VARCHAR(40);
 ALTER TABLE appointments ADD COLUMN IF NOT EXISTS reminder_status VARCHAR(100);
 ALTER TABLE appointments ADD COLUMN IF NOT EXISTS family_status VARCHAR(100);
 ALTER TABLE appointments ADD COLUMN IF NOT EXISTS materials CLOB;
+
+-- 预约上存一份**医生快照**，而不是每次去关联号源查：号源是滚动重建的（周末号源会删、
+-- 过去的日期会过期），预约记录必须自己说得清「当时约的是谁」。
+-- 与 reminder_status / family_status / materials 的做法一致——结果写死在预约行上。
+-- 旧预约没有这几列的值（NULL），前端如实显示「医生信息未记录」，不替它编一位医生。
+ALTER TABLE appointments ADD COLUMN IF NOT EXISTS doctor_name  VARCHAR(40);
+ALTER TABLE appointments ADD COLUMN IF NOT EXISTS doctor_title VARCHAR(40);
+ALTER TABLE appointments ADD COLUMN IF NOT EXISTS slot_type    VARCHAR(20);
+ALTER TABLE appointments ADD COLUMN IF NOT EXISTS fee_cents    INT;
 
 CREATE TABLE IF NOT EXISTS material_templates (
   id VARCHAR(50) PRIMARY KEY,

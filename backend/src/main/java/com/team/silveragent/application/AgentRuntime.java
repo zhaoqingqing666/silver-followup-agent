@@ -9,6 +9,7 @@ import com.team.silveragent.agent.planning.PlannerDecision;
 import com.team.silveragent.agent.planning.PlannerToolCall;
 import org.springframework.stereotype.Component;
 
+import java.time.LocalTime;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -43,11 +44,33 @@ final class AgentRuntime {
     Outcome plan(String message, AgentContext context, ConversationState state) {
         if (modelAvailable()) {
             PlannerDecision proposal = planner.plan(message, context, registry.plannerTools(state.actorRole));
-            if (proposal.source().startsWith("MODEL")) return modelProposal(proposal, state);
+            if (proposal.source().startsWith("MODEL")) {
+                return modelProposal(withSpokenTimeFallback(proposal, message), state);
+            }
             // 模型本轮失败时才退回旧规则路径；不能把旧关键词规则叠加在成功的模型结论之上。
             return legacyProposal(message, context, state, proposal);
         }
         return legacyProposal(message, context, state, null);
+    }
+
+    /**
+     * 模型没给任何时间线索时，用 Java 的口语解析器从原话里再抽一次，补上 {@code selectedTime}。
+     *
+     * <p>模型链路里 {@code facts} 是唯一事实源：它嘴上说「已经帮您选好了下午3点半」，JSON 里
+     * 却没填 {@code selectedTime}，Java 就当没这回事——于是「我还没有确认您想要的时间」又问一遍，
+     * 老人刚答过的问题被退回给他。
+     *
+     * <p>只补空、绝不覆盖：模型给了 {@code selectedTime} 或 {@code timePreference} 就一个字不动。
+     * 抽不到（「一会儿」「看情况」这类）也原样返回，交给原有的追踪逻辑。
+     */
+    private PlannerDecision withSpokenTimeFallback(PlannerDecision proposal, String message) {
+        ExtractedFacts facts = proposal.facts();
+        if (facts.selectedTime() != null || facts.timePreference() != null) return proposal;
+        LocalTime spoken = ruleExtractor.spokenTime(message);
+        if (spoken == null) return proposal;
+        return new PlannerDecision(proposal.actionType(), proposal.intent(), proposal.toolName(),
+                proposal.arguments(), proposal.replyDraft(), proposal.dialogueMode(),
+                facts.withSelectedTime(spoken), proposal.source(), proposal.toolCalls());
     }
 
     Outcome continueAfterTools(String originalMessage, AgentContext context, ConversationState state,

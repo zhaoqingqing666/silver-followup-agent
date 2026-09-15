@@ -26,16 +26,16 @@ class MockAppointmentAlternativesTests {
 
     @Test
     void alternativesAreStrictlyAfterTheRequestedDate() {
-        // 体检那天自己有号（09:00 / 10:30 / 14:00 / 15:30），旧窗口会把它们当成“附近日期”
+        // 体检那天自己有号（上午 1 专家 + 1 普通、下午 1~2 位），旧窗口会把它们当成“附近日期”
         List<Slot> slots = appointments.queryAlternatives("t-alternatives", "h001", "心内科", DemoSeed.checkupDay());
 
-        assertThat(slots).as("下周三之后的周四、周五都有号").isNotEmpty();
+        assertThat(slots).as("下周三之后的周五还有号（心内科固定周一/三/五）").isNotEmpty();
         assertThat(slots).allMatch(slot -> slot.date().isAfter(DemoSeed.checkupDay()));
     }
 
     @Test
     void theEmptyWeekendStillHasRealAlternativesToOffer() {
-        // 场景二：下周六刻意没有号，往后三天里周一、周二有号，老人得有得选
+        // 场景二：下周六刻意没有号，往后三天里有下下周一（心内科固定周一/三/五），老人得有得选
         List<Slot> slots = appointments.queryAlternatives("t-alternatives", "h001", "心内科", DemoSeed.emptyDay());
 
         assertThat(slots).isNotEmpty();

@@ -29,7 +29,8 @@ public class AgentSystemPrompt {
                  "facts":{"hospital":null,"department":null,"date":null,"acceptAlternative":null,
                  "needCompanion":null,"needTravel":null,"notifyFamily":null,"transport":null,
                  "selectedTime":null,"timePreference":null,"acceptRecommendedTime":null,
-                 "acknowledgement":null,"emotion":null,"concern":null,"familyContact":null}}
+                 "acknowledgement":null,"emotion":null,"concern":null,"familyContact":null,
+                 "doctor":null}}
 
                 actionType 规则：
                 - 能直接回答或聊天：ANSWER，replyDraft 必填。
@@ -50,10 +51,18 @@ public class AgentSystemPrompt {
                 可用 intent：CREATE_FOLLOWUP、PROVIDE_INFORMATION、RESTART_TASK、RESUME_TASK、
                 EXPLAIN_PROCESS、HEALTH_CONCERN、CHANGE_HOSPITAL、CHANGE_DEPARTMENT、CHANGE_DATE、CHANGE_TIME、
                 QUERY_HOSPITALS、QUERY_HOSPITAL_INFO、QUERY_DEPARTMENTS、QUERY_AVAILABLE_SLOTS、QUERY_NEARBY_SLOTS、
+                QUERY_DOCTORS、
                 CHECK_DUPLICATE、CHECK_CONFLICT、REQUEST_RECOMMENDATION、QUERY_APPOINTMENTS、ASK_MATERIALS、
                 QUERY_DRUG、
                 ASK_TRAVEL_ROUTE、ASK_LOCATION_GUIDE、CANCEL_TASK、CANCEL_APPOINTMENT、CONFIRM_ACTION、DENY_ACTION、
                 EMOTIONAL_SUPPORT、SMALL_TALK、MEDICAL_ADVICE、EMERGENCY、UNKNOWN。
+
+                医生与号别：老人点名医生（“找张建国”“挂张主任的号”）或要专家号（“要专家号”“主任看”）时，
+                必须把医生线索写进 facts.doctor：全名照抄（“张建国”），「姓氏+职称」只保留姓（“张主任”→“张”），
+                纯号别诉求写“专家”。老人问“这科有哪些医生”“哪位医生出诊”用 QUERY_DOCTORS，
+                用 CALL_READ_TOOL 调 doctor.list；出诊医生、号别、挂号费全部来自工具返回，不得编造医生。
+                指定日期没有专家号时，如实说明，可以查 7 天内最近的专家号问老人要不要看，绝不能
+                不吭声地改成别的日期；7 天内也没有就建议改普通号或等新号源放出。
 
                 intent 里还有三类与复诊预约流程无关的日常事情，命中时用它们，不要硬塞进预约流程：
                 - RECORD_HEALTH_VALUE：老人报了一个自己量到的数值（“我的血压是100”“血糖6.4”），
@@ -155,6 +164,8 @@ public class AgentSystemPrompt {
                 界面按钮是跟着权威草稿生成的，换了问题就会和按钮对不上。
                 必须依据提供的预约草稿、工具结果和操作状态回答；不得添加工具没有返回的事实。
                 如果工具结果表示无号、冲突、重复、没有匹配或多个候选，要先说清结果，再给出一个自然的下一步问题。
+                结果里已经写明的**理由要照说**：它说「今天这个时段已经过了」就说过期，不许改口成「约满」——
+                理由换一个说法，等于替工具编了一句它没说过的话。工具没给理由时，就只说结果，不要补理由。
                 """;
     }
 
@@ -207,8 +218,11 @@ public class AgentSystemPrompt {
                 - 名称唯一近似匹配：复述候选并确认；多候选：列出真实候选并追问；无匹配：明确说明并给真实可选项。
                 - 用户不知道科室：可提示查看转诊单、上次挂号记录或询问导诊台，不能按症状替用户诊断选科。
                 - 指定日期无号：说明无号，可查询前后日期、换日期、换医院或稍后再查。
+                - 当天已经过去的时段：说「今天这个时段已经过了」，不要说成「约满」或「没有号」。
+                  「约满」指名额被别人占完，和「时间走掉了」是两件事；只有工具结果明确说了名额满，才能说约满。
                 - 日程冲突：说清冲突事项，允许换时间、换日期、换医院或明确保留；保留仍然需要最终确认。
                 - 重复预约：展示已有预约，询问保留、修改还是另选；问题解决前不能提出再次提交。
+                  当天的那条说「今天这个时段已经预约过了」，老人脑子里装的正是「今天上午我不是约过了吗」。
                 - 多条预约需要查看、地图或取消：结合日期、医院、科室和“最近一次”等指代筛选；仍不唯一就追问。
 
                 【写操作】

@@ -41,7 +41,7 @@ class ElderManagedPlanTests {
         for (String table : List.of("memos", "care_notifications", "family_notifications", "reminders", "appointments")) {
             jdbc.update("DELETE FROM " + table);
         }
-        jdbc.update("UPDATE appointment_slots SET available=TRUE");
+        jdbc.update("UPDATE appointment_slots SET booked=0, available=TRUE");
     }
 
     private int count(String table) {

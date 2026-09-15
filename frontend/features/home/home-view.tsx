@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { Activity, BellRing, CalendarCheck2, ChevronRight, ClipboardCheck, Headphones, HeartHandshake, Mic, NotebookPen, Route } from 'lucide-react';
 import { getAppointments, getUserProfile } from '@/lib/appointment-api';
+import { doctorLine } from '@/lib/appointment-display';
 import { getHealthRecordTotal } from '@/lib/health-record-api';
 import { getMemoCounts, getMemosByKind } from '@/lib/memo-api';
 import { fmtRemind, fmtRepeat, MemoCard } from '@/features/records/memo-card';
@@ -93,7 +94,8 @@ function writeDismissed(keys: ReadonlySet<string>): void {
 }
 
 export function HomeView({ onNavigate, onOpenTravel, onOpenPage }: HomeViewProps) {
-  const [appointment, setAppointment] = useState<AppointmentSummary | null>(null);
+  /** 首页只摆「已预约」的记录；取消过的后端还留着，但这里不该再出现。 */
+  const [appointments, setAppointments] = useState<AppointmentSummary[]>([]);
   const [userName, setUserName] = useState('您好');
   // 首页只用“有提醒的”那一类：横幅和“最近到点”都从它算。提醒是当天的、攒不起来，拿全没问题。
   const [memos, setMemos] = useState<HealthMemo[]>([]);
@@ -106,11 +108,30 @@ export function HomeView({ onNavigate, onOpenTravel, onOpenPage }: HomeViewProps
   // “现在”由定时器每 30 秒推进一次：人停在首页时，到点横幅会自己出现，不用刷新页面
   const [now, setNow] = useState(() => Date.now());
 
+  /**
+   * 读已预约的记录。
+   *
+   * <p>只留 `CONFIRMED`：事项页刚取消掉的那条，首页不该还挂着。
+   *
+   * <p>按预约时间正序排——接口给的是 `created_at` 倒序，那是「最新建出来的一条」，
+   * 和「最近要去的一次」是两回事，差得还不小（先约的远期、后约的近处都有）。
+   */
+  const loadAppointments = () => {
+    void getAppointments()
+      .then(rows => setAppointments(rows
+        .filter(row => row.status === 'CONFIRMED')
+        .sort((left, right) => `${left.date} ${left.time}`.localeCompare(`${right.date} ${right.time}`))))
+      .catch(() => setAppointments([]));
+  };
+
   useEffect(() => {
-    void getAppointments().then(rows => setAppointment(rows.find(row => row.status === 'CONFIRMED') ?? null)).catch(() => setAppointment(null));
+    loadAppointments();
     void getUserProfile().then(user => setUserName(user.name)).catch(() => setUserName('您好'));
     reloadMemos();
     reloadRecords();
+    // 事项页取消预约后会广播一次，这里跟着重读，否则首页还停着那条已经不存在的预约。
+    window.addEventListener('silver-agent-appointments-updated', loadAppointments);
+    return () => window.removeEventListener('silver-agent-appointments-updated', loadAppointments);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -136,6 +157,12 @@ export function HomeView({ onNavigate, onOpenTravel, onOpenPage }: HomeViewProps
   const reloadRecords = () => {
     void getHealthRecordTotal().then(setRecordTotal).catch(() => setRecordTotal(0));
   };
+
+  /**
+   * 「下一次复诊」＝最近要去的那次已预约（列表已经按时间正序排过）。
+   * 「检查材料」「出行安排」两个入口沿用这一条：它们服务的是眼下要去的那次复诊。
+   */
+  const appointment = appointments[0] ?? null;
 
   // 拿回来的本来就是“有提醒的”那一类
   const timed = memos;
@@ -190,25 +217,34 @@ export function HomeView({ onNavigate, onOpenTravel, onOpenPage }: HomeViewProps
 
       <section>
         <div className="mb-3 flex items-center justify-between">
-          <h2 className="text-xl font-bold">下一次复诊</h2>
+          <h2 className="text-xl font-bold">我的复诊预约</h2>
           <button onClick={() => onNavigate('tasks')} className="flex items-center text-base font-semibold text-primary">查看详情 <ChevronRight className="size-5" /></button>
         </div>
-        {appointment ? (
-          <button onClick={() => onNavigate(appointment.arrangedLabel ? 'assistant' : 'tasks')} className="w-full rounded-3xl border bg-card p-5 text-left shadow-sm">
-            <div className="flex gap-4">
-              <div className="grid min-w-20 place-items-center rounded-2xl bg-secondary px-3 py-2 text-center text-secondary-foreground">
-                <strong className="text-2xl">{Number(appointment.date.split('-')[2])}</strong><span className="text-sm">{Number(appointment.date.split('-')[1])}月</span>
-              </div>
-              <div className="min-w-0 flex-1">
-                <p className="text-xl font-bold">{appointment.time.slice(0, 5)}</p>
-                <p className="mt-1 truncate text-base">{appointment.hospital}</p>
-                <p className="mt-1 text-base text-muted-foreground">{appointment.department} · {appointment.reminderStatus}</p>
-              </div>
-            </div>
-            {appointment.arrangedLabel && (
-              <p className="mt-3 rounded-xl bg-[#fff0dc] px-3 py-2 text-base font-semibold text-[#7a4a24]">由{appointment.arrangedLabel}帮您约好 · 如需改动，点这里告诉助手</p>
-            )}
-          </button>
+        {appointments.length > 0 ? (
+          /* 每条已预约都摆出来，按时间正序——最上面那条就是最近要去的一次。
+             与事项页读的是同一份数据、同一套过滤，两边不会各说各话。 */
+          <div className="grid gap-3">
+            {appointments.map(row => (
+              <button key={row.appointmentId} onClick={() => onNavigate(row.arrangedLabel ? 'assistant' : 'tasks')} className="w-full rounded-3xl border bg-card p-5 text-left shadow-sm">
+                <div className="flex gap-4">
+                  <div className="grid min-w-20 place-items-center rounded-2xl bg-secondary px-3 py-2 text-center text-secondary-foreground">
+                    <strong className="text-2xl">{Number(row.date.split('-')[2])}</strong><span className="text-sm">{Number(row.date.split('-')[1])}月</span>
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-xl font-bold">{row.time.slice(0, 5)}</p>
+                    <p className="mt-1 truncate text-base">{row.hospital}</p>
+                    <p className="mt-1 text-base text-muted-foreground">{row.department} · {row.reminderStatus}</p>
+                    {/* 与事项页同一套拼法（lib/appointment-display.ts），两页不会各说各话。
+                        老预约没有医生快照时显示「医生信息未记录」。 */}
+                    <p className="mt-1 text-base text-muted-foreground">{doctorLine(row)}</p>
+                  </div>
+                </div>
+                {row.arrangedLabel && (
+                  <p className="mt-3 rounded-xl bg-[#fff0dc] px-3 py-2 text-base font-semibold text-[#7a4a24]">由{row.arrangedLabel}帮您约好 · 如需改动，点这里告诉助手</p>
+                )}
+              </button>
+            ))}
+          </div>
         ) : (
           <button onClick={() => onNavigate('assistant')} className="w-full rounded-3xl border border-dashed border-[#dba976] bg-[#fffaf3] p-6 text-center shadow-sm">
             <CalendarCheck2 className="mx-auto size-9 text-primary" />

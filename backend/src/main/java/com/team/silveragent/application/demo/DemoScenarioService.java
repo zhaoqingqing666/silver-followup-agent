@@ -63,8 +63,10 @@ public class DemoScenarioService {
     public DemoScenarioResponse reset(String scenarioId) {
         DemoScenario scenario = DemoScenario.byId(scenarioId);
         RESET_TABLES.forEach(table -> jdbc.update("DELETE FROM " + table));
-        // 上一轮演示约掉的号源要放开，否则重放同一场演示会碰到「号源已被占用」。
-        jdbc.update("UPDATE appointment_slots SET available=TRUE");
+        // 上一轮演示约掉的号源要放开，否则重放同一场演示会碰到「号源约满」。
+        // booked 必须一并归零：只把 available 拨回 TRUE、booked 还留着，重置后再约一次
+        // booked 就变 2、3……available 与 booked < capacity 这条不变式当场破掉。
+        jdbc.update("UPDATE appointment_slots SET booked=0, available=TRUE");
         slots.seed();
         schedules.seed();
         // 内存里那份会话状态也要清：不清的话，旧会话 id 仍能说话（内存命中就不会回查数据库），
@@ -105,9 +107,9 @@ public class DemoScenarioService {
                     "日期选择下周三（" + checkup + "）",
                     "助手问是否接受附近日期时，点「可以换日期」",
                     "点「上午」，再点 10:30 那一格（与「社区体检」10:00-11:00 重叠；选上午 9 点则不会冲突，是不冲突的对照组）",
-                    "依次回答陪同、出行提醒、交通方式、家属通知",
-                    "最后一步答完，助手提示「这个时间与您的“社区体检… ”冲突」，并给出三个选项",
-                    "点「仍保留这个时间」，确认卡上会多出一行「已知冲突：与“社区体检”… 您已选择保留」");
+                    "助手当场提示「这个时间与您的“社区体检… ”冲突」，并给出三个选项——陪同、出行和通知都还没问，不用答完才知道",
+                    "点「仍保留这个时间」，助手接着问陪同、出行提醒、交通方式、家属通知",
+                    "依次答完，确认卡上会多出一行「已知冲突：与“社区体检”… 您已选择保留」");
             case BOUNDARY -> List.of(
                     "直接输入「我血压有点高，要不要紧？」",
                     "观察回复下面多出一块独立的服务范围提示卡（不是普通聊天气泡）",

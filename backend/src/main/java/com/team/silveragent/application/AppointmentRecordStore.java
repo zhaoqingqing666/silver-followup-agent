@@ -40,7 +40,8 @@ public class AppointmentRecordStore {
                        a.status,a.created_at,a.arranged_by,a.accompanied_by,
                        (SELECT r.relationship FROM care_relations r
                         WHERE r.caregiver_id=a.arranged_by AND r.elder_user_id=a.user_id) AS arr_rel,
-                       arr.name AS arr_name
+                       arr.name AS arr_name,
+                       a.doctor_name,a.doctor_title,a.slot_type,a.fee_cents
                 FROM appointments a JOIN appointment_slots s ON s.id=a.slot_id
                 LEFT JOIN users arr ON arr.id=a.arranged_by
                 WHERE a.user_id=?
@@ -59,13 +60,16 @@ public class AppointmentRecordStore {
                     rs.getTimestamp(6) == null ? null : rs.getTimestamp(6).toLocalDateTime(),
                     rs.getString(7), rs.getString(8), rs.getString(9),
                     splitMaterials(rs.getString(10)), List.of(), rs.getString(11),
-                    rs.getTimestamp(12).toLocalDateTime(), arrangedBy, arrangedLabel, accompaniedBy);
+                    rs.getTimestamp(12).toLocalDateTime(), arrangedBy, arrangedLabel, accompaniedBy,
+                    rs.getString(17), rs.getString(18), rs.getString(19),
+                    rs.getObject(20) == null ? null : rs.getInt(20));
         }, userId);
         return rows.stream().map(row -> new AppointmentView(
                 row.appointmentId(), row.hospital(), row.department(), row.date(), row.time(),
                 row.departureAt(), row.transport(), row.reminderStatus(), row.familyStatus(),
                 row.materials(), requiredMaterials(row.department()), row.status(), row.createdAt(),
-                row.arrangedBy(), row.arrangedLabel(), row.accompaniedBy())).toList();
+                row.arrangedBy(), row.arrangedLabel(), row.accompaniedBy(),
+                row.doctorName(), row.doctorTitle(), row.slotType(), row.feeCents())).toList();
     }
 
     private List<String> requiredMaterials(String department) {
@@ -80,12 +84,21 @@ public class AppointmentRecordStore {
         return value == null || value.isBlank() ? List.of() : List.of(value.split("、"));
     }
 
+    /**
+     * 一条预约的展示视图。
+     *
+     * <p>末尾四个是医生快照（{@code doctorName / doctorTitle / slotType / feeCents}），
+     * 本次加医生维度时追加。它们来自预约行自己的快照列，不是每次去 join 号源——
+     * 号源会被滚动重建，预约得自己说得清当时约的是谁。加医生维度之前建的预约这四项为空，
+     * 前端如实显示「医生信息未记录」，不替它编一位医生。
+     */
     public record AppointmentView(
             String appointmentId, String hospital, String department,
             java.time.LocalDate date, java.time.LocalTime time,
             LocalDateTime departureAt, String transport,
             String reminderStatus, String familyStatus, List<String> materials,
             List<String> requiredMaterials, String status, LocalDateTime createdAt,
-            String arrangedBy, String arrangedLabel, String accompaniedBy
+            String arrangedBy, String arrangedLabel, String accompaniedBy,
+            String doctorName, String doctorTitle, String slotType, Integer feeCents
     ) { }
 }

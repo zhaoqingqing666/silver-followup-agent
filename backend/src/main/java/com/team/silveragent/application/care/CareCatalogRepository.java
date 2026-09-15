@@ -1,18 +1,22 @@
 package com.team.silveragent.application.care;
 
+import com.team.silveragent.application.BusinessClock;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
 
 @Repository
 public class CareCatalogRepository {
     private final JdbcTemplate jdbc;
+    private final BusinessClock clock;
 
-    public CareCatalogRepository(JdbcTemplate jdbc) {
+    public CareCatalogRepository(JdbcTemplate jdbc, BusinessClock clock) {
         this.jdbc = jdbc;
+        this.clock = clock;
     }
 
     public List<Hospital> hospitals() {
@@ -69,15 +73,27 @@ public class CareCatalogRepository {
                 (rs, row) -> rs.getString(1));
     }
 
+    /**
+     * 从 from 起仍可预约的日期，去重、最多 limit 个（「查看可预约日期」那排按钮用它）。
+     *
+     * <p>「当天已过的时段」在这里一并滤掉，判据与号源查询同一份（{@link BusinessClock}）。
+     * 以前这一步交给 H2 的 {@code CURRENT_DATE / CURRENT_TIME}，等于把业务口径挂在容器时区上：
+     * 镜像没配时区时 JVM 走 GMT，北京 22:58 在它眼里才 14:58，「今天还剩几个时段」整片算错。
+     */
     public List<LocalDate> availableDates(String hospitalId, String department, LocalDate from, int limit) {
+        if (hospitalId == null || department == null || from == null) return List.of();
         return jdbc.query("""
-                SELECT DISTINCT appointment_date FROM appointment_slots
+                SELECT DISTINCT appointment_date, appointment_time FROM appointment_slots
                 WHERE hospital_id=? AND department=? AND appointment_date>=? AND available=TRUE
-                  AND (appointment_date > CURRENT_DATE
-                       OR (appointment_date = CURRENT_DATE AND appointment_time > CURRENT_TIME))
-                ORDER BY appointment_date LIMIT ?
-                """, (rs, row) -> rs.getDate(1).toLocalDate(),
-                hospitalId, department, java.sql.Date.valueOf(from), limit);
+                ORDER BY appointment_date, appointment_time
+                """, (rs, row) -> LocalDateTime.of(rs.getDate(1).toLocalDate(), rs.getTime(2).toLocalTime()),
+                hospitalId, department, java.sql.Date.valueOf(from))
+                .stream()
+                .filter(moment -> !clock.isPast(moment))
+                .map(LocalDateTime::toLocalDate)
+                .distinct()
+                .limit(limit)
+                .toList();
     }
 
     public Optional<UserProfile> user(String userId) {

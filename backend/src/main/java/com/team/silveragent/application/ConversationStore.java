@@ -159,12 +159,17 @@ public class ConversationStore {
     }
 
     void addMessage(String conversationId, String role, String content) {
-        addMessage(conversationId, role, content, null, null);
+        addMessage(conversationId, role, content, "TEXT", null);
     }
 
     /**
      * 带附件信息的一轮。messageType 用来区分「图片轮」这类特殊消息，attachmentId 指向
-     * {@code conversation_attachments}。两者都允许为空，纯文字消息走三参重载即可。
+     * {@code conversation_attachments}，纯文字消息走三参重载即可。
+     *
+     * <p>messageType 兜底成 "TEXT" 而不是留 null：目录里的 schema.sql 把这一列建成可空，
+     * 但线上 H2 数据卷是早先按 {@code DEFAULT 'TEXT' NOT NULL} 建的，而 {@code ADD COLUMN
+     * IF NOT EXISTS} 对已存在的列是空操作，约束一直留着。显式传 NULL 不会触发列默认值，
+     * 会直接撞非空约束。写死成字面量则对两种表结构都成立。
      */
     void addMessage(String conversationId, String role, String content,
                     String messageType, Long attachmentId) {
@@ -172,7 +177,7 @@ public class ConversationStore {
                 INSERT INTO conversation_messages
                 (conversation_id,role,content,created_at,message_type,attachment_id) VALUES (?,?,?,?,?,?)
                 """, conversationId, role, content, Timestamp.valueOf(LocalDateTime.now()),
-                messageType, attachmentId);
+                messageType == null ? "TEXT" : messageType, attachmentId);
     }
 
     /**
@@ -298,7 +303,7 @@ public class ConversationStore {
             String pendingEntityType, String pendingEntityId, String pendingEntityName, String pendingEntityRaw,
             String confirmationId, String originalAppointmentId,
             boolean materialReminderDone, boolean departureReminderDone,
-            boolean notificationDone, boolean scheduleChecked
+            boolean notificationDone, boolean scheduleChecked, boolean conflictKept
     ) {
         static Snapshot from(ConversationState state) {
             return new Snapshot(state.stage, state.dialogueMode, state.taskStatus,
@@ -315,7 +320,7 @@ public class ConversationStore {
                     state.pendingEntityType, state.pendingEntityId, state.pendingEntityName, state.pendingEntityRaw,
                     state.confirmationId, state.originalAppointmentId,
                     state.materialReminderDone, state.departureReminderDone,
-                    state.notificationDone, state.scheduleChecked);
+                    state.notificationDone, state.scheduleChecked, state.conflictKept);
         }
 
         ConversationState toState(String id) {
@@ -365,6 +370,8 @@ public class ConversationStore {
             state.departureReminderDone = departureReminderDone;
             state.notificationDone = notificationDone;
             state.scheduleChecked = scheduleChecked;
+            // 旧快照没有这个字段，Jackson 给 record 的 boolean 组件补 false，正好是「还没保留过」。
+            state.conflictKept = conflictKept;
             return state;
         }
 

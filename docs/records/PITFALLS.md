@@ -1,5 +1,82 @@
 # 踩坑记录
 
+## 2026-09-14 给 `modelSuggestedReplies` 补按钮，顺带改掉了「任务挂起」的语义
+
+- 现象：为了让「问医院 / 问科室」这两步也有快捷按钮，在 `modelSuggestedReplies` 里补了
+  `ASK_HOSPITAL` / `ASK_DEPARTMENT` 两个分支，`SilverAgentApplicationTests.unrelatedConversation
+  PausesTaskWithoutLosingItsStage` 立刻变红——老人说一句与办理无关的话，任务不再从
+  `ACTIVE` 变成 `PAUSED`。
+- 原因：这个方法的返回值**不只是「这一轮挂什么按钮」**。`chatInternalBody` 里还有第二处拿它当判据：
+  办理正停在一个待答问题上时，`waitingReplies = modelSuggestedReplies(state)`，
+  **非空就只把当前这一步再问一遍，空才把任务挂起**。于是「补两个按钮」等于顺手把「该不该挂起」
+  也一起改了。两处用法对同一个空列表给了两种含义。
+- 处理：撤回那两行，改为只动 `askHospital` / `askDepartment`——真正要修的是**按钮内容**
+  （科室从 3 个变 6 个），不是**有没有按钮**。
+- 结论：**一个方法被多处调用、且另一处用的是「空 / 非空」这种隐含契约时，改它之前先 grep 出
+  全部调用点。** 返回列表的方法，空列表常常是一个语义信号，而不只是「没有数据」。
+
+## 2026-09-14 从宿主机 `docker stop` 关开发容器，报 500 `check if the server supports the requested API version`
+
+- 现象：宿主机执行 `docker stop <容器id>` 报
+  `request returned 500 Internal Server Error for API route ... /v1.54/containers/<id>/stop`，
+  附带一句 `check if the server supports the requested API version`。**这句话是误导**——它看着像「客户端比引擎新、要装/降版本」，实际是引擎当时处于「命名管道还在、引擎未就绪」的半死状态，Docker 把内部错误统一映射成了 500。
+- 实查（可用于排除最常见的那个误判）：`where.exe docker` 只找到
+  `C:\Program Files\Docker\Docker\resources\bin\docker.exe` 一份，CLI 29.5.3 / API 1.54 与安装包一致；`docker context ls` 是 `desktop-linux → npipe:////./pipe/dockerDesktopLinuxEngine`，地址正确。**版本没错位。**引擎整个退出之后，同一条命令的报错会变成 `open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified`（管道不存在，是另一个阶段）。
+- 原因：开发容器由 **VS Code 持有**。从外部 CLI 硬停它，很容易把引擎搞成半死状态。另外容器 id（如 `82402866bd7f`）在容器重建后就变了，本身也不该写进笔记——**容器名是固定的 `silver-followup-dev`**。
+- 处理：① 启动 Docker Desktop，等托盘图标变绿；② 仍 500 则 `$env:DOCKER_API_VERSION="1.43"` 强行降版本重试；③ 完全退出 Desktop + `wsl --shutdown` + 重启（最常见有效）；④ **最后才** Troubleshoot → Purge。
+- **顺序不能反**：先在 VS Code 里停容器 → 再退 Docker Desktop。反过来就是上面这个 500——引擎一退，`docker` 命令就没有后端了。
+- 停容器的正确入口（VS Code，插件 0.469.0）：**远程资源管理器（Remote Explorer）→ Containers → 对正在运行的容器右键 →「停止容器」**。同一个右键菜单里还有「启动容器」「移除容器」「重新生成容器」。⚠️ **它不在命令面板里**：`remote-containers.stopContainer` 的 `commandPalette.when` 是 `false`（隐藏），只挂在 `view/item/context` 上，条件 `view == targetsContainers && viewItem =~ /^running(Dev|)Container/`。关掉连着远程的 VS Code 窗口并选 Stop Container 是等价入口。
+- ⚠️ **第 ④ 步是唯一会丢数据的一步**：Purge 清掉 `silver-backend-data` 具名卷，而库里的预约都是走界面流程手工建出来的、`data.sql` 不种子 `appointments`，清掉就真没了。（号源例外：由 `RollingAppointmentSlotInitializer` 每次启动重排，不怕丢。）
+- 结论：**这不是仓库代码问题，也管不了。**500 发生在 `docker` CLI ↔ Docker Desktop 引擎之间，比 `.devcontainer` 配置、比任何容器内代码都早；在仓库里加限流/锁/重试都碰不到这条路径。要沉淀就落在文档 + 人工约定，别写进 `.devcontainer/`（那是「三台电脑环境一致」的声明文件，不是运行时防护层）。
+- 环境注记：本项目沙箱屏蔽了 `wsl.exe`（Security Center → Command Security → Program Blacklist），`wsl --shutdown` 只能由成员在自己的真实终端里执行。
+
+## 2026-09-13 回归用例按「科室名字」分组，把两家医院的同名科室并成一组
+
+- 现象：`DoctorSlotModelTests` 里「上午每个时刻都该是 1 位专家 + 1 位普通」失败，报 `内分泌科 2026-09-15 09:00:00（专家 2 / 普通 2）`；「下午同一时刻 ≤ 2 条」报 `心内科 2026-09-18 14:00:00 共 4 条`。数字看着都恰好翻了一倍。
+- 原因：用例写的是 `GROUP BY s.department`——`department` 是科室**名字**。而 `departments` 里「心内科」有两份（`d001` 市第一医院、`d006` 市人民医院）、「内分泌科」也有两份（`d003` 市人民医院、`d005` 市第一医院）。按名字一分组，两家医院的两个科室被并成一个组，各自「1 专家 + 1 普通」加起来正好 2 + 2。
+- 处理：`GROUP BY` 改成 `s.department_id`（唯一键）。
+- 结论：**`appointment_slots` 上同时有 `department`（名字）和 `department_id`（外键）两列，按科室聚合或判重一律用 `department_id`。**科室名字跨医院不唯一，拿它当分组键会把两家静默合成一家，且数字以「恰好翻倍」这种看着正常的样子出现，不容易第一眼看出是分组错。
+
+## 2026-09-13 H2 的 `DAY_OF_WEEK` 是 ISO 起点，`IN (1,7)` 数到的是周一
+
+- 现象：`DoctorSlotModelTests` 里「周末一律不生成号源」失败，`expected: 0 but was: 90`。但生成器只在周一到周五的循环里插号源，周末根本进不去。
+- 原因：用例用 SQL 的 `DAY_OF_WEEK(appointment_date) IN (1, 7)` 判周末，**前提「7 = 周六」是错的**。H2 的 `DAY_OF_WEEK` 按 ISO 编号：**1 = 周一 … 6 = 周六、7 = 周日**，所以 `IN (1,7)` 命中「周一 + 周日」。库里周一有号的科室正好 3 个（`d001` / `d003` / `d004`）、一个月里 5 个周一、每次 6 条 → **恰好 90**。（H2 另有 `ISO_DAY_OF_WEEK`；别的数据库这个函数起点还不一样，`1` 到底是周日还是周一必须逐个查。）
+- 处理：周末判断挪进 Java：`rs.getDate(1).toLocalDate().getDayOfWeek().getValue() >= 6`，与生成器、`DemoSeed` 共用 `LocalDate.getDayOfWeek()` 这一套口径。
+- 结论：**「星期几」的判断别写进 SQL。**用例与被测代码各用一套星期编号，失败时数字还「像模像样」（90 条，不像乱数），排查成本远高于把判断放进 Java。
+
+## 2026-09-13 `HealthReportTests` 间歇性失败：与改动无关的时钟边界抖动
+
+- 现象：`HealthReportTests.summaryCountsAveragesAndShowsRealReadings`（有时还有 `recordsOlderThanTheWindowAreLeftOut`）**间歇性**失败，症状永远是「汇总里少一条」——例如实际 `血糖 1 次，7.1 mmol/L。` 而期望 `血糖 2 次，平均 6.8…`；或者 `recordsOlderThanTheWindowAreLeftOut` 直接 `text()` 为 null（窗口里一条不剩）。同一份代码连跑 6 次，有时全绿、有时 1~2 个失败。**不是编译产物残留**（那是 PITFALLS 里另一条，症状是整批 Bean 冲突）。
+- 排查方法（值得照抄）：`git worktree add --detach <tmp> HEAD` 拉一份**完全不含当前改动**的干净检出，两棵树各跑 6 次同一用例。结果：**干净检出 3/6 次失败**（其中两次是 2 个失败），带改动的树 2/6 次失败。→ 失败率与改动无关，是这条用例自己不稳。**别花时间在自己的 diff 里找原因**；先做这个对照。
+- 根因（形状）：`HealthReportService.summarize()` 用 `to = MemoParser.nowInDemoZone()`、`from = to.minusDays(window.days())` 现算窗口，而 `HealthReportTests.seed()` 也用 `nowInDemoZone().minusDays(daysAgo)` 现造数据——**两边读的都是真实系统时钟**。用例把记录造在 `daysAgo = 0`（就是「此刻」），再去和几毫秒之后算出来的 `to` 比，正好压在 `recorded_at <= to` 这个边界上。触发点未见得更精确（曾怀疑 H2 `TIMESTAMP(6)` 微秒取整、也怀疑窗口下限，都对不上），但**边界依赖本身是确凿的**：断言依赖"造数据和算窗口是同一个瞬间"。
+- 处理：本次不改（不属于预约/号源范围，动了会碰到健康报告的时间口径）。**判读回归结果时把它当已知抖动**：只要失败项是 `HealthReportTests` 且症状是「次数少一次」，原样重跑一次即可，不要顺着它去改预约或号源代码。
+- 教训：**凡是把用例数据造在「现在」、又用「现在」现算窗口的断言，天生踩边界。**要稳，就把 `daysAgo` 从 0 挪到 1，或者给窗口留一天余量，让它不依赖"两次 `now()` 是同一瞬间"。
+- 复现记录（2026-09-13，排班重做那次完整回归）：又失败一次，症状仍同形但**丢的条数不同**——这次是 `血压 2 次`＋`血糖 1 次`，上次是 `血压 3 次`＋`血糖 1 次`。两次都是「造在 `daysAgo=0` 的那条被关在窗口外」，丢哪几条随亚秒取整而变。**这条症状本身就是这个抖动的指纹**：看到「次数比预期少一两条」且失败项是 `HealthReportTests`，直接重跑，别去查号源/预约的代码。单跑 `-Dtest=HealthReportTests` 那次是 12/12 全绿，也说明它不是顺序污染。
+- 复现记录（2026-09-14，科室扩充＋号源加名额那次完整回归）：全量 **393 例、失败 3 例，且三条同时挂**——`aValueWithoutANumberStillGetsCounted:108`、`recordsOlderThanTheWindowAreLeftOut:118`、`summaryCountsAveragesAndShowsRealReadings:98`（三个方法名都在上面出现过）。同一次运行里挂到 3 条是首次出现（此前最多 2 条），**但判据不变**：同一份代码、同一个 `target/`，前一次全量跑挂的是 `DoctorIntentTests` 的一条真失败 + `HealthReportTests` 一条，这一次数值又变了。次数从 1 → 2 → 3 随亚秒边界漂移，**恰恰是这条抖动的特征**，不是改动放大的。**看到 `HealthReportTests` 一次性挂多条不要惊慌**：先原样重跑一次全量；若 `HealthReportTests` 之外还有失败，那才是要查的真问题。
+- 复现记录（2026-09-14，号源聚合那次完整回归）：全量跑挂的是 **`sendingWritesOneNotificationToThePrimaryContact:129`**（`assertThat(result.sent()).isTrue()` → false），**方法名不在上面列举的两个里**。单跑 `-Dtest=HealthReportTests` 连跑 4 次得到 **2 绿 2 红**，红的那两次又换成 `aValueWithoutANumberStillGetsCounted:108`（`report.text()` 为 null）。→ **挂哪个方法每次都换**，不要因为「方法名对不上」就当新问题去翻号源代码。`sent()` 为 false 只是同一根因的另一种落点：窗口里一条不剩 → **没什么可发**。判据是「同一份代码在两次运行间自己翻转」，不是方法名。
+- 补充：`HealthReportTests` 只碰 `health_records` / `family_contacts` / `family_notifications` 三张表；号源/排班类改动碰的是 `appointment_slots` / `doctors` / `departments` / `clinic_locations`，**零重叠**。要证明某次失败与自己的改动无关，除了上面的双树对照，还可以用这条「表重叠为零」来快速排除。
+- 复现记录（2026-09-15，冲突校验提前那次完整回归）：全量 **425 例、失败 2 例**——`summaryCountsAveragesAndShowsRealReadings` 与 `recordsOlderThanTheWindowAreLeftOut`（后者 `text()` 为 null，即窗口里一条不剩，与上面各次的落点同形）。同一次改动下**单跑 `-Dtest=HealthReportTests` 是 12/12 全绿**；再单独跑 `-Dtest=HealthRecordFlowTests,HealthReportTests` 又挂 1 例，且**换成了 `aValueWithoutANumberStillGetsCounted`**。三个方法在三次运行里轮流挂，仍是同一个边界指纹。⚠️ 这次试的「和某个类同跑才挂」**不足以推出顺序污染**：那两棵树都只跑了一次，而 `HealthRecordFlowTests` 自身要跑 13 秒、大量读写数据库，只是把 `HealthReportTests` 推到另一个亚秒时刻而已——判据仍是「同一份代码在两次运行间自己翻转」。本次改动碰的是会话状态（`ConversationState` / `ConversationStore` 的 `state_json`）与预约冲突流程，与上面三张表**零重叠**。
+
+- 复现记录（2026-09-15，业务时钟收口那次回归）：11 个类共 **185 例、失败 2 例**，仍是
+  `summaryCountsAveragesAndShowsRealReadings` 与 `recordsOlderThanTheWindowAreLeftOut`。**关键新数据：这一次
+  `-Dtest=HealthReportTests` 单跑也红 2 例**（此前单跑多为 12/12 全绿），并且换成了
+  `aValueWithoutANumberStillGetsCounted:108` 与 `summaryCountsAveragesAndShowsRealReadings:98`
+  （这次 `血压 3 次` 对了，换成 `血糖 1 次`）。⇒ **单跑同样会红、方法名在两次运行之间互换**，
+  这把「顺序污染」彻底排除（2026-09-14 那条只到「不足以推出」为止）。本次改动碰的是业务时区
+  （`BusinessClock`）与号源查询的过滤位置，`HealthReportService` / `HealthRecordStore` **一字未动**
+  （`MemoParser` 只是把时区常量改为引用 `BusinessClock.DEMO_ZONE`，语义不变），与健康三张表**零重叠**。
+  同一次改动**收尾时全量 427 例全绿**（含 `HealthReportTests` 12/12）——**红 → 红 → 全绿，三次运行三次翻转**，
+  正好演示这条判据：先看「失败项是不是只有 `HealthReportTests`、症状是不是次数少一两条」，再重跑一次收工。
+
+## 2026-09-13 `target/` 里的残留 class 让 218 个用例一起报 Bean 冲突
+
+- 现象：`mvn test` 里**所有** `@SpringBootTest` 用例（218 个）整批 `Errors`，却一个 `Failures` 都没有；报的是 `ConflictingBeanDefinitionException: Annotation-specified bean name 'memoryStore' for bean class [com.team.silveragent.application.MemoryStore] conflicts with existing, non-compatible bean definition of same name and class [com.team.silveragent.application.longterm.MemoryStore]`。而源码里只有 `application/longterm/MemoryStore.java` 这一个文件，怎么看都不该重名。
+- 原因：DEC-018 的分包重构把 `MemoryStore` 搬进了 `application/longterm/`，而**旧位置编译出来的 `MemoryStore.class` 留在了 `target/classes/`**。Spring 扫的是编译产物所在的那个包，于是同一个 bean 名出现了两份定义。增量编译不负责删除「源码已不存在」的 class，所以 `mvn compile` 一路 `Nothing to compile - all classes are up to date`，看着完全正常。
+- 处理：`mvn clean test`。清理后同一套用例 **344/344 通过**，那 218 个 error 一个不剩。
+- 结论：**分包、改名、删类这类重构之后，必须先 `clean` 再跑测试。**只看编译 `BUILD SUCCESS` 是不够的——症状会伪装成源码里的 Bean 重名，去源码里找只会找瞎。
+
+  ⚠️ 容器里同理，而且更容易撞上：`backend/target` 是具名卷 `silver-backend-target`，跨容器重建一直留着。谁在容器里做过一次搬家式重构，下一个人 `mvn test` 就会中招。遇到「源码里明明只有一个类，却说 Bean 冲突」，先 `mvn clean`。
+
 ## 2026-09-12 `CANCEL_APPOINTMENT` 不能等同于确认当前取消卡
 
 - 现象：当前卡准备取消6条预约时，用户说“还是只取消12号之前的”，模型已识别为修改取消范围，Java却直接消费旧卡并取消6条。
