@@ -105,7 +105,7 @@ class TravelAppointmentBindingTests {
         assertThat(asked.uiDirective()).isNotNull();
         assertThat(asked.uiDirective().type()).isEqualTo(UiDirectiveType.SHOW_INSIDE_GUIDE);
         assertThat(asked.uiDirective().focus()).isEqualTo("inside");
-        // 事实必须来自 clinic_locations，不能由模型或文案编造。
+        // 事实必须来自 clinics，不能由模型或文案编造。
         assertThat(asked.reply()).contains("门诊楼", "三层", "308诊室", "南门");
     }
 

@@ -1,5 +1,30 @@
 # 接口变更记录
 
+## 2026-09-16 CLINIC_LOCATIONS 表更名为 CLINICS
+
+- `schema.sql` 把 `clinic_locations` 更名为 `clinics`，列定义、约束和 6 条诊室数据不变。`appointment_slots.clinic_location_id` 是**列名**，不在本次改名范围，保持原样。
+- 旧库升级在建表前执行 `DROP TABLE IF EXISTS clinic_locations`：改名后该表已无外键与代码引用，数据由 `data.sql` 的 `MERGE INTO clinics` 按 id 全量重建，因此直接删旧表，不留两张同义表。对新建库和重复启动均为空操作，语句只认旧表名，不会误删已建好的 `clinics`。
+- 查询侧只有 `H2FacilityGuideTool` 的 SQL 换表名。`hospital.locationGuide` 工具的入参、出参、HTTP 接口和前端类型均未变动，前端无需改动。
+- 升级影响：旧表中 id 不在 `loc-d001`~`loc-d006` 范围内的自定义诊室会被删除；若 `appointment_slots.clinic_location_id` 引用了这些 id，升级后该预约查院内指引会报「这条预约还没有配置院内位置指引」。演示种子数据不涉及这种情况。
+- 同步更新 `docs/06-mock-data-design.md`、`docs/14-database-table-data.md`、`docs/设计思路报告.md` 与快照导出脚本 `docs/tools/export_h2_snapshot.py`。表名变更的历史记录不改写。
+- 容器内验证尚未执行：按用户要求未在宿主机构建。后续可在开发容器内执行 `mvn -f backend/pom.xml test -Dagent.model.enabled=false`，并确认启动日志里 schema 初始化成功、`clinics` 有 6 行。
+
+## 2026-09-16 FAMILY_CONTACTS 用户关联
+
+- `user_id` 改为 `"USER"`；移除 `name/relationship/phone`；新增 `contact`。`"USER"` 与 `contact` 均为非空的 `users.id` 外键，`id` 保留以兼容历史通知引用。
+- 旧表升级通过复制 owner 到 `"USER"` 完成列改名，并根据已有照护关系和姓名唯一匹配联系人用户。无法唯一匹配时在删除旧资料前停止启动；需先为对应记录填写有效 contact 后重启，不能猜测联系人身份。
+- 旧手机号在无冲突且目标 users.phone 为空时迁移；演示联系人 family-001 关联 user-f001，演示号码仅补空值。
+- 联系人查询从 users 读取姓名、号码，从 care_relations 读取称谓，缺失称谓显示“家属”。资料、通知和健康报告查询同步调整；HTTP 响应结构和前端类型保持兼容。
+- 新增旧表升级、重复初始化、关联外键测试，并调整健康报告测试数据。已执行静态差异检查；按用户要求未启动 Docker，容器测试未执行，实际数据库尚未迁移。
+
+## 2026-09-16 USERS 手机号码及字段调整
+
+- `schema.sql` 对新旧库统一移除 `home_longitude`、`home_latitude`，移除 `family_member` 及其外键，新增 `phone VARCHAR(32)` 保存手机号码，允许 NULL，不设置唯一约束，不填充虚构号码；不改变原有照护授权关系。
+- 初始化数据不再写家庭经纬度；路线起点改为 `travel_routes.polyline` 首点，无坐标时报配置错误。
+- HTTP 接口及前端类型、调用方式不变，未对外新增手机号码编辑接口。
+- 新增 `UserSchemaTests`，覆盖列变更、手机号码读写与空值、旧外键移除、迁移重复执行及路线起点。
+- 容器内验证尚未执行：按用户要求不启动 Docker。后续如需验证，可在开发容器内执行 `mvn -f backend/pom.xml test -Dagent.model.enabled=false`。
+
 任何前后端共享字段、接口路径、枚举或日期格式变化都记录在这里。
 
 ## 2026-09-12 取消预约的自然语言确认与批量确认（内部接口）

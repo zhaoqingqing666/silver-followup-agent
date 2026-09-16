@@ -26,7 +26,7 @@ TABLE_PURPOSES = {
     "USERS": "用户基础资料",
     "HOSPITALS": "医院目录",
     "DEPARTMENTS": "医院科室目录",
-    "CLINIC_LOCATIONS": "诊室与无障碍路线位置",
+    "CLINICS": "诊室与无障碍路线位置",
     "APPOINTMENT_SLOTS": "滚动生成的可预约号源",
     "USER_SCHEDULES": "用户已有日程",
     "FAMILY_CONTACTS": "家属联系人",

@@ -29,7 +29,7 @@ public class MockFamilyNotificationTool implements FamilyNotificationTool {
      */
     @Override
     public Contact findPrimaryContact(String conversationId, String userId) {
-        return jdbc.query("SELECT id,name,relationship,phone FROM family_contacts WHERE user_id=? ORDER BY id LIMIT 1",
+        return jdbc.query("SELECT fc.id,u.name,COALESCE((SELECT MIN(cr.relationship) FROM care_relations cr WHERE cr.caregiver_id=fc.contact AND cr.elder_user_id=fc.\"USER\"),'家属'),u.phone FROM family_contacts fc JOIN users u ON u.id=fc.contact WHERE fc.\"USER\"=? ORDER BY fc.id LIMIT 1",
                         (rs, row) -> new Contact(rs.getString(1), rs.getString(2), rs.getString(3),
                                 maskPhone(rs.getString(4))),
                         userId)

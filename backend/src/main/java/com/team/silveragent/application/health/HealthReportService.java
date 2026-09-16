@@ -114,14 +114,14 @@ public class HealthReportService {
         Integer count = jdbc.queryForObject("""
                 SELECT COUNT(*) FROM family_notifications n
                 JOIN family_contacts fc ON fc.id = n.contact_id
-                WHERE fc.user_id=? AND n.content LIKE ? AND n.created_at>=?
+                WHERE fc."USER"=? AND n.content LIKE ? AND n.created_at>=?
                 """, Integer.class, userId, WEEKLY_TITLE + "%", Timestamp.valueOf(monday));
         return count != null && count > 0;
     }
 
     /** 配了家属联系人的老人。周报只给这些人发，没家属可发的不用空转。 */
     public List<String> elderUserIdsWithFamily() {
-        return jdbc.queryForList("SELECT DISTINCT user_id FROM family_contacts", String.class);
+        return jdbc.queryForList("SELECT DISTINCT \"USER\" FROM family_contacts", String.class);
     }
 
     /** 主联系人；没有配就是没有（不是错误）。 */

@@ -26,17 +26,21 @@ public class H2RouteGuideTool implements RouteGuideTool {
                            LocalDateTime appointmentAt, String transport) {
         List<RouteGuide> rows = jdbc.query("""
                 SELECT r.transport,r.duration_minutes,COALESCE(r.distance_meters,0),
-                       u.home_longitude,u.home_latitude,h.longitude,h.latitude,
+                       h.longitude,h.latitude,
                        r.polyline,r.route_steps,COALESCE(r.route_source,'SIMULATED')
                 FROM users u JOIN hospitals h ON h.id=?
                 JOIN travel_routes r ON r.origin=u.home_address AND r.destination=h.address AND r.transport=?
                 WHERE u.id=? ORDER BY r.id LIMIT 1
-                """, (rs, row) -> new RouteGuide(
+                """, (rs, row) -> {
+            List<GeoPoint> polyline = points(rs.getString(6));
+            if (polyline.isEmpty()) throw new IllegalStateException("路线缺少起点坐标，请完善路线配置");
+            return new RouteGuide(
                 rs.getString(1), rs.getInt(2), rs.getInt(3),
                 appointmentAt.minusMinutes(rs.getInt(2) + 20L),
+                polyline.get(0),
                 new GeoPoint(rs.getDouble(4), rs.getDouble(5)),
-                new GeoPoint(rs.getDouble(6), rs.getDouble(7)),
-                points(rs.getString(8)), split(rs.getString(9)), rs.getString(10)),
+                polyline, split(rs.getString(7)), rs.getString(8));
+        },
                 hospitalId, transport, userId);
         if (rows.isEmpty()) throw new IllegalStateException("没有配置该交通方式的路线指引");
         RouteGuide result = rows.get(0);

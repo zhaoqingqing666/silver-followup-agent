@@ -78,11 +78,11 @@ public class CareService {
         List<NotificationView> result = new ArrayList<>();
         // 1) 长辈发给家属的通知（沿用 family_notifications，向该照护者绑定的所有长辈归集）
         jdbc.query("""
-                SELECT n.id, fc.user_id, u.name, n.content, n.created_at
+                SELECT n.id, fc."USER", u.name, n.content, n.created_at
                 FROM family_notifications n
                 JOIN family_contacts fc ON fc.id = n.contact_id
-                JOIN users u ON u.id = fc.user_id
-                WHERE fc.user_id IN (
+                JOIN users u ON u.id = fc."USER"
+                WHERE fc."USER" IN (
                     SELECT elder_user_id FROM care_relations WHERE caregiver_id = ?
                 )
                 """, (rs, row) -> {
@@ -138,7 +138,7 @@ public class CareService {
                 SELECT n.content, n.created_at
                 FROM family_notifications n
                 JOIN family_contacts fc ON fc.id = n.contact_id
-                WHERE fc.user_id = ?
+                WHERE fc."USER" = ?
                 """, (rs, row) -> {
             events.add(new TimelineEvent(rs.getTimestamp(2).toLocalDateTime(),
                     "info", "通知家属", rs.getString(1)));

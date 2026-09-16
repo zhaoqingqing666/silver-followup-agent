@@ -2,6 +2,51 @@
 
 进度文件记录“当前事实”，不写大段过程描述。功能完成后由负责人更新，并附对应 Pull Request 或提交。
 
+## 2026-09-14 死代码静态扫描第三轮：14 个维度全部为空，无新增死代码（未提交）
+
+- 全程纯静态文本分析，**未在宿主机执行任何构建/测试**（遵守 AGENTS.md：构建只在 Dev Container 内做）。
+- 覆盖维度：未使用 import（前端 + 后端）、未调用的 private/protected 方法、未使用 private 字段、
+  零调用 public/protected 方法、孤儿文件、孤儿导出、注释掉的代码块、SQL 未引用表、
+  CSS 未使用类、前端未使用 import、前端模块级局部声明零引用、配置键与 `@Value` 双向比对。
+  **结果全部为「无」，未删除任何文件。**
+- 逐条证伪的误报（避免以后重复排查）：
+  - `app/layout.tsx`、`app/page.tsx`、`vite.config.ts` 是 vinext 实际入口与配置；`next-env.d.ts`
+    在 `tsconfig.json` 的 `include` 中，且在 `vite.config.ts` 的 warmup 里被显式列出 → 均非孤儿。
+  - `react-dom`、`react-server-dom-webpack`、`@vitejs/plugin-react` 源码零 import，但属
+    **vinext peerDependencies**（`plugin-react` 非 optional）→ 必须保留在 devDependencies。
+  - 后端 `H2*Tool` 与 `Mock*Tool` 实现的是**不同接口**（CareGuide/RouteGuide/MyAppointment/
+    MaterialPreparation 对 Appointment/Travel/MaterialChecklist），且都被 `FollowupAgentService`
+    与 `CareBookingService` 注入 → 不是两代重复，都不可删。
+  - 全部 mock 工具为 `@Component`，Spring 按接口注入，静态引用计数 0 属正常；
+    `LlmAnswerGenerator`、`LlmConversationPlanner` 为 `@Primary @Component`。
+- 顺带发现两个**非死代码**问题，本轮未改动：
+  1. `agent.conversation.idle-timeout-seconds`(600) 与 `agent.conversation.suggest-new-after-turns`(40)
+     只在 `@Value` 内有默认值，`application.yml` 未登记 → 生效但不可发现，建议补写进 yml。
+  2. `Mock*` 前缀名不副实：构造同样注入 `JdbcTemplate`、读真实 H2，与 `H2*` 无实现差异，
+     纯历史命名（06 号文档第十二节已记录）。赛前不建议改名。
+- 扫描脚本留在 `%TEMP%\dcscan\`：`all.mjs`(A–I 主扫描)、`scan2b.mjs`(J/K/L)、`scan3.mjs`(M/N)。
+
+## 2026-09-14 重写报名解决方案 v0.3：修正表述口径，严格区分命题要求与自研设计（未提交）
+
+- 起因：主公两次纠正——①命题 4.6/4.5/4.7 的适老化原则、异常处理、服务边界是**命题要求**，
+  不能包装成"我们提出的方法论"，也不能声明为自有 IP；②四类模拟工具是命题 4.3 **点名要求设计**
+  的，同样不适合当创新点。原 v0.2 的第八节"创新规划"把两者混在一起，评委一眼可看穿。
+- 重写 `docs/报名解决方案.md` 至 v0.3，结构性调整：
+  - 文首新增**「关于本文的表述口径」**声明，把内容分为命题要求 / 本方案的设计 / 工程基本功三类。
+  - **新增第四节「命题要求覆盖对照」**：4.1–4.7 逐条列表，明说"以下均为命题要求，完整覆盖，
+    不作为原创主张"，并在 4.3 后加特别声明——工具的存在本身不是创新。
+  - **原"创新规划"一节删除**，替换为**第五节「本方案的设计（命题未规定处）」**，只保留
+    命题未规定、由本方案设计的部分：受控工具调用四层机制、双轴会话身份、机械解析与模型判断
+    分层、规则回退、六项设计取舍（越界不打断 / 只往后看 3 天 / 冲突候选只给 1 个凑 3 个按钮 /
+    提醒时点 / +20 分钟取号预留 / 保留冲突写进确认卡但不改日程）。
+  - 第八节新增知识产权声明：适老化原则、四类工具、确认与异常要求不主张；可主张的是第五节
+    工程实现，代码整体具备软著登记条件。
+  - 数据更新：后端 341 项测试通过（原 317）、四场景一键重置已实现、六分钟录屏脚本顺延至 v0.5。
+- 如实写入**已知缺口**：命题 4.7 紧急表达拦截——确定性紧急词表仅在模型不可用时执行，
+  模型模式下靠模型 EMERGENCY 分类、**缺规则兜底**（越界侧有兜底，紧急侧没有）。
+- 迭代计划表补 v0.3（本版）一行，后续版本顺延。
+- 本次为纯文档改动，未涉及代码与接口。
+
 ## 2026-09-13 死代码复查第二轮 + 模拟工具实现说明并入 06 号文档（未提交）
 
 - 死代码复查（静态扫描，未在宿主机构建）：删除 `frontend/next.config.ts`（Next.js 时代残留，空配置 `{}` 且 `import type { NextConfig } from 'next'`，而 `package.json` 已无 `next`；项目跑 vinext，vinext 支持不提供 next.config）。删除 5 处未使用 import：`agent/MedicalBoundaryRules.java`（HealthRecordParser）、`api/DemoController.java`（DemoScenario）、`application/demo/DemoScenarioService.java`（LocalDate）、`test/CareBookingServiceTests.java`（LocalDate）、`test/MemoFlowTests.java`（MemoParser）——后三处仅在 Javadoc/注释里被提及。

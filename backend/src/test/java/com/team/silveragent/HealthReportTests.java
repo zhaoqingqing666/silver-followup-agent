@@ -154,8 +154,8 @@ class HealthReportTests {
             assertThat(result.reason()).contains("家属联系人");
             assertThat(notificationCount()).isZero();
         } finally {
-            jdbc.update("INSERT INTO family_contacts(id,user_id,name,relationship,phone)"
-                    + " VALUES ('family-001','user-001','小丽','女儿','13800001234')");
+            jdbc.update("INSERT INTO family_contacts(id,\"USER\",contact)"
+                    + " VALUES ('family-001','user-001','user-f001')");
         }
     }
 

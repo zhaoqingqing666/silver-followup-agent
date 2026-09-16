@@ -14,7 +14,7 @@ H2 地址：`jdbc:h2:file:./data/silver-agent`；用户名 `sa`；密码留空�
 
 ## 二、表清单（按用途分组）
 
-**基础目录类**：`users`、`user_preferences`、`hospitals`、`departments`、`clinic_locations`、`appointment_slots`、`user_schedules`、`family_contacts`、`material_templates`、`care_guide_articles`、`travel_routes`。
+**基础目录类**：`users`、`user_preferences`、`hospitals`、`departments`、`clinics`、`appointment_slots`、`user_schedules`、`family_contacts`、`material_templates`、`care_guide_articles`、`travel_routes`。
 
 **身份与协同关系类（v0.2 新增）**：`care_relations`。表达「哪位照护者协同哪位就诊人」，一对多；`role` 列为 `FAMILY` 或 `VOLUNTEER`，`relationship` 是称谓（如「女儿」「社区志愿者」）。后端据它判定会话身份（`AgentRole`：ELDER / FAMILY / VOLUNTEER）并校验代他人办理的权限。
 
@@ -49,7 +49,7 @@ H2 地址：`jdbc:h2:file:./data/silver-agent`；用户名 `sa`；密码留空�
 
 - `hospitals`：`h001` 市第一医院（模拟，健康路1号）、`h002` 市人民医院（模拟，人民路88号），均为三级甲等，带头图经纬度和主入口名。
 - `departments`：`d001`~`d006`，覆盖 h001 的心内科 / 神经内科 / 内分泌科和 h002 的内分泌科 / 骨科 / 心内科。
-- `clinic_locations`：`loc-d001`~`loc-d006`，与上面科室一一对应，记录门诊楼、入口、楼层、诊室、报到点、地标和无障碍路线，供「找不到诊室」的指引演示。
+- `clinics`：`loc-d001`~`loc-d006`，与上面科室一一对应，记录门诊楼、入口、楼层、诊室、报到点、地标和无障碍路线，供「找不到诊室」的指引演示。
 
 ## 五、号源与既有日程（滚动生成，冲突是设计好的）
 
@@ -60,7 +60,7 @@ H2 地址：`jdbc:h2:file:./data/silver-agent`；用户名 `sa`；密码留空�
 
 下周三 10:00 的体检**故意与当天 10:30 的心内科号源重叠**，用于稳定复现「时间冲突」场景；同一天 09:00 / 14:00 / 15:30 的号源不与体检重叠，是「正常办理」的对照组。这里的「下周三」与口语解析同一口径（`RuleFactExtractor` 取「本周一 + 1 周 + 2 天」），所以演示话术「我下周三想去市第一医院心内科复诊」落到的正是体检那天。`backend/src/test/java/com/team/silveragent/DemoSeedDataTests.java` 把这几条前提钉成了回归用例——哪条不再成立，先在那里失败。
 
-`family_contacts` 只造了一条：`family-001` 属于 `user-001`，小丽，女儿，电话按脱敏形式展示（不落明文完整号码）。
+`family_contacts` 只造了一条：`family-001` 的 `"USER"` 为 `user-001`，`contact` 为 `user-f001`，两列均关联 `users.id`。姓名、手机号从联系人用户读取，称谓从 `care_relations` 读取；手机号保存在 `users.phone`，对外仅展示脱敏号码。
 
 ## 六、材料模板与照护指南
 

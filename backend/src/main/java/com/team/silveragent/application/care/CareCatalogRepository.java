@@ -94,7 +94,7 @@ public class CareCatalogRepository {
      * 本方法供用户资料页展示家属，电话在 Java 层脱敏。
      */
     private List<com.team.silveragent.domain.model.ToolModels.Contact> familyMembers(String userId) {
-        return jdbc.query("SELECT id,name,relationship,phone FROM family_contacts WHERE user_id=? ORDER BY id",
+        return jdbc.query("SELECT fc.id,u.name,COALESCE((SELECT MIN(cr.relationship) FROM care_relations cr WHERE cr.caregiver_id=fc.contact AND cr.elder_user_id=fc.\"USER\"),'家属'),u.phone FROM family_contacts fc JOIN users u ON u.id=fc.contact WHERE fc.\"USER\"=? ORDER BY fc.id",
                 (rs, row) -> new com.team.silveragent.domain.model.ToolModels.Contact(rs.getString(1),
                         rs.getString(2), rs.getString(3), maskPhone(rs.getString(4))), userId);
     }
@@ -105,7 +105,7 @@ public class CareCatalogRepository {
     }
 
     public List<com.team.silveragent.domain.model.ToolModels.Contact> contacts(String userId) {
-        return jdbc.query("SELECT id,name,relationship,phone FROM family_contacts WHERE user_id=? ORDER BY id",
+        return jdbc.query("SELECT fc.id,u.name,COALESCE((SELECT MIN(cr.relationship) FROM care_relations cr WHERE cr.caregiver_id=fc.contact AND cr.elder_user_id=fc.\"USER\"),'家属'),u.phone FROM family_contacts fc JOIN users u ON u.id=fc.contact WHERE fc.\"USER\"=? ORDER BY fc.id",
                 (rs, row) -> new com.team.silveragent.domain.model.ToolModels.Contact(rs.getString(1), rs.getString(2), rs.getString(3), "已隐藏"), userId);
     }
 

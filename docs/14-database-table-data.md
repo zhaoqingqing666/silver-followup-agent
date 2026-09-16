@@ -2,7 +2,8 @@
 
 > 快照时间：2026年09月13日 17:33:41（Asia/Shanghai）  
 > 数据源：开发容器中的 `jdbc:h2:file:/workspace/backend/data/silver-agent`  
-> 范围：`PUBLIC` 模式下全部 25 张表，共 694 行记录。
+> 范围：`PUBLIC` 模式下全部 25 张表，共 694 行记录。  
+> 表名变更：`CLINICS` 原名 `CLINIC_LOCATIONS`，2026年09月16日更名。字段与数据未重新导出，本表已按新表名标注。
 
 本文档是运行中开发数据库的只读快照，包含静态种子数据、滚动生成数据和当时已产生的业务/会话数据。
 `NULL` 表示数据库空值；`（空字符串）` 表示长度为 0 的字符串。模拟数据仅供比赛演示，不代表真实医院、患者或医疗信息。
@@ -14,7 +15,7 @@
 | 1 | [`USERS`](#users) | 用户基础资料 | 4 |
 | 2 | [`HOSPITALS`](#hospitals) | 医院目录 | 2 |
 | 3 | [`DEPARTMENTS`](#departments) | 医院科室目录 | 6 |
-| 4 | [`CLINIC_LOCATIONS`](#clinic-locations) | 诊室与无障碍路线位置 | 6 |
+| 4 | [`CLINICS`](#clinics) | 诊室与无障碍路线位置 | 6 |
 | 5 | [`APPOINTMENT_SLOTS`](#appointment-slots) | 滚动生成的可预约号源 | 576 |
 | 6 | [`USER_SCHEDULES`](#user-schedules) | 用户已有日程 | 2 |
 | 7 | [`FAMILY_CONTACTS`](#family-contacts) | 家属联系人 | 1 |
@@ -118,7 +119,7 @@
 | d005 | h001 | 内分泌科 | 提供糖尿病和甲状腺疾病的常规复诊服务。 | 糖尿病,甲状腺疾病 | 已由医生安排的内分泌科复诊 | 门诊楼三层 | TRUE |
 | d006 | h002 | 心内科 | 提供常见心血管慢性疾病的复诊随访服务。 | 高血压,冠心病 | 已由医生安排的心内科复诊 | 门诊楼四层 | TRUE |
 
-### `CLINIC_LOCATIONS`
+### `CLINICS`
 
 用途：诊室与无障碍路线位置。当前共 **6** 行。
 

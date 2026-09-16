@@ -5,8 +5,11 @@ CREATE TABLE IF NOT EXISTS users (
   preferred_transport VARCHAR(40)
 );
 
-ALTER TABLE users ADD COLUMN IF NOT EXISTS home_longitude DOUBLE PRECISION;
-ALTER TABLE users ADD COLUMN IF NOT EXISTS home_latitude DOUBLE PRECISION;
+ALTER TABLE users DROP COLUMN IF EXISTS home_longitude;
+ALTER TABLE users DROP COLUMN IF EXISTS home_latitude;
+ALTER TABLE users DROP CONSTRAINT IF EXISTS fk_users_family_member;
+ALTER TABLE users DROP COLUMN IF EXISTS family_member;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS phone VARCHAR(32);
 
 CREATE TABLE IF NOT EXISTS hospitals (
   id VARCHAR(40) PRIMARY KEY,
@@ -35,7 +38,13 @@ ALTER TABLE departments ADD COLUMN IF NOT EXISTS followup_scope VARCHAR(300);
 ALTER TABLE departments ADD COLUMN IF NOT EXISTS location VARCHAR(100);
 ALTER TABLE departments ADD COLUMN IF NOT EXISTS enabled BOOLEAN DEFAULT TRUE NOT NULL;
 
-CREATE TABLE IF NOT EXISTS clinic_locations (
+-- 表改名：clinic_locations → clinics（2026-09-16）。
+-- 旧库升级靠这一条 DROP 完成：改名后已无任何代码或外键引用 clinic_locations，
+-- 而 6 条诊室数据由 data.sql 的 MERGE 按 id 全量重建，所以直接删旧表，不留两张同义表。
+-- 对新建库和重复启动都是空操作；本语句只认旧表名，不会碰已经建好的 clinics。
+DROP TABLE IF EXISTS clinic_locations;
+
+CREATE TABLE IF NOT EXISTS clinics (
   id VARCHAR(40) PRIMARY KEY,
   hospital_id VARCHAR(40) NOT NULL,
   department_id VARCHAR(40) NOT NULL,
@@ -73,10 +82,8 @@ CREATE TABLE IF NOT EXISTS user_schedules (
 
 CREATE TABLE IF NOT EXISTS family_contacts (
   id VARCHAR(40) PRIMARY KEY,
-  user_id VARCHAR(40) NOT NULL,
-  name VARCHAR(40) NOT NULL,
-  relationship VARCHAR(40) NOT NULL,
-  phone VARCHAR(30) NOT NULL
+  "USER" VARCHAR(40) NOT NULL,
+  contact VARCHAR(40) NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS appointments (
@@ -301,3 +308,33 @@ CREATE TABLE IF NOT EXISTS user_memories (
   active BOOLEAN NOT NULL DEFAULT TRUE,
   PRIMARY KEY (user_id, memory_key)
 );
+
+-- 联系人规范化：保留联系人记录 id（通知仍引用它），两端都关联 users。
+-- 临时兼容列使同一脚本可以重复用于旧库和新库；迁移成功后删除。
+ALTER TABLE family_contacts ADD COLUMN IF NOT EXISTS "USER" VARCHAR(40);
+ALTER TABLE family_contacts ADD COLUMN IF NOT EXISTS contact VARCHAR(40);
+ALTER TABLE family_contacts ADD COLUMN IF NOT EXISTS user_id VARCHAR(40);
+ALTER TABLE family_contacts ADD COLUMN IF NOT EXISTS name VARCHAR(40);
+ALTER TABLE family_contacts ADD COLUMN IF NOT EXISTS relationship VARCHAR(40);
+ALTER TABLE family_contacts ADD COLUMN IF NOT EXISTS phone VARCHAR(32);
+UPDATE family_contacts SET "USER"=user_id WHERE "USER" IS NULL;
+-- 只匹配已有照护关系且姓名一致的唯一用户，不凭同名猜测身份。
+UPDATE family_contacts fc SET contact=(
+  SELECT MIN(u.id) FROM users u
+  WHERE u.name=fc.name AND EXISTS (
+    SELECT 1 FROM care_relations cr WHERE cr.caregiver_id=u.id AND cr.elder_user_id=fc."USER"
+  )
+  HAVING COUNT(*)=1
+) WHERE fc.contact IS NULL;
+-- 未能唯一匹配时在删除旧资料前停止；应先人工指定 contact 后重新启动。
+ALTER TABLE family_contacts ALTER COLUMN "USER" SET NOT NULL;
+ALTER TABLE family_contacts ALTER COLUMN contact SET NOT NULL;
+ALTER TABLE family_contacts ADD CONSTRAINT IF NOT EXISTS fk_family_contacts_user FOREIGN KEY ("USER") REFERENCES users(id);
+ALTER TABLE family_contacts ADD CONSTRAINT IF NOT EXISTS fk_family_contacts_contact FOREIGN KEY (contact) REFERENCES users(id);
+-- 手机号码仅在旧记录对同一联系人没有冲突且 users 尚未设置时迁移。
+UPDATE users u SET phone=(SELECT MIN(fc.phone) FROM family_contacts fc WHERE fc.contact=u.id HAVING COUNT(DISTINCT fc.phone)=1)
+WHERE u.phone IS NULL;
+ALTER TABLE family_contacts DROP COLUMN IF EXISTS user_id;
+ALTER TABLE family_contacts DROP COLUMN IF EXISTS name;
+ALTER TABLE family_contacts DROP COLUMN IF EXISTS relationship;
+ALTER TABLE family_contacts DROP COLUMN IF EXISTS phone;

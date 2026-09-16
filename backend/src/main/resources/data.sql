@@ -1,15 +1,13 @@
 -- 基础模拟数据只负责补齐，不清空预约、会话或工具记录。
 -- 需要重新录制 Demo 时，应使用单独的重置功能，而不是随后端启动自动删除。
 
--- 必须写明列名：users 还有 home_longitude / home_latitude 两列（见 schema.sql 的 ALTER），
--- 不写列名的话这里的 4 个值对不上整表列数，MERGE 会直接报错。
+-- 明确列名，保留已有 phone；未提供手机号码时该字段为 NULL。
 MERGE INTO users (id,name,home_address,preferred_transport) KEY(id) VALUES
 ('user-001','王阿姨','幸福小区（模拟）','家属开车'),
 ('user-f001','小丽',NULL,NULL),
 ('user-v001','李阿姨',NULL,NULL),
 ('user-002','张伯伯','幸福小区（模拟）','公交');
 
-UPDATE users SET home_longitude=116.365300,home_latitude=39.921900 WHERE id='user-001';
 
 INSERT INTO user_preferences(user_id,auto_speak_enabled,speech_rate,speech_volume,updated_at)
 SELECT 'user-001',FALSE,0.9,1.0,CURRENT_TIMESTAMP
@@ -30,7 +28,7 @@ MERGE INTO departments (id,hospital_id,name,description,specialty_tags,followup_
 ('d005','h001','内分泌科','提供糖尿病和甲状腺疾病的常规复诊服务。','糖尿病,甲状腺疾病','已由医生安排的内分泌科复诊','门诊楼三层',TRUE),
 ('d006','h002','心内科','提供常见心血管慢性疾病的复诊随访服务。','高血压,冠心病','已由医生安排的心内科复诊','门诊楼四层',TRUE);
 
-MERGE INTO clinic_locations (id,hospital_id,department_id,building_name,entrance_name,floor_name,room_name,check_in_point,landmark,accessible_route_hint,help_desk,verified_at,enabled) KEY(id) VALUES
+MERGE INTO clinics (id,hospital_id,department_id,building_name,entrance_name,floor_name,room_name,check_in_point,landmark,accessible_route_hint,help_desk,verified_at,enabled) KEY(id) VALUES
 ('loc-d001','h001','d001','门诊楼','南门','三层','308诊室','门诊楼一层自助机或人工窗口','出电梯后向右，经过心电检查区','从南门进入，沿无障碍通道到一层大厅，乘无障碍电梯到三层，出电梯后向右前往308诊室。','三层心内科护士站',CURRENT_TIMESTAMP,TRUE),
 ('loc-d002','h001','d002','门诊楼','南门','四层','412诊室','门诊楼一层自助机或人工窗口','出电梯后沿蓝色神经内科标识前行','从南门进入，沿无障碍通道到一层大厅，乘无障碍电梯到四层，按蓝色标识前往412诊室。','四层神经内科护士站',CURRENT_TIMESTAMP,TRUE),
 ('loc-d003','h002','d003','门诊楼','东门','二层','216诊室','门诊楼一层服务台旁报到机','二层电梯口左侧','从东门进入后向服务台确认，乘无障碍电梯到二层，出电梯左转前往216诊室。','二层内分泌科护士站',CURRENT_TIMESTAMP,TRUE),
@@ -47,8 +45,10 @@ DELETE FROM appointment_slots
 WHERE id LIKE 'slot-%'
   AND NOT EXISTS (SELECT 1 FROM appointments a WHERE a.slot_id = appointment_slots.id);
 
-MERGE INTO family_contacts KEY(id) VALUES
-('family-001','user-001','小丽','女儿','13800001234');
+-- 原联系人演示号码归入对应用户，只补空值，不覆盖用户已修改的号码。
+UPDATE users SET phone='13800001234' WHERE id='user-f001' AND phone IS NULL;
+MERGE INTO family_contacts (id,"USER",contact) KEY(id) VALUES
+('family-001','user-001','user-f001');
 
 MERGE INTO care_relations KEY(id) VALUES
 ('rel-f001','user-f001','user-001','FAMILY','女儿'),
