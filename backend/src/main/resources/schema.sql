@@ -60,17 +60,60 @@ CREATE TABLE IF NOT EXISTS clinics (
   enabled BOOLEAN DEFAULT TRUE NOT NULL
 );
 
+-- 医院和科室改为外键引用：这张表只留编号，名称不再冗余在这里。
+-- 名称的唯一来源是 hospitals/departments，改一次名不会留下对不上的旧副本；
+-- 展示用的中文名由查询 JOIN 取回，所以对外接口没变。
 CREATE TABLE IF NOT EXISTS appointment_slots (
   id VARCHAR(40) PRIMARY KEY,
-  hospital_id VARCHAR(40) NOT NULL,
-  hospital_name VARCHAR(100) NOT NULL,
-  department VARCHAR(60) NOT NULL,
+  hospital VARCHAR(40) NOT NULL,
+  department VARCHAR(40) NOT NULL,
   appointment_date DATE NOT NULL,
   appointment_time TIME NOT NULL,
   available BOOLEAN NOT NULL
 );
 
 ALTER TABLE appointment_slots ADD COLUMN IF NOT EXISTS clinic_location_id VARCHAR(40);
+
+-- 旧库升级沿用 family_contacts 的「临时兼容列」写法：先把旧列补出来，让同一份脚本
+-- 对旧库（本来就有 hospital_id/hospital_name）和新库（建表时就没有）都能跑通，
+-- 迁移完成后再删掉。下面两条 UPDATE 都只处理「还没迁过的行」，重复启动不会二次改写。
+ALTER TABLE appointment_slots ADD COLUMN IF NOT EXISTS hospital_id VARCHAR(40);
+ALTER TABLE appointment_slots ADD COLUMN IF NOT EXISTS hospital_name VARCHAR(100);
+ALTER TABLE appointment_slots ADD COLUMN IF NOT EXISTS hospital VARCHAR(40);
+
+-- 医院编号原样搬过来，只是列名从 hospital_id 换成 hospital。
+UPDATE appointment_slots SET hospital = hospital_id WHERE hospital IS NULL;
+
+-- 科室由「同院同名的中文名」折算成 departments.id。
+-- 重复执行时 department 已经是编号，与任何科室名都不相等，因此不会再次改写。
+UPDATE appointment_slots s SET department = (
+  SELECT MIN(d.id) FROM departments d
+  WHERE d.hospital_id = s.hospital_id AND d.name = s.department
+) WHERE EXISTS (
+  SELECT 1 FROM departments d
+  WHERE d.hospital_id = s.hospital_id AND d.name = s.department
+);
+
+-- 折算不到的号源说明科室已被删除或改过名：没有预约在用的直接清掉；
+-- 还被预约引用的留在这里，让下面的外键把它拦下来报错——宁可启动失败，
+-- 也不能悄悄抹掉一条真实预约对应的号源。
+DELETE FROM appointment_slots s
+WHERE s.department NOT IN (SELECT d.id FROM departments d)
+  AND NOT EXISTS (SELECT 1 FROM appointments a WHERE a.slot_id = s.id);
+
+-- 旧库里科室列是 VARCHAR(60)（装得下中文名），统一成与编号一致的长度。
+ALTER TABLE appointment_slots ALTER COLUMN department SET DATA TYPE VARCHAR(40);
+
+ALTER TABLE appointment_slots DROP COLUMN IF EXISTS hospital_id;
+ALTER TABLE appointment_slots DROP COLUMN IF EXISTS hospital_name;
+
+ALTER TABLE appointment_slots ALTER COLUMN hospital SET NOT NULL;
+ALTER TABLE appointment_slots ALTER COLUMN department SET NOT NULL;
+
+ALTER TABLE appointment_slots ADD CONSTRAINT IF NOT EXISTS fk_appointment_slots_hospital
+  FOREIGN KEY (hospital) REFERENCES hospitals(id);
+ALTER TABLE appointment_slots ADD CONSTRAINT IF NOT EXISTS fk_appointment_slots_department
+  FOREIGN KEY (department) REFERENCES departments(id);
 
 CREATE TABLE IF NOT EXISTS user_schedules (
   id VARCHAR(40) PRIMARY KEY,

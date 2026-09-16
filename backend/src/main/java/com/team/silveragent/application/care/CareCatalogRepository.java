@@ -71,11 +71,12 @@ public class CareCatalogRepository {
 
     public List<LocalDate> availableDates(String hospitalId, String department, LocalDate from, int limit) {
         return jdbc.query("""
-                SELECT DISTINCT appointment_date FROM appointment_slots
-                WHERE hospital_id=? AND department=? AND appointment_date>=? AND available=TRUE
-                  AND (appointment_date > CURRENT_DATE
-                       OR (appointment_date = CURRENT_DATE AND appointment_time > CURRENT_TIME))
-                ORDER BY appointment_date LIMIT ?
+                SELECT DISTINCT s.appointment_date FROM appointment_slots s
+                JOIN departments d ON d.id=s.department
+                WHERE s.hospital=? AND d.name=? AND s.appointment_date>=? AND s.available=TRUE
+                  AND (s.appointment_date > CURRENT_DATE
+                       OR (s.appointment_date = CURRENT_DATE AND s.appointment_time > CURRENT_TIME))
+                ORDER BY s.appointment_date LIMIT ?
                 """, (rs, row) -> rs.getDate(1).toLocalDate(),
                 hospitalId, department, java.sql.Date.valueOf(from), limit);
     }

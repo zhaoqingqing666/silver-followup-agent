@@ -48,13 +48,15 @@ public class RollingAppointmentSlotInitializer implements ApplicationRunner {
                 """, (rs, rowNum) -> rs.getDate(2).toLocalDate().getDayOfWeek().getValue() >= 6
                 ? rs.getString(1) : null).stream().filter(java.util.Objects::nonNull).toList();
         generatedWeekendSlots.forEach(id -> jdbc.update("DELETE FROM appointment_slots WHERE id = ?", id));
+        // 医院名和科室名不在这张表里存：号源只记 hospital / department 两个编号，
+        // 名称由查询 JOIN 取回。所以这里只需要科室编号和它所属的医院编号。
         List<DepartmentSeed> departments = jdbc.query("""
-                SELECT d.id, d.hospital_id, h.name, d.name
+                SELECT d.id, d.hospital_id
                 FROM departments d
                 JOIN hospitals h ON h.id = d.hospital_id
                 WHERE d.enabled = TRUE AND h.enabled = TRUE
                 """, (rs, rowNum) -> new DepartmentSeed(
-                rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4)));
+                rs.getString(1), rs.getString(2)));
 
         LocalDate start = LocalDate.now();
         LocalDate end = start.plusMonths(1);
@@ -74,17 +76,17 @@ public class RollingAppointmentSlotInitializer implements ApplicationRunner {
         String id = slotId(department.id(), date, time);
         jdbc.update("""
                 INSERT INTO appointment_slots
-                    (id, hospital_id, hospital_name, department, appointment_date, appointment_time, available)
-                SELECT ?, ?, ?, ?, ?, ?, TRUE
+                    (id, hospital, department, appointment_date, appointment_time, available)
+                SELECT ?, ?, ?, ?, ?, TRUE
                 WHERE NOT EXISTS (
                     SELECT 1 FROM appointment_slots
-                    WHERE hospital_id = ? AND department = ? AND appointment_date = ? AND appointment_time = ?
+                    WHERE hospital = ? AND department = ? AND appointment_date = ? AND appointment_time = ?
                 )
                 """,
-                id, department.hospitalId(), department.hospitalName(), department.name(), date, time,
-                department.hospitalId(), department.name(), date, time);
+                id, department.hospitalId(), department.id(), date, time,
+                department.hospitalId(), department.id(), date, time);
     }
 
-    private record DepartmentSeed(String id, String hospitalId, String hospitalName, String name) {
+    private record DepartmentSeed(String id, String hospitalId) {
     }
 }

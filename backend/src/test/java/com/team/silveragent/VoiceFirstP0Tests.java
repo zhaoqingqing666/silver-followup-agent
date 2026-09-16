@@ -290,9 +290,9 @@ class VoiceFirstP0Tests {
         LocalDate boundary = LocalDate.now().minusDays(1);
         String slotId = "past-cancel-slot";
         jdbc.update("""
-                INSERT INTO appointment_slots(id,hospital_id,hospital_name,department,
+                INSERT INTO appointment_slots(id,hospital,department,
                     appointment_date,appointment_time,available)
-                VALUES (?,'h001','市第一医院（模拟）','心内科',?,'09:00',FALSE)
+                VALUES (?,'h001','d001',?,'09:00',FALSE)
                 """, slotId, appointmentDay);
         jdbc.update("""
                 INSERT INTO appointments(id,slot_id,user_id,status,created_at,conversation_id)

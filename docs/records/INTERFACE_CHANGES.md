@@ -1,5 +1,15 @@
 # 接口变更记录
 
+## 2026-09-16 APPOINTMENT_SLOTS 医院与科室改为外键引用
+
+- `appointment_slots` 移除 `hospital_name`；`hospital_id` 更名为 `hospital`，`department` 由中文科室名改存 `departments.id`。两列都加了外键：`FOREIGN KEY (hospital) REFERENCES hospitals(id)`、`FOREIGN KEY (department) REFERENCES departments(id)`。
+- 旧库升级沿用 FAMILY_CONTACTS 那次的「临时兼容列」写法：先补出 `hospital_id`/`hospital_name`，把医院编号搬进 `hospital`、按「同院同名」把中文科室名折算成 `departments.id`，最后删掉两个旧列。每条 UPDATE 只处理尚未迁移的行，重复启动不会二次改写，新库和旧库共用同一份脚本。
+- 折算不到的号源（科室已被删除或改过名）在没有预约引用时会被清掉；仍被预约引用的保留，让外键把启动拦下来报错，而不是静默抹掉一条真实预约对应的号源。
+- **HTTP 接口和前端类型都没有变**：医院名、科室名改由查询 JOIN `hospitals`/`departments` 取回，`Slot`、`AppointmentView`、`AppointmentSummary`、`AppointmentTravelGuide` 等对外字段的名称、顺序、取值全部保持原样。`appointment.querySlots` 等工具的入参仍是中文科室名，调用方无需调整，前端 9 个文件零改动。
+- 本次把「按中文科室名查号源」改成先 JOIN 再按 `d.name` 过滤，索引效果不如直接比编号；演示数据量（576 行）下无实际影响，记录在此以备后续优化时参考。
+- 同步更新 `docs/14-database-table-data.md`（字段定义与 576 行快照已按新列标注）、`docs/06-mock-data-design.md`；`data.sql` 的 `clinic_location_id` 映射改为 `'loc-' || department` 直接拼接。
+- 容器内验证尚未执行：按用户要求未在宿主机构建。后续可在开发容器内执行 `mvn -f backend/pom.xml test -Dagent.model.enabled=false`，并确认 `appointment_slots` 已无 `hospital_id`/`hospital_name` 列、两个外键存在、号源科室值形如 `d001`。
+
 ## 2026-09-16 CLINIC_LOCATIONS 表更名为 CLINICS
 
 - `schema.sql` 把 `clinic_locations` 更名为 `clinics`，列定义、约束和 6 条诊室数据不变。`appointment_slots.clinic_location_id` 是**列名**，不在本次改名范围，保持原样。

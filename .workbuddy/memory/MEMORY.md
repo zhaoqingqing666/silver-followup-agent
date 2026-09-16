@@ -78,3 +78,30 @@ CREATE TABLE IF NOT EXISTS 新表名 (...);  -- 新库直接建
   故四场景任何一天可复现。
 - 后端完整回归 341/341 通过（2026-09-12 记录）。
 - 演示话术必须避开"步行"（`travel_routes` 只配家属开车/打车/公交，但口语解析认得"步行"）。
+
+## 改表结构的标准做法（2026-09-16 确立，改 schema 前必读）
+- `schema.sql` 每次启动都执行（`sql.init.mode=always`），且必须同时兼容旧库和新库，
+  所以任何变更都要**幂等**：加列 `ADD COLUMN IF NOT EXISTS`，删列 `DROP COLUMN IF EXISTS`。
+- **改名/改语义不能用 `ALTER TABLE ... RENAME TO`**（H2 没有条件 RENAME，第二次启动直接报错中断）。
+  用「临时兼容列」模式（`family_contacts` 和 `appointment_slots` 都是这个套路）：
+  先把新旧列都补出来 → 写只处理「尚未迁移的行」的幂等 UPDATE → 再 `DROP COLUMN IF EXISTS` 旧列。
+- 加外键用 `ADD CONSTRAINT IF NOT EXISTS fk_xxx ... REFERENCES parent(id)`。加之前先把折算不到的
+  悬空行处理掉：没有业务引用的直接删，仍被引用的留着让 FK 拦下启动报错，**不静默抹掉真实数据**。
+- 引用面固定是四处，改完必须全库 grep 旧列名：`schema.sql`、`data.sql`、查询侧 Java
+  （`FROM/JOIN` 与 `RowMapper` 的列序）、`docs/14-database-table-data.md`。
+  本项目的查询普遍用 `SELECT` 列序 + 位置取值，**加列必须放末尾或同步改 RowMapper**。
+- **优先保持对外契约不变**：本项目靠 JOIN `hospitals`/`departments` 把中文名取回，
+  `Slot`/`AppointmentView` 的字段名与顺序都不动，前端 9 个文件零改动。
+  任何"改接口"的提议，先把 `frontend/features/` 的消费面扫清楚（含朗读文案）再决策。
+
+## 本机工具环境的坑（Windows 宿主）
+- `bash` 工具的命令不完整：`ls`/`head`/`cat`/`dirname` 都 not found，只有 `git`/`docker` 这类
+  外部 exe 可用。列目录用 Glob，读文件用 Read，别绕 bash。
+- PowerShell 工具 **stdout 不回传**（exit code 0 但看不到输出）。要拿输出就把结果
+  `Set-Content`/`Out-File` 到临时文件，再用 Read 读。
+- Docker Desktop 默认没启动，`docker ps` 会报 `npipe:////./pipe/dockerDesktopLinuxEngine` 连不上。
+  这意味着**容器内构建、后端启动、H2 快照导出都做不了**，只能改源码和文档。
+- `docs/14-database-table-data.md` 不能用普通编辑器同步数据——它是
+  `docs/tools/export_h2_snapshot.py` 从运行中后端的 H2 console(8080) 抓的，
+  Docker 没起时只能手工同步**字段定义**，数据行保持原快照并标注。
+

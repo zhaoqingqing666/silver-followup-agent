@@ -41,13 +41,13 @@ class TravelAppointmentBindingTests {
     }
 
     /** 造一条历史（已过去）的已确认预约：9月8日 市第一医院 心内科。 */
-    private String seedSept8(String suffix, String slotId, String hospitalId, String hospitalName,
-                             String department, String time, String locationId) {
+    private String seedSept8(String suffix, String slotId, String hospitalId, String departmentId,
+                             String time, String locationId) {
         jdbc.update("""
-                INSERT INTO appointment_slots(id,hospital_id,hospital_name,department,
+                INSERT INTO appointment_slots(id,hospital,department,
                     appointment_date,appointment_time,available,clinic_location_id)
-                VALUES (?,?,?,?,?,?,TRUE,?)
-                """, slotId, hospitalId, hospitalName, department, "2026-09-08", time, locationId);
+                VALUES (?,?,?,?,?,TRUE,?)
+                """, slotId, hospitalId, departmentId, "2026-09-08", time, locationId);
         String appointmentId = "appt-0908-" + suffix;
         jdbc.update("""
                 INSERT INTO appointments(id,slot_id,user_id,status,created_at,conversation_id,transport,
@@ -83,7 +83,7 @@ class TravelAppointmentBindingTests {
 
     // ① “9月8号”是过去的日子，不能被滚动成下一年，也不能退回默认的最近一条预约。
     @Test void spokenMonthDayBindsTheRealHistoricalAppointment() {
-        String appointmentId = seedSept8("h001", "slot-0908-0900", "h001", "市第一医院（模拟）", "心内科",
+        String appointmentId = seedSept8("h001", "slot-0908-0900", "h001", "d001",
                 "09:00:00", "loc-d001");
         String id = service.start().conversationId();
 
@@ -97,7 +97,7 @@ class TravelAppointmentBindingTests {
 
     // ② 完整口语句子（不是短口令）同样要落到院内指引，且楼层、诊室来自数据库。
     @Test void naturalInsideGuideFallsThroughToTheRealFacility() {
-        seedSept8("h001", "slot-0908-0900", "h001", "市第一医院（模拟）", "心内科", "09:00:00", "loc-d001");
+        seedSept8("h001", "slot-0908-0900", "h001", "d001", "09:00:00", "loc-d001");
         String id = service.start().conversationId();
 
         AgentTurnResponse asked = service.chat(id, "我到医院里面了怎么走？");
@@ -111,8 +111,8 @@ class TravelAppointmentBindingTests {
 
     // ③ 同一天多条预约不替用户选：只给候选，不返回任何 appointmentId。
     @Test void twoAppointmentsOnTheSameDayAskInsteadOfGuessing() {
-        seedSept8("h001", "slot-0908-0900", "h001", "市第一医院（模拟）", "心内科", "09:00:00", "loc-d001");
-        seedSept8("h002", "slot-0908-1430", "h002", "市人民医院（模拟）", "骨科", "14:30:00", "loc-d004");
+        seedSept8("h001", "slot-0908-0900", "h001", "d001", "09:00:00", "loc-d001");
+        seedSept8("h002", "slot-0908-1430", "h002", "d004", "14:30:00", "loc-d004");
         String id = service.start().conversationId();
 
         AgentTurnResponse asked = service.chat(id, "我想看看9月8号的地图");
@@ -126,9 +126,9 @@ class TravelAppointmentBindingTests {
 
     // ③ 续：候选支线选中的是地图，绝不能变成取消预约的确认卡。
     @Test void choosingATravelCandidateOpensTheMapAndNeverACancellation() {
-        String first = seedSept8("h001", "slot-0908-0900", "h001", "市第一医院（模拟）", "心内科",
+        String first = seedSept8("h001", "slot-0908-0900", "h001", "d001",
                 "09:00:00", "loc-d001");
-        String second = seedSept8("h002", "slot-0908-1430", "h002", "市人民医院（模拟）", "骨科",
+        String second = seedSept8("h002", "slot-0908-1430", "h002", "d004",
                 "14:30:00", "loc-d004");
         String id = service.start().conversationId();
         service.chat(id, "我想看看9月8号的地图");
@@ -144,7 +144,7 @@ class TravelAppointmentBindingTests {
 
     // ④ 没有对应日期的预约时明确说没查到，绝不回退到另一条已有预约。
     @Test void missingDateSaysSoAndNeverFallsBackToAnotherAppointment() {
-        String other = seedSept8("h001", "slot-0908-0900", "h001", "市第一医院（模拟）", "心内科",
+        String other = seedSept8("h001", "slot-0908-0900", "h001", "d001",
                 "09:00:00", "loc-d001");
         String id = service.start().conversationId();
 
@@ -156,8 +156,8 @@ class TravelAppointmentBindingTests {
 
     // ④ 续：正在追问候选时改成另一个日期重新问，不能被旧候选支线接管，也不能回退到别的预约。
     @Test void switchingDateInsideTheCandidateBranchAnswersFromScratch() {
-        seedSept8("h001", "slot-0908-0900", "h001", "市第一医院（模拟）", "心内科", "09:00:00", "loc-d001");
-        seedSept8("h002", "slot-0908-1430", "h002", "市人民医院（模拟）", "骨科", "14:30:00", "loc-d004");
+        seedSept8("h001", "slot-0908-0900", "h001", "d001", "09:00:00", "loc-d001");
+        seedSept8("h002", "slot-0908-1430", "h002", "d004", "14:30:00", "loc-d004");
         String id = service.start().conversationId();
         service.chat(id, "我想看看9月8号的地图");
 
@@ -182,7 +182,7 @@ class TravelAppointmentBindingTests {
 
     // ⑥ 确认卡等待处理时，带日期的地图请求也不得把确认卡挤掉。
     @Test void dateQualifiedMapRequestNeverDismissesTheConfirmationCard() {
-        seedSept8("h001", "slot-0908-0900", "h001", "市第一医院（模拟）", "心内科", "09:00:00", "loc-d001");
+        seedSept8("h001", "slot-0908-0900", "h001", "d001", "09:00:00", "loc-d001");
         AgentTurnResponse prepared = prepare(service.start().conversationId());
         String id = prepared.conversationId();
 
@@ -199,7 +199,7 @@ class TravelAppointmentBindingTests {
 
     // ⑦ CANCELLED 只是“本次未提交的办理”停止，数据库里已有的预约仍然能看地图。
     @Test void cancelledTaskCanStillOpenTheMapOfAnExistingAppointment() {
-        String appointmentId = seedSept8("h001", "slot-0908-0900", "h001", "市第一医院（模拟）", "心内科",
+        String appointmentId = seedSept8("h001", "slot-0908-0900", "h001", "d001",
                 "09:00:00", "loc-d001");
         AgentTurnResponse prepared = prepare(service.start().conversationId());
         AgentTurnResponse done = service.confirm(prepared.conversationId(), true,
@@ -217,7 +217,7 @@ class TravelAppointmentBindingTests {
 
     // ⑧ 紧急暂停期间安全提示优先：明确要求看地图也只给文字和按钮，不自动跳页。
     @Test void emergencyPauseKeepsTheSafetyMessageForEveryMapRequest() {
-        seedSept8("h001", "slot-0908-0900", "h001", "市第一医院（模拟）", "心内科", "09:00:00", "loc-d001");
+        seedSept8("h001", "slot-0908-0900", "h001", "d001", "09:00:00", "loc-d001");
         String id = service.start().conversationId();
         assertThat(service.chat(id, "我胸口疼").stage()).isEqualTo("EMERGENCY_PAUSED");
 

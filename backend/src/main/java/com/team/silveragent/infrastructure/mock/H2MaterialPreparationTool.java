@@ -174,8 +174,10 @@ public class H2MaterialPreparationTool implements MaterialPreparationTool {
 
     private AppointmentSource requireAppointment(String userId, String appointmentId) {
         List<AppointmentSource> rows = jdbc.query("""
-                SELECT s.department,a.materials
-                FROM appointments a JOIN appointment_slots s ON s.id=a.slot_id
+                SELECT d.name,a.materials
+                FROM appointments a
+                JOIN appointment_slots s ON s.id=a.slot_id
+                JOIN departments d ON d.id=s.department
                 WHERE a.id=? AND a.user_id=?
                 """, (rs, row) -> new AppointmentSource(rs.getString(1), rs.getString(2)),
                 appointmentId, userId);

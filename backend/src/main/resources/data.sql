@@ -79,14 +79,10 @@ MERGE INTO care_guide_articles KEY(id) VALUES
  '需要改期或取消已确认预约时，应先查询本人预约并再次确认，系统不会根据一句模糊表达直接执行。可能迟到时，请尽快联系医院确认是否还能报到。',
  '改期,取消,退掉,撤销,迟到,预约',NULL,NULL,4,TRUE);
 
-UPDATE appointment_slots SET clinic_location_id=CASE
-  WHEN hospital_id='h001' AND department='心内科' THEN 'loc-d001'
-  WHEN hospital_id='h001' AND department='神经内科' THEN 'loc-d002'
-  WHEN hospital_id='h001' AND department='内分泌科' THEN 'loc-d005'
-  WHEN hospital_id='h002' AND department='内分泌科' THEN 'loc-d003'
-  WHEN hospital_id='h002' AND department='骨科' THEN 'loc-d004'
-  WHEN hospital_id='h002' AND department='心内科' THEN 'loc-d006'
-  ELSE clinic_location_id END;
+-- 诊室与科室一一对应，编号形如 loc-<科室编号>。此处 department 已经是 departments.id，
+-- 直接拼出来即可，不必再按「医院 + 中文科室名」逐条比对。
+UPDATE appointment_slots SET clinic_location_id='loc-' || department
+WHERE department IN ('d001','d002','d003','d004','d005','d006');
 
 MERGE INTO travel_routes (id,origin,destination,transport,duration_minutes,distance_meters,route_steps,polyline,route_source) KEY(id) VALUES
 ('route-001','幸福小区（模拟）','健康路1号（模拟）','家属开车',30,8700,'从幸福小区东门出发|沿幸福路向南行驶|在健康路口左转|从市第一医院门诊楼南门进入','116.365300,39.921900;116.374800,39.918300;116.386500,39.913600;116.397428,39.909230','SIMULATED'),
