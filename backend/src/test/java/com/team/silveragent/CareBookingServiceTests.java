@@ -260,9 +260,8 @@ class CareBookingServiceTests {
     /**
      * 代约向导里列出的每条号源都必须说清「谁 · 什么号 · 多少钱」。
      *
-     * <p>一个上午时段会同时有两位医生出诊（1 专家 + 1 普通），只给时间的话，页面上会并排
-     * 出现两个一模一样的「09:00」按钮，家属分不清点哪个、也不知道约的是谁。这条把它钉住：
-     * 同一时间的多条号源必须带上能区分开的医生信息。
+     * <p>一天里有多个出诊格、坐着不同的医生，号码只凭「时间」分不出是谁。这条把它钉住：
+     * 每条可约号源都必须带上能区分开的医生信息。
      */
     @Test
     void windowsCarryTheDoctorSoTheSameMomentCanBeToldApart() {
@@ -277,8 +276,9 @@ class CareBookingServiceTests {
             assertThat(option.feeCents()).isPositive();
         });
 
-        // 真正的病根：同一个日期里，光是「时间」这一项是有重复的（上午 09:00 两位医生各一条）。
-        // 只要补上医生维度就能区分开——这条断言就是「重复」这件事本身存在的证据。
+        // 真正的病根：一周里光是「时间」这一项是会重复的（同一天的 09:00 / 10:30 等多格、
+        // 不同日期还会有同名时刻）。只要补上医生维度就能把每条号源区分开——
+        // 这条断言就是「重复」这件事本身存在的证据。
         for (CareBookingService.DateWindow window : windows) {
             List<String> sameTime = window.slots().stream()
                     .map(option -> option.time() + "@" + option.doctorName()).toList();

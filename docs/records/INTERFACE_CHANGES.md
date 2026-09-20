@@ -5,7 +5,7 @@
 ## 2026-09-14 照护端号源选项带上医生与号别；推荐去重上移为共享纯函数
 
 - 代约「可约时段」接口（`GET /api/caregivers/{cid}/elders/{uid}/book/windows`，序列化 `CareBookingService.DateWindow`）的 `slots[]` **追加 4 个字段**：`doctorName`、`doctorTitle`、`slotType`、`feeCents`。原来只有 `{slotId, time}`。追加可选字段属兼容变更，旧客户端忽略即可。
-- **为什么必须改**：DEC-022 之后「同一时刻只有一条号源」这个不变量已经作废——上午 09:00 天然两条（1 专家 + 1 普通）。只给 `time` 时，页面上会并排出现两个一模一样的「09:00」按钮，家属分不清点哪个、也不知道约的是谁。号别与挂号费都取自这条号源本身，**不按医生职称推**；展示口径复用 `doctorLine()`（`frontend/lib/appointment-display.ts`），输出「医生 · 职称 · 号别 · 挂号费」。
+- **为什么必须改**：一个上午时段里会有多位医生出诊（当时的排法下上午 09:00 有两条：1 专家 + 1 普通；DEC-026 改成「每格 1 位医生」后同一时刻回到只有一条，但一天 4 格里坐的仍是 4 位不同医生）。只给 `time` 时，页面上会出现无法区分「是谁的号」的时段按钮，家属分不清点哪个、也不知道约的是谁。号别与挂号费都取自这条号源本身，**不按医生职称推**；展示口径复用 `doctorLine()`（`frontend/lib/appointment-display.ts`），输出「医生 · 职称 · 号别 · 挂号费」。
 - 4 个字段**均可为 `null`**：加医生维度之前生成的旧号源就是 `null`。前端对这类记录显示「医生信息未记录」，**不替它编一位医生**（与 `appointmentNarration` 既有的「不虚构」约定一致）。
 - 前端 `BookingSlotOption`（`frontend/types/domain.ts`）同步加这 4 个字段（类型均为 `| null`）。
 - `slotType` 仍是**封闭枚举** `NORMAL`=普通号 / `EXPERT`=专家号，前端遇未知值**原样显示**（不是显示成空白）；`feeCents` 仍**以分为单位**（普通号 2500 = ¥25、专家号 4000 = ¥40）。

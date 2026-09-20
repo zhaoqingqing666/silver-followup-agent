@@ -5802,7 +5802,7 @@ public class FollowupAgentService {
     private String slotLabel(Slot slot) {
         if (slot == null) return "待选择";
         String base = slot.date().format(DATE_LABEL) + " " + slot.time().format(TIME_LABEL);
-        // 同一时刻可能有多位医生的号（上午 09:00 天然两条），不带医生就没法分。
+        // 一天里坐了多位不同医生的号，只给「日期 + 时刻」分不出是谁，必须带上医生。
         if (slot.doctorName() == null || slot.doctorName().isBlank()) return base;
         return base + " " + slot.doctorName() + (slot.doctorTitle() == null ? "" : slot.doctorTitle());
     }
