@@ -30,6 +30,8 @@ frontend/.npm-cache/
 
 # 助手的项目工作记忆（工具产物，会持续增长；结论另有 docs/records 承载）
 .devcontainer/.workbuddy/
+# 同上，但这是「cwd = 仓库根」那条工作流写下的一份（含 tmp/ 临时脚本与图源）
+.workbuddy/
 
 # 内部开发笔记：实测踩坑与易错点，只供团队内部参考，不进仓库
 docs/13-agent-pitfalls.md
