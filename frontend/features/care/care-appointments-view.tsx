@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { CalendarDays, ChevronRight, Clock3, LoaderCircle, RefreshCw, Route, TriangleAlert, UsersRound } from 'lucide-react';
 import { PageHeader } from '@/components/common/page-header';
 import { getAppointments } from '@/lib/appointment-api';
+import { doctorLine } from '@/lib/appointment-display';
 import type { AppointmentSummary, CareElder } from '@/types/domain';
 import { formatDate, formatHM } from './format';
 import { CareAppointmentDetailView } from './care-appointment-detail-view';
@@ -118,6 +119,10 @@ export function CareAppointmentsView({ caregiverId, elder, onBack, onManageUpcom
                     </div>
                     <p className="mt-1 truncate text-base">{row.hospital}</p>
                     <p className="mt-1 truncate text-base text-muted-foreground">{row.department}</p>
+                    {/* 与长辈端事项页共用同一套拼法（lib/appointment-display.ts）。家属在向导第 2 步
+                        的号源按钮上就看得到「张建国 主任医师 · 专家号 · 挂号费 ¥40」，约完在这张卡上
+                        反而只剩时间地点，就会不知道到底约了谁。老预约没有医生快照时显示「医生信息未记录」。 */}
+                    <p className="mt-1 text-base text-muted-foreground">{doctorLine(row)}</p>
                   </div>
                 </div>
 

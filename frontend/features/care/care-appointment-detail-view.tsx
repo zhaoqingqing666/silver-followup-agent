@@ -2,6 +2,7 @@
 
 import { CalendarDays, ChevronRight, MapPin, Route, UsersRound } from 'lucide-react';
 import { PageHeader } from '@/components/common/page-header';
+import { doctorLine } from '@/lib/appointment-display';
 import type { AppointmentSummary, CareElder } from '@/types/domain';
 import { formatDate, formatHM } from './format';
 
@@ -39,6 +40,8 @@ export function CareAppointmentDetailView({ caregiverId, elder, appointment, onB
             </p>
             <p className="mt-1 text-base">{appointment.hospital}</p>
             <p className="mt-1 text-base text-muted-foreground">{appointment.department}</p>
+            {/* 详情页是家属「看这位长辈这次看的是谁」的地方，号别与挂号费也要带上，与长辈端同口径。 */}
+            <p className="mt-1 text-base text-muted-foreground">{doctorLine(appointment)}</p>
             {appointment.arrangedLabel && <p className="mt-1 text-sm text-muted-foreground">由{appointment.arrangedLabel}约好</p>}
             {participating && (
               <p className="mt-1 flex items-center gap-1.5 text-sm font-semibold text-primary">

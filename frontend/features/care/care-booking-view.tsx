@@ -380,6 +380,8 @@ export function CareBookingView({ caregiverId, elder, onBack, onFinished }: {
               <div className="min-w-0 flex-1">
                 <p className="text-xl font-bold">{formatHM(upcoming.time)} {formatDate(upcoming.date)} {weekdayOf(upcoming.date)} 复诊</p>
                 <p className="mt-1 text-base">{upcoming.hospital} · {upcoming.department}</p>
+                {/* 管理视图上家属要做「修改 / 取消」的决定，光有时间与地点不够——得看得见约的是谁。 */}
+                <p className="mt-1 text-base text-muted-foreground">{doctorLine(upcoming)}</p>
                 {upcoming.arrangedLabel && <p className="mt-1 text-sm text-muted-foreground">由{upcoming.arrangedLabel}约好</p>}
               </div>
             </div>
@@ -614,6 +616,9 @@ export function CareBookingView({ caregiverId, elder, onBack, onFinished }: {
                   <p className="text-xl font-bold">{formatHM(slot.time)} {formatDate(date)} {weekdayOf(date)} 复诊</p>
                   <p className="mt-1 text-base">{hospital.name}</p>
                   <p className="mt-1 text-base text-muted-foreground">{department.name} · 就诊位置：{department.location ?? '以医院指引为准'}</p>
+                  {/* 上一步的号源按钮已经带医生，翻到确认页反而只剩时间地点——点「确认预约」之前
+                      家属得能再看一眼约的是谁、什么号、多少挂号费。 */}
+                  <p className="mt-1 text-base text-muted-foreground">{doctorLine(slot)}</p>
                 </div>
               </div>
             </section>
