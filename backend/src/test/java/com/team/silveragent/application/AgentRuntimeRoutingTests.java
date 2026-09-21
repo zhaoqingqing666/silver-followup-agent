@@ -378,6 +378,30 @@ class AgentRuntimeRoutingTests {
     }
 
     /**
+     * 模型的回答在宣称一件这一轮并没有发生的事（「我记下了」，而它没调用任何工具）：
+     * 这句话不能说出去，而<b>只把它从 DIRECT_ANSWER 挪开是不够的</b>——下游
+     * {@code CURRENT_FLOW} 也会把同一份草稿原样念一遍，所以草稿本身也必须留在路上。
+     *
+     * <p>标上 {@code javaFallback} 是这一步的落点：这一轮改走模型离线时那条 Java 关键词链路，
+     * 「帮我记一下……」在那里会被真的记下来（见 {@code ModelModeJavaFallbackTests}）。
+     */
+    @Test
+    void aModelAnswerClaimingAnUnwrittenWriteIsHandedToTheJavaFallback() {
+        ConversationPlanner planner = mock(ConversationPlanner.class);
+        when(planner.mode()).thenReturn("MODEL_PLANNER_WITH_RULE_FALLBACK");
+        when(planner.plan(any(), any(), any())).thenReturn(new PlannerDecision(
+                PlannerActionType.ANSWER, "UNKNOWN", null, Map.of(),
+                "好的，我记下了：您对青霉素过敏。", "FOLLOWUP_FLOW", facts("UNKNOWN"), "MODEL_PLANNER"));
+
+        AgentRuntime.Outcome outcome = runtime(planner).plan("帮我记一下我对青霉素过敏", context(),
+                new ConversationState("conversation", "user-001"));
+
+        assertThat(outcome.route()).isNotEqualTo(AgentOrchestrator.Route.DIRECT_ANSWER);
+        assertThat(outcome.replyDraft()).isNull();
+        assertThat(outcome.javaFallback()).isTrue();
+    }
+
+    /**
      * 问药走真实知识库查询，不能由模型凭记忆回答——它的记忆里没有我们的药品库，
      * 说出来的用法用量也没人核对过。这里断言它被接到 drug.queryKnowledge 上。
      */

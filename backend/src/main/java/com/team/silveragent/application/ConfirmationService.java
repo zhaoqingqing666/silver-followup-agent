@@ -37,9 +37,9 @@ import java.util.UUID;
  * 是哪一类，就无法断定它是「本来没有目标」还是「目标丢了」）。宁可让他再说一遍，也不要按一个
  * 我们推出来的范围写库。
  *
- * <p>同一把尺子也量「这一类动作执行时还要用到的草稿」：备忘卡要写的那条草稿不在授权三样里，
- * 它也得随快照一起回来（见 {@link #payloadIntact}）。草稿缺了，凭据就不可信了——照着一份
- * 残缺的草稿写库，写进去的是一条他从来没看到过的备忘。
+ * <p>同一把尺子也量「这一类动作执行时还要用到的草稿」：备忘卡要写的那段正文、健康记录卡要写的
+ * 那条数值，都不在授权三样里，它们也得随快照一起回来（见 {@link #payloadIntact}）。草稿缺了，
+ * 凭据就不可信了——照着一份残缺的草稿写库，写进去的是一条他从来没在卡上看到过的内容。
  *
  * <p>本类不执行任何业务动作（那是 {@link CancellationExecutor} 一类执行器的事），
  * 也不决定「执行不了时改说什么」（那是各业务出口的事）。
@@ -79,7 +79,16 @@ final class ConfirmationService {
             /** 取消"由家属或志愿者代约"的那份安排（本人端的「临时改期或取消」）。 */
             CANCEL_MANAGED,
             /** 写一条健康备忘。 */
-            MEMO;
+            MEMO,
+            /**
+             * 往「健康记录」里写一条实测数值（“我的血压是100”）。
+             *
+             * <p>与 {@link #MEMO} 同一族的写操作：不针对已有预约（目标集合必须为空），执行时要用到
+             * 的草稿是那条数值本身（见 {@link #payloadIntact}）。两者分成两个取值而不是合并成
+             * 一个"写点什么"的类型，是因为它们的执行落在两张不同的表、两套回读话术上——
+             * 合并之后分派器就得再看一个会话字段才知道写哪儿，那正是这一层要消掉的东西。
+             */
+            HEALTH_RECORD;
 
             /**
              * 从快照里存下来的名字还原。<b>认不出来返回 {@code null}，不设默认值。</b>
@@ -318,7 +327,20 @@ final class ConfirmationService {
      */
     private static boolean payloadIntact(ConversationState state, PendingOperation.Kind kind) {
         if (kind == PendingOperation.Kind.MEMO) {
-            return state.pendingMemoText != null && !state.pendingMemoText.isBlank();
+            // 到点时间也判一次：它是"卡上写着的那几行提醒"本身。更早版本写下的快照里这个字段
+            // 是单个时间、读回来是 null，而 null 与"空列表"在这里是两件事——空列表是老人自己
+            // 说的"不用提醒，只记下"，null 只是"这份快照里没有"。分不清就会把卡上那条提醒时间
+            // 静默丢掉、记成一条长期备忘：又是一条他从来没在卡上看到过的备忘。
+            return state.pendingMemoText != null && !state.pendingMemoText.isBlank()
+                    && state.pendingMemoAts != null;
+        }
+        if (kind == PendingOperation.Kind.HEALTH_RECORD) {
+            // 数值三样缺一不可：项目（记哪一项）、数值（记成什么）、记录时间（卡上写着的那一刻）。
+            // 时间单独判一次是有意的——它是"老人什么时候量的"这件事本身，缺了就只能拿确认那一刻
+            // 顶替，写进去的会是一条时间对不上、而卡上从没出现过的时间。
+            return state.pendingRecordItem != null && !state.pendingRecordItem.isBlank()
+                    && state.pendingRecordValueText != null && !state.pendingRecordValueText.isBlank()
+                    && state.pendingRecordAt != null;
         }
         return true;
     }

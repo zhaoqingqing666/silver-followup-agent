@@ -367,6 +367,32 @@ export interface CreateBookingRequest {
   willAccompany: boolean;
 }
 
+/**
+ * 代约 / 改期 / 取消的确认卡。整份由后端算出来，前端只负责展示——
+ * 展示的内容和真正要执行的内容来自同一套解析，不会各算一份。
+ */
+export interface BookingPreview {
+  /** 提交时要带回来的票据；内容被改动过就对不上，会被后端拒绝。 */
+  confirmationId: string;
+  /** BOOK / MODIFY / CANCEL。 */
+  action: string;
+  /** 这次复诊是替谁办的。 */
+  serviceSubject: string;
+  /** 这份预约记在谁名下（代约归属）。 */
+  arrangement: string;
+  hospital: string;
+  department: string;
+  /** 如 2026-09-18 */
+  date: string;
+  /** 如 09:00 */
+  time: string;
+  transport: string;
+  needTravel: boolean;
+  willAccompany: boolean;
+  /** 点确认后实际会发生的事，只列真会做的。 */
+  operations: string[];
+}
+
 /** 代约成功返回的预约卡片（老人在首页/助手可见同款）。 */
 export interface BookedAppointment {
   appointmentId: string;

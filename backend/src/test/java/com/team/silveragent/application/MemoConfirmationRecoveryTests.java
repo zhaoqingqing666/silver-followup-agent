@@ -62,8 +62,10 @@ class MemoConfirmationRecoveryTests {
         ConversationState issued = conversations.find(conversationId).orElseThrow();
         assertThat(issued.confirmationKind).isEqualTo(ConfirmationService.PendingOperation.Kind.MEMO.name());
         assertThat(issued.pendingMemoText).as(SAYS).isNotBlank();
-        LocalDateTime shownAt = issued.pendingMemoAt;
-        assertThat(shownAt).as("卡片上写了提醒时间，快照里就不能是空的").isNotNull();
+        // 一句话说几天就是几条：草稿里存的是一串到点时间，这张卡只有一天，所以正好一条。
+        assertThat(issued.pendingMemoAts).as("卡片上写了提醒时间，快照里就不能是空的").hasSize(1);
+        LocalDateTime shownAt = issued.pendingMemoAts.get(0);
+        assertThat(shownAt).isNotNull();
 
         // 重启：服务内存里那份没了，这一轮只能从库里读。
         sessions().clear();
@@ -113,8 +115,8 @@ class MemoConfirmationRecoveryTests {
                 "SELECT state_json FROM conversation_sessions WHERE id=?", String.class, conversationId);
         try {
             ObjectNode state = (ObjectNode) json.readTree(stateJson);
-            for (String field : List.of("pendingMemoText", "pendingMemoAt", "pendingMemoRepeat",
-                    "pendingMemoDay", "memoReturnStage", "memoNeedsApproval")) {
+            for (String field : List.of("pendingMemoText", "pendingMemoAts", "pendingMemoRepeat",
+                    "pendingMemoDays", "memoReturnStage", "memoNeedsApproval")) {
                 state.remove(field);
             }
             jdbc.update("UPDATE conversation_sessions SET state_json=? WHERE id=?",

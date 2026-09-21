@@ -1,17 +1,19 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
-import { CalendarDays, Check, ChevronLeft, ChevronRight, Clock3, Hospital, LoaderCircle, Pencil, Route, TriangleAlert, UsersRound } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { CalendarDays, Check, ChevronLeft, ChevronRight, ClipboardCheck, Clock3, Hospital, LoaderCircle, Pencil, Route, TriangleAlert, UsersRound } from 'lucide-react';
 import { PageHeader } from '@/components/common/page-header';
 import { getAppointments } from '@/lib/appointment-api';
-import { cancelElderBooking, createBooking, getBookingDepartments, getBookingHospitals, getBookingWindows, modifyBooking, setBookingAccompany } from '@/lib/care-api';
+import { cancelElderBooking, createBooking, getBookingDepartments, getBookingHospitals, getBookingWindows, modifyBooking, prepareBooking, prepareCancelBooking, prepareModifyBooking, setBookingAccompany } from '@/lib/care-api';
 import type {
   AppointmentSummary,
   BookingDateWindow,
   BookingDepartment,
   BookingHospital,
+  BookingPreview,
   BookingSlotOption,
   CareElder,
+  CreateBookingRequest,
 } from '@/types/domain';
 import { formatDate, formatHM } from './format';
 import { CareAppointmentDetailView } from './care-appointment-detail-view';
@@ -42,6 +44,26 @@ const relationship = (elder: CareElder): string => {
   const prefix = elder.relationship ? `${elder.relationship} ` : '';
   return `${prefix}${elder.name}`;
 };
+
+/**
+ * 医院名的两种写法要能对上：可选医院列表来自目录接口，名字里的「（模拟）」被后端去掉了；
+ * 而预约卡片上的医院名直接来自号源记录，带着这个后缀。不做归一化的话
+ * `hospitals.find(item => item.name === upcoming.hospital)` 永远找不到，
+ * 改期向导就悄悄放弃了预填——长辈的预约在 h002 时，向导会默认停在 h001。
+ */
+const hospitalKey = (name: string | undefined | null): string =>
+  (name ?? '').replace(/[（(]模拟[）)]/g, '').trim();
+const sameHospital = (a: string | undefined | null, b: string | undefined | null): boolean =>
+  hospitalKey(a) === hospitalKey(b);
+
+/**
+ * 请求指纹。确认卡带着开卡时的指纹存下来，提交时只认指纹仍然对得上的那张——
+ * 否则「改了陪同方式但卡还是旧的」那一瞬间点下去，提交的是新内容、用户看的是旧内容。
+ */
+const signatureOf = (request: CreateBookingRequest): string => [
+  request.hospitalId, request.departmentId, request.date, request.slotId,
+  request.transport, String(request.needTravel), String(request.willAccompany),
+].join('|');
 
 /** 帮助预约（含管理/新办）：先落“现有安排”管理视图（有进行中预约时）或直接进向导（没有时）。 */
 export function CareBookingView({ caregiverId, elder, onBack, onFinished }: {
@@ -79,23 +101,42 @@ export function CareBookingView({ caregiverId, elder, onBack, onFinished }: {
   const [cancelError, setCancelError] = useState('');
   const [accompanySaving, setAccompanySaving] = useState(false);
   const [accompanyError, setAccompanyError] = useState('');
+  /** 第 3 步的确认卡：由后端算出「点确认后到底会发生什么」，同时带回一张票据。 */
+  const [preview, setPreview] = useState<{ signature: string; card: BookingPreview } | null>(null);
+  const [preparing, setPreparing] = useState(false);
+  const [previewError, setPreviewError] = useState('');
+  /** 取消前的确认卡。取消不可逆，凭它才能提交。 */
+  const [cancelPreview, setCancelPreview] = useState<BookingPreview | null>(null);
+  const [cancelPreparing, setCancelPreparing] = useState(false);
   /** 修改向导只做一次“按当前安排预填”，避免医院/科室反复请求。 */
   const prefillDone = useRef(false);
+  /** 每发起一次读取就换一个令牌；迟到的响应拿不到当前令牌就丢掉，
+   *  免得切了长辈之后旧请求把列表覆盖回来。 */
+  const hospitalsToken = useRef(0);
+  const previewToken = useRef(0);
 
-  /** 进入页面即加载可选医院；默认选中第一所，减少操作步数。 */
-  useEffect(() => {
-    let cancelled = false;
-    void getBookingHospitals(caregiverId, elder.elderId)
-      .then(list => {
-        if (cancelled) return;
-        setHospitals(list);
-        if (list.length > 0) setHospital(list[0]);
-      })
-      .catch(cause => {
-        if (!cancelled) setError(cause instanceof Error ? cause.message : '无法读取可选医院');
-      });
-    return () => { cancelled = true; };
+  /** 读取可选医院；默认选中第一所，减少操作步数。失败时留下错误提示，交给页面上的“重新读取”重试。 */
+  const loadHospitals = useCallback(async () => {
+    const token = ++hospitalsToken.current;
+    setError('');
+    try {
+      const list = await getBookingHospitals(caregiverId, elder.elderId);
+      if (token !== hospitalsToken.current) return;
+      setHospitals(list);
+      if (list.length > 0) setHospital(list[0]);
+    } catch (cause) {
+      if (token !== hospitalsToken.current) return;
+      setError(cause instanceof Error ? cause.message : '无法读取可选医院');
+    }
   }, [caregiverId, elder.elderId]);
+
+  /**
+   * 进入页面即加载可选医院。不必写清理：换了长辈就是换了一份 loadHospitals，
+   * 它自己开头就会把令牌推到下一号，上一个请求回来时已经对不上了。
+   */
+  useEffect(() => {
+    void loadHospitals();
+  }, [loadHospitals]);
 
   /** 读取这位长辈当前有没有进行中的预约，据此决定落到“管理视图”还是“新向导”。 */
   useEffect(() => {
@@ -124,10 +165,63 @@ export function CareBookingView({ caregiverId, elder, onBack, onFinished }: {
     setStep(0);
   };
 
+  /** 眼下这套选择对应的提交体；四项没选齐就是 null（第 3 步到不了这里）。 */
+  const buildRequest = (): CreateBookingRequest | null => {
+    if (!hospital || !department || !slot || !date) return null;
+    return {
+      hospitalId: hospital.id,
+      departmentId: department.id,
+      date,
+      slotId: slot.slotId,
+      needTravel,
+      transport,
+      willAccompany,
+    };
+  };
+
+  const currentRequest = buildRequest();
+  /** 当前可用的确认卡：指纹对得上才算数。 */
+  const card = preview && currentRequest && preview.signature === signatureOf(currentRequest) ? preview.card : null;
+
+  /**
+   * 进第 3 步（以及在这一步上改动任一选项）就向后端要一次确认卡。
+   * 选项一改，旧票据在后端也就作废了，必须重新要一张。
+   *
+   * <p>同样不需要清理函数：上面那句 `++previewToken.current` 就是作废旧请求的地方，
+   * 每次重跑都会把令牌推走。
+   */
+  useEffect(() => {
+    if (phase !== 'wizard' || step !== 3) return;
+    if (!hospital || !department || !slot || !date) return;
+    const request: CreateBookingRequest = {
+      hospitalId: hospital.id,
+      departmentId: department.id,
+      date,
+      slotId: slot.slotId,
+      needTravel,
+      transport,
+      willAccompany,
+    };
+    const token = ++previewToken.current;
+    setPreparing(true);
+    setPreviewError('');
+    const call = mode === 'modify'
+      ? prepareModifyBooking(caregiverId, elder.elderId, request)
+      : prepareBooking(caregiverId, elder.elderId, request);
+    void call
+      .then(returned => { if (token === previewToken.current) setPreview({ signature: signatureOf(request), card: returned }); })
+      .catch(cause => {
+        if (token !== previewToken.current) return;
+        setPreview(null);
+        setPreviewError(cause instanceof Error ? cause.message : '无法生成办理确认，请稍后重试');
+      })
+      .finally(() => { if (token === previewToken.current) setPreparing(false); });
+  }, [phase, step, mode, caregiverId, elder.elderId, hospital, department, date, slot, transport, needTravel, willAccompany]);
+
   /** 修改向导进入时按“当前这张预约”预填医院/科室，若原日期号源还在可选范围则一并带出。 */
   useEffect(() => {
     if (phase !== 'wizard' || mode !== 'modify' || !hospitals || !upcoming || prefillDone.current) return;
-    const matchHospital = hospitals.find(item => item.name === upcoming.hospital) ?? null;
+    const matchHospital = hospitals.find(item => sameHospital(item.name, upcoming.hospital)) ?? null;
     if (!matchHospital) { prefillDone.current = true; return; }
     let cancelled = false;
     void (async () => {
@@ -194,16 +288,45 @@ export function CareBookingView({ caregiverId, elder, onBack, onFinished }: {
     }
   };
 
+  /**
+   * 展开/收起取消确认区。展开时先要一张取消确认卡——取消是唯一不可逆的动作，
+   * 号源一放出去就可能被别人抢走，得让家属看清要取消的确实是眼下这一张。
+   */
+  const loadCancelPreview = async () => {
+    setCancelError('');
+    setCancelPreview(null);
+    setCancelPreparing(true);
+    try {
+      setCancelPreview(await prepareCancelBooking(caregiverId, elder.elderId));
+    } catch (cause) {
+      setCancelError(cause instanceof Error ? cause.message : '无法生成取消确认，请稍后重试');
+    } finally {
+      setCancelPreparing(false);
+    }
+  };
+
+  const toggleCancelPanel = async () => {
+    if (confirmingCancel) {
+      setConfirmingCancel(false);
+      setCancelError('');
+      setCancelPreview(null);
+      return;
+    }
+    setConfirmingCancel(true);
+    await loadCancelPreview();
+  };
+
   /** 取消当前这张进行中的预约，随后可重新代约。 */
   const cancelCurrent = async () => {
-    if (!upcoming) return;
+    if (!upcoming || !cancelPreview) return;
     setCancelling(true);
     setCancelError('');
     try {
-      await cancelElderBooking(caregiverId, elder.elderId);
+      await cancelElderBooking(caregiverId, elder.elderId, cancelPreview.confirmationId);
       setNotice(`已取消${elder.name}的原复诊预约，如需新的安排请在下面重新代约。`);
       setUpcoming(null);
       setConfirmingCancel(false);
+      setCancelPreview(null);
       beginCreate();
     } catch (cause) {
       setCancelError(cause instanceof Error ? cause.message : '取消预约失败，请稍后重试');
@@ -256,6 +379,16 @@ export function CareBookingView({ caregiverId, elder, onBack, onFinished }: {
     }
   };
 
+  /**
+   * 进第 3 步时先把旧确认卡丢掉。选项没变的话指纹仍然对得上，不清就会有一次渲染
+   * 拿着上一轮已经作废的票据——那一下点下去，后端只会回一句「确认已失效」。
+   */
+  const goToConfirmStep = () => {
+    setPreview(null);
+    setPreviewError('');
+    setStep(3);
+  };
+
   const goBack = () => {
     setSubmitError('');
     setError('');
@@ -280,7 +413,7 @@ export function CareBookingView({ caregiverId, elder, onBack, onFinished }: {
     if (target >= 3 && !(date !== '' && slot)) { windows ? setStep(2) : void openWindowStep(); return; }
     if (target === 1) { departments ? setStep(1) : void openDepartmentStep(); return; }
     if (target === 2) { windows ? setStep(2) : void openWindowStep(); return; }
-    setStep(3);
+    goToConfirmStep();
   };
 
   const readyForNext = (): boolean => {
@@ -293,28 +426,21 @@ export function CareBookingView({ caregiverId, elder, onBack, onFinished }: {
   const advance = () => {
     if (step === 0) void openDepartmentStep();
     else if (step === 1) void openWindowStep();
-    else if (step === 2) setStep(3);
+    else if (step === 2) goToConfirmStep();
   };
 
   const submit = async () => {
-    if (!hospital || !department || !slot || !date) return;
+    const request = buildRequest();
+    // 没有对得上的确认卡就不发：那张卡的票据才是后端放行的凭据
+    if (!request || !card || !department) return;
     setSubmitting(true);
     setSubmitError('');
-    const request = {
-      hospitalId: hospital.id,
-      departmentId: department.id,
-      date,
-      slotId: slot.slotId,
-      needTravel,
-      transport,
-      willAccompany,
-    };
     try {
       if (mode === 'modify') {
-        await modifyBooking(caregiverId, elder.elderId, request);
+        await modifyBooking(caregiverId, elder.elderId, request, card.confirmationId);
         setNotice(`已把${elder.name}的复诊改到新的时间，可在下面查看或继续调整。`);
       } else {
-        await createBooking(caregiverId, elder.elderId, request);
+        await createBooking(caregiverId, elder.elderId, request, card.confirmationId);
         setNotice(`已为${elder.name}约好${department.name}复诊，可在下面查看或继续调整。`);
       }
       const rows = await getAppointments(elder.elderId);
@@ -422,7 +548,7 @@ export function CareBookingView({ caregiverId, elder, onBack, onFinished }: {
               <span className="min-w-0 flex-1">修改</span>
               <ChevronRight className="size-5 text-muted-foreground" />
             </button>
-            <button type="button" onClick={() => { setConfirmingCancel(value => !value); setCancelError(''); }} className="flex min-h-14 items-center gap-3 rounded-2xl border border-[#f0c0b5] bg-[#fdeeea] px-5 text-left text-lg font-bold text-[#a1452f] shadow-sm active:scale-[0.99]">
+            <button type="button" onClick={() => void toggleCancelPanel()} className="flex min-h-14 items-center gap-3 rounded-2xl border border-[#f0c0b5] bg-[#fdeeea] px-5 text-left text-lg font-bold text-[#a1452f] shadow-sm active:scale-[0.99]">
               <span className="grid size-10 shrink-0 place-items-center rounded-xl bg-white text-[#a1452f]"><CalendarDays className="size-5" /></span>
               <span className="min-w-0 flex-1">取消这次预约</span>
               <ChevronRight className="size-5" />
@@ -432,18 +558,42 @@ export function CareBookingView({ caregiverId, elder, onBack, onFinished }: {
           {confirmingCancel && (
             <section className="rounded-3xl border border-[#f0c0b5] bg-[#fff5f2] p-5 shadow-sm">
               <p className="text-lg font-bold text-[#a1452f]">确认要取消这次复诊吗？</p>
-              <p className="mt-2 text-base leading-7 text-muted-foreground">取消后号源会立即释放、已创建的复诊提醒一并停用，且此操作不可撤销；如需新的安排，可在下方重新代约。</p>
+
+              {cancelPreparing && (
+                <p className="mt-3 flex items-center gap-2 text-base text-muted-foreground"><LoaderCircle className="size-5 animate-spin" />正在核对要取消的是哪一张…</p>
+              )}
+
+              {cancelPreview && (
+                <>
+                  <p className="mt-2 text-base leading-7 text-muted-foreground">要取消的是{elder.name}名下这一张：</p>
+                  <p className="mt-1 text-base font-bold">{cancelPreview.hospital} · {cancelPreview.department}</p>
+                  <p className="text-base font-bold">{formatHM(cancelPreview.time)} {formatDate(cancelPreview.date)} {weekdayOf(cancelPreview.date)} · {cancelPreview.arrangement}</p>
+                  <ul className="mt-3 space-y-2 border-t border-[#f0c0b5] pt-3">
+                    {cancelPreview.operations.map(item => (
+                      <li key={item} className="flex items-start gap-2 text-base text-muted-foreground"><TriangleAlert className="mt-1 size-4 shrink-0 text-[#a1452f]" />{item}</li>
+                    ))}
+                  </ul>
+                </>
+              )}
+
+              {!cancelPreview && !cancelPreparing && (
+                <p className="mt-2 text-base leading-7 text-muted-foreground">取消后号源会立即释放、已创建的复诊提醒一并停用，且此操作不可撤销；如需新的安排，可在下方重新代约。</p>
+              )}
+
               {cancelError && (
                 <p className="mt-3 flex items-start gap-2 rounded-2xl bg-red-50 px-4 py-3 text-[15px] font-semibold text-red-700 ring-1 ring-red-200">
                   <TriangleAlert className="mt-0.5 size-5 shrink-0" />{cancelError}
                 </p>
               )}
               <div className="mt-4 flex gap-3">
-                <button type="button" onClick={() => { setConfirmingCancel(false); setCancelError(''); }} disabled={cancelling} className="min-h-12 flex-1 rounded-2xl bg-muted px-4 text-base font-bold text-muted-foreground active:scale-[0.99] disabled:opacity-40">再想想</button>
-                <button type="button" onClick={() => void cancelCurrent()} disabled={cancelling} className="flex min-h-12 flex-1 items-center justify-center gap-2 rounded-2xl bg-[#a1452f] px-4 text-base font-bold text-white active:scale-[0.99] disabled:opacity-40">
+                <button type="button" onClick={() => { setConfirmingCancel(false); setCancelError(''); setCancelPreview(null); }} disabled={cancelling} className="min-h-12 flex-1 rounded-2xl bg-muted px-4 text-base font-bold text-muted-foreground active:scale-[0.99] disabled:opacity-40">再想想</button>
+                <button type="button" onClick={() => void cancelCurrent()} disabled={cancelling || !cancelPreview} className="flex min-h-12 flex-1 items-center justify-center gap-2 rounded-2xl bg-[#a1452f] px-4 text-base font-bold text-white active:scale-[0.99] disabled:opacity-40">
                   {cancelling ? <><LoaderCircle className="size-5 animate-spin" />正在取消…</> : '确认取消'}
                 </button>
               </div>
+              {!cancelPreview && !cancelPreparing && (
+                <button type="button" onClick={() => void loadCancelPreview()} className="mt-3 w-full text-base font-bold text-[#a1452f] underline">重新核对</button>
+              )}
             </section>
           )}
         </main>
@@ -657,6 +807,42 @@ export function CareBookingView({ caregiverId, elder, onBack, onFinished }: {
               </button>
             </section>
 
+            <section className="rounded-3xl border bg-card p-5 shadow-sm">
+              <h2 className="flex items-center gap-2 text-lg font-bold"><ClipboardCheck className="size-5 text-primary" />确认后会发生什么</h2>
+
+              {preparing && (
+                <p className="mt-3 flex items-center gap-2 text-base text-muted-foreground"><LoaderCircle className="size-5 animate-spin" />正在核对这次要办理的内容…</p>
+              )}
+
+              {previewError && !preparing && (
+                <p className="mt-3 flex items-start gap-2 rounded-2xl bg-red-50 px-4 py-3 text-[15px] font-semibold text-red-700 ring-1 ring-red-200">
+                  <TriangleAlert className="mt-0.5 size-5 shrink-0" />{previewError}
+                </p>
+              )}
+
+              {card && (
+                <>
+                  <dl className="mt-3 space-y-1.5 text-base">
+                    <div className="flex gap-2">
+                      <dt className="shrink-0 text-muted-foreground">替谁办</dt>
+                      <dd className="font-semibold">{card.serviceSubject}</dd>
+                    </div>
+                    <div className="flex gap-2">
+                      <dt className="shrink-0 text-muted-foreground">预约归属</dt>
+                      <dd className="min-w-0 font-semibold">{card.arrangement}</dd>
+                    </div>
+                  </dl>
+                  <ul className="mt-3 space-y-2 border-t border-border/70 pt-3">
+                    {card.operations.map(item => (
+                      <li key={item} className="flex items-start gap-2 text-base text-muted-foreground">
+                        <Check className="mt-1 size-4 shrink-0 text-primary" />{item}
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
+            </section>
+
             {submitError && (
               <p className="flex items-start gap-2 rounded-2xl bg-red-50 px-4 py-3 text-[15px] font-semibold text-red-700 ring-1 ring-red-200">
                 <TriangleAlert className="mt-0.5 size-5 shrink-0" />{submitError}
@@ -673,7 +859,7 @@ export function CareBookingView({ caregiverId, elder, onBack, onFinished }: {
         {!hospitals && error && step === 0 && (
           <section className="rounded-3xl border bg-card p-6 text-center">
             <p className="text-lg">{error}</p>
-            <button type="button" onClick={() => window.location.reload()} className="mt-4 inline-flex min-h-12 items-center gap-2 rounded-2xl bg-primary px-5 font-bold text-white">重新读取</button>
+            <button type="button" onClick={() => void loadHospitals()} className="mt-4 inline-flex min-h-12 items-center gap-2 rounded-2xl bg-primary px-5 font-bold text-white">重新读取</button>
           </section>
         )}
       </main>
@@ -689,10 +875,14 @@ export function CareBookingView({ caregiverId, elder, onBack, onFinished }: {
         <button
           type="button"
           onClick={step === 3 ? () => void submit() : advance}
-          disabled={(step < 3 && !readyForNext()) || submitting || stepLoading}
+          disabled={(step < 3 && !readyForNext()) || submitting || stepLoading || (step === 3 && !card)}
           className="flex min-h-14 min-w-0 flex-1 items-center justify-center gap-2 rounded-2xl bg-primary px-4 text-lg font-bold text-white shadow-lg shadow-primary/25 active:scale-[0.99] disabled:opacity-40"
         >
-          {submitting ? <><LoaderCircle className="size-5 animate-spin" />{mode === 'modify' ? '正在修改…' : '正在代约…'}</> : step === 3 ? <>{mode === 'modify' ? '确认修改' : '确认代约'}<ChevronRight className="size-5" /></> : <>下一步<ChevronRight className="size-5" /></>}
+          {submitting
+            ? <><LoaderCircle className="size-5 animate-spin" />{mode === 'modify' ? '正在修改…' : '正在代约…'}</>
+            : step === 3
+              ? preparing ? <><LoaderCircle className="size-5 animate-spin" />正在核对…</> : <>{mode === 'modify' ? '确认修改' : '确认代约'}<ChevronRight className="size-5" /></>
+              : <>下一步<ChevronRight className="size-5" /></>}
         </button>
       </footer>
     </>

@@ -38,6 +38,46 @@ class LlmAnswerGeneratorTests {
                 .isEqualTo(draft);
     }
 
+    /**
+     * 用户报的那条：草稿还在问「几点」，回复却宣布「已经记下了」——而这一轮一条都没写。
+     *
+     * <p>用真实会话里的原话与那条被改写出来的回复，因为这条 bug 的形状就是「措辞听起来完全合理」，
+     * 换成抽象的“某件事办好了”反而测不出它。
+     */
+    @Test
+    void replyCannotAnnounceAWriteTheDraftIsStillAskingAbout() {
+        String draft = "还差具体几点，请告诉我几点提醒。";
+        LlmAnswerGenerator generator = generator(
+                "{\"reply\":\"好的，9月16日（周三）吃药这件事已经记下了。接下来办复诊：请问您想去哪家医院？\"}");
+
+        assertThat(generator.generate(context("ASK_HOSPITAL", "FOLLOWUP_FLOW", draft, false)))
+                .isEqualTo(draft);
+    }
+
+    @Test
+    void memorizedClaimWithNoDraftBehindItIsRejected() {
+        // 「帮我记一下我对青霉素过敏」被当成闲聊：回复说记下了，库里一条都没有
+        String draft = "这件事您可以再说一遍，我帮您记下来。";
+        LlmAnswerGenerator generator = generator("{\"reply\":\"好的，我记下了：您对青霉素过敏。\"}");
+
+        assertThat(generator.generate(context("ASK_HOSPITAL", "FOLLOWUP_FLOW", draft, false)))
+                .isEqualTo(draft);
+    }
+
+    /**
+     * 反过来：这一轮真的落库了，草稿本身就在说「已记下」，模型换一种完成说法是允许的。
+     * 判据跟着草稿走，不是禁用某几个词——否则模型连复述已办成的事都不敢。
+     */
+    @Test
+    void modelWordingIsKeptWhenTheDraftItselfAnnouncesTheWrite() {
+        String draft = "好的，已记下：“我对青霉素过敏”。这条作为长期备忘保留。";
+        LlmAnswerGenerator generator = generator(
+                "{\"reply\":\"已经记好了：您对青霉素过敏，这条我给您长期留着。\"}");
+
+        assertThat(generator.generate(context("ASK_HOSPITAL", "FOLLOWUP_FLOW", draft, false)))
+                .contains("长期");
+    }
+
     private LlmAnswerGenerator generator(String response) {
         ModelGateway gateway = new ModelGateway() {
             @Override public String complete(ModelRequest request) { return response; }

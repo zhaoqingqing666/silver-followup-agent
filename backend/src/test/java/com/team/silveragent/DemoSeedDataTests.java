@@ -29,7 +29,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 @SpringBootTest(properties = {
         "spring.datasource.url=jdbc:h2:mem:silver-agent-demo-seed;DB_CLOSE_DELAY=-1",
-        "agent.llm.enabled=false"})
+        "agent.model.enabled=false"})
 class DemoSeedDataTests {
 
     @Autowired ScheduleTool scheduleTool;

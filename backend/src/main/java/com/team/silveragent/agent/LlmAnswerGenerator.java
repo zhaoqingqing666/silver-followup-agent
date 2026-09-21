@@ -99,6 +99,10 @@ public class LlmAnswerGenerator implements AnswerGenerator {
         // 权威草稿已经定了这一轮问什么，模型只能改措辞、不能改问题：一旦这轮问的是草稿里没有的
         // 流程问题，界面按钮（跟着草稿走）和回复文字（跟着模型走）就会各说各话。
         if (introducesFlowQuestion(reply) && !introducesFlowQuestion(context.authoritativeDraft())) return false;
+        // 反过来也一样：草稿没宣布办成的事，回复也不许宣布。实测过「还差具体几点，请告诉我几点提醒」
+        // 被改写成「9月16日吃药这件事已经记下了」——老人看到的是后一句，而库里一条都没有。
+        // 判据是权威草稿本身：草稿说了「已记下」，那这一轮是真的落了库，模型照着改措辞没问题。
+        if (WriteClaims.announces(reply) && !WriteClaims.announces(context.authoritativeDraft())) return false;
         return true;
     }
 

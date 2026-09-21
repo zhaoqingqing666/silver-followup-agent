@@ -38,9 +38,10 @@ class ConfirmationDispatcherTests {
     private final ManagedCancelExecutor managedCancels = mock(ManagedCancelExecutor.class);
     private final CaregiverBookingExecutor caregiverBookings = mock(CaregiverBookingExecutor.class);
     private final CancellationExecutor cancellations = mock(CancellationExecutor.class);
+    private final HealthRecordExecutor healthRecords = mock(HealthRecordExecutor.class);
     private final ConfirmationSupport support = mock(ConfirmationSupport.class);
     private final ConfirmationDispatcher dispatcher = new ConfirmationDispatcher(
-            bookings, memos, managedCancels, caregiverBookings, cancellations);
+            bookings, memos, managedCancels, caregiverBookings, cancellations, healthRecords);
 
     private ConversationState conversation() {
         return new ConversationState("conversation", "user-001");
@@ -50,7 +51,7 @@ class ConfirmationDispatcherTests {
         return new PendingOperation("credential", kind, List.of(targets));
     }
 
-    /** 六个 Kind，各归各家。 */
+    /** 七个 Kind，各归各家。 */
     @Test
     void eachKindGoesToItsOwnExecutor() {
         when(cancellations.cancel(any(), anyList())).thenReturn(new CancellationExecutor.Result(List.of(), false));
@@ -64,6 +65,12 @@ class ConfirmationDispatcherTests {
 
         dispatcher.dispatch(conversation(), operation(PendingOperation.Kind.MEMO), true, support);
         verify(memos).commit(any(), any());
+
+        // 健康记录与备忘同一族（都往自己的表里写一条），但落到各自的执行器：
+        // 记一条备忘和记一次血压不是一件事，写错地方的后果是一条看起来正常的错数据
+        dispatcher.dispatch(conversation(), operation(PendingOperation.Kind.HEALTH_RECORD), true, support);
+        verify(healthRecords).commit(any(), any());
+        verify(memos, org.mockito.Mockito.times(1)).commit(any(), any());
 
         dispatcher.dispatch(conversation(), operation(PendingOperation.Kind.CANCEL_MANAGED, "appt-1"), true, support);
         verify(managedCancels).commit(any(), any(), any());
@@ -90,6 +97,7 @@ class ConfirmationDispatcherTests {
         when(cancellations.abandon(any())).thenReturn(new CancellationExecutor.Result(List.of(), false));
 
         dispatcher.dispatch(conversation(), operation(PendingOperation.Kind.MEMO), true, support);
+        dispatcher.dispatch(conversation(), operation(PendingOperation.Kind.HEALTH_RECORD), true, support);
         dispatcher.dispatch(conversation(), operation(PendingOperation.Kind.CANCEL_MANAGED, "appt-1"), true, support);
         dispatcher.dispatch(conversation(), operation(PendingOperation.Kind.CANCEL_APPOINTMENTS, "appt-1"), true, support);
         dispatcher.dispatch(conversation(), operation(PendingOperation.Kind.CANCEL_APPOINTMENTS_CAREGIVER, "appt-1"),
@@ -117,6 +125,11 @@ class ConfirmationDispatcherTests {
         dispatcher.dispatch(conversation(), operation(PendingOperation.Kind.MEMO), false, support);
         verify(memos).refuse(any(), any());
         verify(memos, never()).commit(any(), any());
+
+        // 健康记录也是：点了「先不用」，那条数值一条都不许落库
+        dispatcher.dispatch(conversation(), operation(PendingOperation.Kind.HEALTH_RECORD), false, support);
+        verify(healthRecords).refuse(any(), any());
+        verify(healthRecords, never()).commit(any(), any());
 
         dispatcher.dispatch(conversation(), operation(PendingOperation.Kind.CANCEL_MANAGED, "appt-1"), false, support);
         verify(managedCancels).refuse(any(), any(), any());

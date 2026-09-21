@@ -4,21 +4,34 @@ import { DEMO_USER_ID } from '@/lib/app-config';
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:8080';
 
 /**
+ * 记录页顶部那排筛选按钮用的项目词表。
+ *
+ * 后端 HealthRecordParser 不管老人说的是“高压”“收缩压”还是“血压”，
+ * 都按同一张表归成标准项目名存下来，所以库里有的就是这六个，按钮也就这六个。
+ */
+export const RECORD_ITEMS = ['血压', '血糖', '心率', '体温', '体重', '血氧'] as const;
+
+/**
  * 老人端健康记录：助手帮老人记下的实测数值（按测量时间倒序）。
  *
+ * @param item   只取某一个项目；null/空表示不限项目（“全部”）。
  * @param limit  最多几条，缺省 3 条（首页只露最近几条）。
  * @param offset 跳过前几条：记录页一页页往回翻历史用。
  */
-export async function getHealthRecords(limit = 3, offset = 0, userId = DEMO_USER_ID): Promise<HealthRecord[]> {
+export async function getHealthRecords(limit = 3, offset = 0, item: string | null = null,
+                                       userId = DEMO_USER_ID): Promise<HealthRecord[]> {
+  const filter = item ? `&item=${encodeURIComponent(item)}` : '';
   const response = await fetch(
-      `${API_BASE}/api/users/${userId}/health-records?limit=${limit}&offset=${offset}`, { cache: 'no-store' });
+      `${API_BASE}/api/users/${userId}/health-records?limit=${limit}&offset=${offset}${filter}`,
+      { cache: 'no-store' });
   if (!response.ok) throw new Error('无法读取健康记录');
   return response.json();
 }
 
-/** 一共记了多少条：首页按钮上的“共N条”用，也用来判断后面还有没有更早的。 */
-export async function getHealthRecordTotal(userId = DEMO_USER_ID): Promise<number> {
-  const response = await fetch(`${API_BASE}/api/users/${userId}/health-records/count`, { cache: 'no-store' });
+/** 一共记了多少条：首页按钮上的“共N条”用，也用来判断后面还有没有更早的。筛选时要传同一个 item。 */
+export async function getHealthRecordTotal(item: string | null = null, userId = DEMO_USER_ID): Promise<number> {
+  const filter = item ? `?item=${encodeURIComponent(item)}` : '';
+  const response = await fetch(`${API_BASE}/api/users/${userId}/health-records/count${filter}`, { cache: 'no-store' });
   if (!response.ok) throw new Error('无法读取健康记录条数');
   const body: { total?: number } = await response.json();
   return body.total ?? 0;
@@ -54,8 +67,18 @@ export interface HealthReportResult {
   message: string | null;
 }
 
-export async function sendHealthReport(range: HealthReportRange, userId = DEMO_USER_ID): Promise<HealthReportResult> {
-  const response = await fetch(`${API_BASE}/api/users/${userId}/health-report?range=${range}`,
+/**
+ * 汇总一段时间的记录发给家属。
+ *
+ * @param item 只发某一个项目；null/空表示全部项目。
+ *             页面筛着“血压”时发的就该只有血压——筛了又全发，老人看着是血压、
+ *             家属收到的却是全部，两边说的不是一回事。发不出去时的回话也会点名项目
+ *             （“最近一周没有血压记录”）。
+ */
+export async function sendHealthReport(range: HealthReportRange, item: string | null = null,
+                                      userId = DEMO_USER_ID): Promise<HealthReportResult> {
+  const filter = item ? `&item=${encodeURIComponent(item)}` : '';
+  const response = await fetch(`${API_BASE}/api/users/${userId}/health-report?range=${range}${filter}`,
       { method: 'POST', cache: 'no-store' });
   if (!response.ok) throw new Error('发送失败');
   return response.json();
