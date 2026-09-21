@@ -21,7 +21,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 @SpringBootTest(properties = {
         "spring.datasource.url=jdbc:h2:mem:silver-agent-elder-plan;DB_CLOSE_DELAY=-1",
-        "agent.llm.enabled=false"})
+        "agent.model.enabled=false"})
 class ElderManagedPlanTests {
 
     /** 代约那天 = 演示的「下周三」；改期目标 = 次日，两天都有滚动号源。 */

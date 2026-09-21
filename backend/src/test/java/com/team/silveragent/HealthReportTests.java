@@ -22,7 +22,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 @SpringBootTest(properties = {
         "spring.datasource.url=jdbc:h2:mem:silver-agent-report;DB_CLOSE_DELAY=-1",
-        "agent.llm.enabled=false",
+        "agent.model.enabled=false",
         // 测试自己调 sendWeekly 验去重，不要启动补发插进来抢跑
         "health-report.weekly.enabled=false"})
 class HealthReportTests {
@@ -42,6 +42,13 @@ class HealthReportTests {
     private void seed(String item, String valueNum, String valueText, String unit, int daysAgo) {
         records.create("user-001", item, valueNum == null ? null : new BigDecimal(valueNum), valueText, unit,
                 "测试", "conv-seed", MemoParser.nowInDemoZone().minusDays(daysAgo));
+    }
+
+    /** 从对话里报一个数并点头确认（实测数值要过确认卡才落库）。 */
+    private void reportInChat(String conversationId, String sentence) {
+        AgentTurnResponse ask = service.chat(conversationId, sentence);
+        assertThat(ask.confirmation()).as(ask.reply()).isNotNull();
+        service.confirm(conversationId, true, ask.confirmation().confirmationId());
     }
 
     private int notificationCount() {
@@ -176,8 +183,8 @@ class HealthReportTests {
     @Test
     void theAssistantSendsItOnOneSentence() {
         AgentTurnResponse start = service.start("user-001");
-        service.chat(start.conversationId(), "我的血压是138/86");
-        service.chat(start.conversationId(), "血糖6.4");
+        reportInChat(start.conversationId(), "我的血压是138/86");
+        reportInChat(start.conversationId(), "血糖6.4");
 
         AgentTurnResponse reply = service.chat(start.conversationId(), "把这个月的血压发给女儿");
 
@@ -192,7 +199,7 @@ class HealthReportTests {
     @Test
     void theAssistantSaysWhichWindowItAssumed() {
         AgentTurnResponse start = service.start("user-001");
-        service.chat(start.conversationId(), "血糖6.4");
+        reportInChat(start.conversationId(), "血糖6.4");
 
         AgentTurnResponse reply = service.chat(start.conversationId(), "把健康记录发给家属");
 

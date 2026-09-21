@@ -36,14 +36,17 @@ final class ConfirmationDispatcher {
     private final ManagedCancelExecutor managedCancels;
     private final CaregiverBookingExecutor caregiverBookings;
     private final CancellationExecutor cancellations;
+    private final HealthRecordExecutor healthRecords;
 
     ConfirmationDispatcher(BookingExecutor bookings, MemoExecutor memos, ManagedCancelExecutor managedCancels,
-                           CaregiverBookingExecutor caregiverBookings, CancellationExecutor cancellations) {
+                           CaregiverBookingExecutor caregiverBookings, CancellationExecutor cancellations,
+                           HealthRecordExecutor healthRecords) {
         this.bookings = bookings;
         this.memos = memos;
         this.managedCancels = managedCancels;
         this.caregiverBookings = caregiverBookings;
         this.cancellations = cancellations;
+        this.healthRecords = healthRecords;
     }
 
     /**
@@ -57,6 +60,11 @@ final class ConfirmationDispatcher {
         switch (operation.kind()) {
             case MEMO -> {
                 return approved ? memos.commit(state, support) : memos.refuse(state, support);
+            }
+            // 健康记录与备忘同一族：写一条老人的实测数值，不碰预约链路。拒绝同样要把那份草稿
+            // 收干净——他报的数不会因为点了一次「先不用」就留下半条记录。
+            case HEALTH_RECORD -> {
+                return approved ? healthRecords.commit(state, support) : healthRecords.refuse(state, support);
             }
             case CANCEL_MANAGED -> {
                 return approved ? managedCancels.commit(state, operation, support)
@@ -104,9 +112,27 @@ final class ConfirmationDispatcher {
      *
      * <p>这两条路<b>没有凭据</b>，所以不校验、也不消费凭据——它们本来就不需要老人点头。
      */
-    AgentTurnResponse writeMemo(ConversationState state, String text, java.time.LocalDateTime at,
+    AgentTurnResponse writeMemo(ConversationState state, String text, java.util.List<java.time.LocalDateTime> ats,
                                 String repeatRule, ConfirmationSupport support) {
-        return memos.write(state, text, at, repeatRule, support);
+        return memos.write(state, text, ats, repeatRule, support);
+    }
+
+    /**
+     * 健康记录还有一条不经确认卡的直写入口：老人已经被反问过「这个数不太对」，并且当场
+     * 答了「就按这个记下来」或重报了一个数——他刚为这个数表过态，不该再让他点头第二次。
+     *
+     * <p>和 {@link #writeMemo} 一样：这条路<b>没有凭据</b>，不校验也不消费凭据；
+     * 落的是同一个执行器、同一套回读话术。
+     */
+    AgentTurnResponse writeHealthRecord(ConversationState state, String item, java.math.BigDecimal valueNum,
+                                        String valueText, String unit, String raw, java.time.LocalDateTime at,
+                                        ConfirmationSupport support) {
+        return healthRecords.write(state, item, valueNum, valueText, unit, raw, at, support);
+    }
+
+    /** 丢掉待记的那条数值（老人改口重说、跑题、或反问状态不完整时）。 */
+    void clearHealthRecordDraft(ConversationState state) {
+        healthRecords.clearDraft(state);
     }
 
     private AgentTurnResponse executeCancellation(ConversationState state,

@@ -2,6 +2,7 @@ package com.team.silveragent.application;
 
 import com.team.silveragent.domain.model.AgentTurnResponse;
 import com.team.silveragent.domain.model.AgentTurnResponse.QuickReply;
+import com.team.silveragent.application.memo.MemoStore;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -66,8 +67,26 @@ abstract class ConfirmationSupport {
     /** 记完备忘/健康数值后把话头交回原来的办理上下文。 */
     abstract AgentTurnResponse memoHandoff(ConversationState state, String note);
 
-    /** 备忘落库成功后的回读话术（“已记下…到点提醒您”）。 */
-    abstract String memoRecordedReply(String text, LocalDateTime at, String repeatRule);
+    /**
+     * 备忘落库成功后的回读话术（“已记下…到点提醒您”）。
+     *
+     * <p>收的是<b>真写进库的那几条</b>而不是要写的那几条：一句话说几天就是几条，回读要逐条念
+     * 日期，老人才能发现其中哪天听错了；念的又必须是库里那几条，不能是执行器手里那份打算写的。
+     */
+    abstract String memoRecordedReply(List<MemoStore.MemoView> created, String repeatRule);
+
+    /**
+     * 多天备忘只写成了其中几条时的回读话术：写成的逐条念，没写成的如实说清楚是哪几天。
+     *
+     * <p>这条口子存在的理由就是"不许含糊"：一句话说了三天、第二天写库失败时，既不能把三天
+     * 都算成记下了，也不能说"没记上"把已经落库的那条抹掉——老人照着回读去首页核对，看到的
+     * 必须和话里说的一致。
+     */
+    abstract String memoPartlyRecordedReply(List<MemoStore.MemoView> created,
+                                            List<LocalDateTime> missed, String repeatRule);
+
+    /** 健康数值落库成功后的回读话术（“已记下：9月14日 21:30 血压 100 mmHg…”）。 */
+    abstract String healthRecordedReply(String item, String valueText, String unit, LocalDateTime at);
 
     /** 这张卡是不是「照草稿开新预约」、而且草稿里那个时段已经过去了。 */
     abstract boolean draftSlotExpired(ConversationState state);

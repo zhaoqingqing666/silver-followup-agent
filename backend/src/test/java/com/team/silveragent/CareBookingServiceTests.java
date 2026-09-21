@@ -22,7 +22,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 @SpringBootTest(properties = {
         "spring.datasource.url=jdbc:h2:mem:silver-agent-care;DB_CLOSE_DELAY=-1",
-        "agent.llm.enabled=false"})
+        "agent.model.enabled=false"})
 class CareBookingServiceTests {
 
     @Autowired CareBookingService booking;
@@ -255,5 +255,145 @@ class CareBookingServiceTests {
         CareService.ElderSummary replaced = care.elders("user-f001").stream()
                 .filter(item -> item.elderId().equals("user-001")).findFirst().orElseThrow();
         assertThat(replaced.alert()).isNull();
+    }
+
+    /* ---------- 表单路径的两段式确认：预览开票据，提交核销票据 ---------- */
+
+    @Test
+    void previewSaysWhoItIsForAndWhatWillHappen() {
+        CareBookingService.BookingRequest req = new CareBookingService.BookingRequest(
+                "h001", "d001", DAY, PLAIN, true, "打车", true);
+        CareBookingService.BookingPreview card = booking.previewBooking("user-f001", "user-001", req);
+
+        // N-03 点名要的两条：替谁办、这份预约记在谁名下
+        assertThat(card.serviceSubject()).isEqualTo("王阿姨");
+        assertThat(card.arrangement()).isEqualTo("由女儿 小丽 代约");
+        assertThat(card.action()).isEqualTo(CareBookingService.ACTION_BOOK);
+        // 目录接口的医院名去掉了「（模拟）」后缀——确认卡和上面选医院时看到的是同一个名字
+        assertThat(card.hospital()).isEqualTo("市第一医院");
+        assertThat(card.department()).isEqualTo("心内科");
+        assertThat(card.date()).isEqualTo(DAY);
+        assertThat(card.confirmationId()).isNotBlank();
+
+        // 预览不写任何业务数据
+        assertThat(count("appointments")).isZero();
+        assertThat(count("reminders")).isZero();
+        assertThat(jdbc.queryForObject(
+                "SELECT COUNT(*) FROM appointment_slots WHERE available=FALSE", Integer.class)).isZero();
+    }
+
+    @Test
+    void previewOmitsOperationsTheUserDeclined() {
+        CareBookingService.BookingPreview card = booking.previewBooking("user-f001", "user-001",
+                new CareBookingService.BookingRequest("h001", "d001", DAY, PLAIN, false, "打车", false));
+        assertThat(card.operations()).noneMatch(item -> item.contains("出发提醒"));
+        assertThat(card.operations()).noneMatch(item -> item.contains("陪同人"));
+        assertThat(card.needTravel()).isFalse();
+    }
+
+    @Test
+    void confirmedBookingWritesWhatThePreviewDescribed() {
+        CareBookingService.BookingRequest req = request(DAY, PLAIN, "打车", true);
+        CareBookingService.BookingPreview card = booking.previewBooking("user-f001", "user-001", req);
+
+        AppointmentRecordStore.AppointmentView view = booking.bookConfirmed(
+                "user-f001", "user-001", req, card.confirmationId());
+
+        // 预约卡片上的医院名来自号源记录，仍带「（模拟）」；确认卡用的是目录里的名字。
+        // 两边指的是同一家医院，比对时先归一化。
+        assertThat(view.hospital()).startsWith(card.hospital());
+        assertThat(view.department()).isEqualTo(card.department());
+        assertThat(view.date().toString()).isEqualTo(card.date());
+        assertThat(view.time().toString()).startsWith(card.time());
+    }
+
+    @Test
+    void ticketCannotBeReused() {
+        CareBookingService.BookingRequest req = request(DAY, PLAIN, "打车", false);
+        String ticket = booking.previewBooking("user-f001", "user-001", req).confirmationId();
+
+        booking.bookConfirmed("user-f001", "user-001", req, ticket);
+        // 一次性：同一张票据再提交一次必须被拒
+        booking.cancelUpcoming("user-f001", "user-001");
+        assertThatThrownBy(() -> booking.bookConfirmed("user-f001", "user-001", req, ticket))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("确认已经失效");
+    }
+
+    @Test
+    void submittingChangedContentUnderAnOldTicketIsRejected() {
+        CareBookingService.BookingRequest shown = request(DAY, PLAIN, "打车", false);
+        String ticket = booking.previewBooking("user-f001", "user-001", shown).confirmationId();
+
+        // 用户看到的是 09:00，提交的却是另一格 —— 快照对不上
+        CareBookingService.BookingRequest tampered = request(DAY, CLASH, "打车", false);
+        assertThatThrownBy(() -> booking.bookConfirmed("user-f001", "user-001", tampered, ticket))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("确认已经失效");
+        assertThat(count("appointments")).isZero();
+    }
+
+    @Test
+    void ticketDoesNotTransferBetweenCaregiversOrActions() {
+        CareBookingService.BookingRequest req = request(DAY, PLAIN, "打车", false);
+        // 志愿者替同一长辈开卡的票据，不能拿去走家属的名头
+        String ticket = booking.previewBooking("user-v001", "user-001", req).confirmationId();
+        assertThatThrownBy(() -> booking.bookConfirmed("user-f001", "user-001", req, ticket))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("确认已经失效");
+
+        // 代约的票据不能拿去执行改期
+        String fresh = booking.previewBooking("user-f001", "user-001", req).confirmationId();
+        booking.bookConfirmed("user-f001", "user-001", req, fresh);
+        CareBookingService.BookingRequest next = request(DAY, CLASH, "打车", false);
+        assertThatThrownBy(() -> booking.modifyConfirmed("user-f001", "user-001", next, fresh))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("确认已经失效");
+    }
+
+    @Test
+    void cancelRequiresATicketMatchingTheAppointment() {
+        booking.book("user-f001", "user-001", request(DAY, PLAIN, "打车", false));
+
+        CareBookingService.BookingPreview card = booking.previewCancel("user-f001", "user-001");
+        assertThat(card.action()).isEqualTo(CareBookingService.ACTION_CANCEL);
+        assertThat(card.hospital()).isEqualTo("市第一医院（模拟）");
+        assertThat(card.operations()).anyMatch(item -> item.contains("不可撤销"));
+
+        // 取消预览不写数据：取消动作本身还没发生
+        assertThat(jdbc.queryForObject("SELECT status FROM appointments", String.class)).isEqualTo("CONFIRMED");
+
+        assertThat(booking.cancelConfirmed("user-f001", "user-001", card.confirmationId()).status())
+                .isEqualTo("CANCELLED");
+    }
+
+    /**
+     * 改期是「原地更新同一条记录」，appointmentId 不变。所以只比 id 的取消门禁挡不住
+     * 「看着周三 心内科、实际取消周五 心内科」；快照里带上日期时间才挡得住。
+     */
+    @Test
+    void cancelTicketIsInvalidatedWhenTheAppointmentIsRescheduled() {
+        booking.book("user-f001", "user-001", request(DAY, PLAIN, "打车", false));
+        String ticket = booking.previewCancel("user-f001", "user-001").confirmationId();
+
+        booking.modify("user-f001", "user-001", request(DAY, CLASH, "打车", false));
+
+        assertThatThrownBy(() -> booking.cancelConfirmed("user-f001", "user-001", ticket))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("确认已经失效");
+        assertThat(jdbc.queryForObject(
+                "SELECT status FROM appointments", String.class)).isEqualTo("CONFIRMED");
+    }
+
+    @Test
+    void modifyPreviewKeepsTheOriginalOwnerAndShowsIt() {
+        booking.book("user-v001", "user-001", request(DAY, PLAIN, "打车", false));
+
+        CareBookingService.BookingPreview card = booking.previewModify("user-f001", "user-001",
+                request(DAY, CLASH, "打车", false));
+
+        assertThat(card.action()).isEqualTo(CareBookingService.ACTION_MODIFY);
+        assertThat(card.arrangement()).isEqualTo("由社区志愿者 李阿姨 代约");
+        assertThat(card.operations()).anyMatch(item -> item.contains("预约归属不变"));
     }
 }

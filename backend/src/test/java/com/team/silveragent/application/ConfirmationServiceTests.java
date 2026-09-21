@@ -57,6 +57,9 @@ class ConfirmationServiceTests {
         ConversationState state = conversation();
         // 备忘卡要写的那段正文在签发这一刻就得在（见 aMemoCardCannotBeIssuedWithoutItsText）。
         state.pendingMemoText = "明早八点提醒我吃药";
+        // 到点时间也一样要在。"没有提醒"写成空列表、字段没设过是 null，两者不是一回事：
+        // 卡上那一行提醒时间就是照着它写出来的（见 ConversationState.pendingMemoAts）。
+        state.pendingMemoAts = List.of();
         String id = confirmations.issue(state, ConfirmationService.PendingOperation.Kind.MEMO, List.of());
 
         assertThat(confirmations.consume(state, "someone-elses-id").accepted()).isFalse();
@@ -516,6 +519,8 @@ class ConfirmationServiceTests {
         ConversationState state = conversation();
         state.pendingAction = "MEMO";
         state.pendingMemoText = "明早八点提醒我吃药";
+        // 与上面那张卡同一个道理：到点时间（空列表＝长期备忘）也是签发时要有的草稿。
+        state.pendingMemoAts = List.of();
         confirmations.issue(state, ConfirmationService.PendingOperation.Kind.MEMO, List.of());
 
         confirmations.clear(state);

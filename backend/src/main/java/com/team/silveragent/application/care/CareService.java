@@ -118,20 +118,23 @@ public class CareService {
         List<TimelineEvent> events = new ArrayList<>();
 
         // 1) 有意义的工具执行记录（排除内部查询与已在通知里体现的 family.notify）
+        // 连 success 一起读：同一次工具调用失败和成功在时间线上是两件事，
+        // 只按工具名取标签会把「复诊提醒没建成」显示成绿色的「已创建复诊提醒」。
+        // 名单取自 TOOL_LABELS 本身（见 TIMELINE_TOOLS）：两份名单各写一遍，迟早一份加了
+        // 另一份没加，而这里漏掉一条的表现是「时间线上少了一件事」——家属看不出来少了什么。
         jdbc.query("""
-                SELECT tl.tool_name, tl.created_at
+                SELECT tl.tool_name, tl.created_at, tl.success
                 FROM tool_call_logs tl
                 JOIN conversation_sessions cs ON cs.id = tl.conversation_id
-                WHERE cs.user_id = ? AND tl.tool_name IN (
-                    'appointment.submit','appointment.cancel','appointment.reschedule',
-                    'appointment.queryAlternatives','schedule.checkConflict',
-                    'schedule.createReminder','travel.plan','workflow.error'
-                )
-                """, (rs, row) -> {
+                WHERE cs.user_id = ? AND tl.tool_name IN (%s)
+                """.formatted(TIMELINE_TOOLS), (rs, row) -> {
             ToolLabel label = TOOL_LABELS.get(rs.getString(1));
             if (label != null) {
+                boolean ok = rs.getBoolean(3);
                 events.add(new TimelineEvent(rs.getTimestamp(2).toLocalDateTime(),
-                        label.tone(), label.title(), null));
+                        ok ? label.tone() : label.failTone(),
+                        ok ? label.title() : label.failTitle(),
+                        null));
             }
             return null;
         }, elderUserId);
@@ -221,7 +224,11 @@ public class CareService {
         return cancelled && !hasUpcoming ? "有预约已取消，建议尽快重新安排" : null;
     }
 
-    private record ToolLabel(String tone, String title) { }
+    /**
+     * 一条工具执行在时间线上的说法。<b>成功与失败各备一套</b>：同一次「创建复诊提醒」，
+     * 成了是绿色「已创建复诊提醒」，没成就是红色「复诊提醒未创建」——家属据此决定要不要自查。
+     */
+    private record ToolLabel(String tone, String title, String failTone, String failTitle) { }
 
     private record CareEventLabel(String tone, String title) { }
 
@@ -234,14 +241,36 @@ public class CareService {
             "info", new CareEventLabel("info", "协同提醒"));
 
     private static final Map<String, ToolLabel> TOOL_LABELS = Map.of(
-            "appointment.submit", new ToolLabel("success", "预约已提交并确认"),
-            "appointment.cancel", new ToolLabel("danger", "预约已取消"),
-            "appointment.reschedule", new ToolLabel("warning", "复诊已改期"),
-            "appointment.queryAlternatives", new ToolLabel("info", "提供可替代号源"),
-            "schedule.checkConflict", new ToolLabel("info", "已检查日程冲突"),
-            "schedule.createReminder", new ToolLabel("success", "已创建复诊提醒"),
-            "travel.plan", new ToolLabel("info", "已生成出行建议"),
-            "workflow.error", new ToolLabel("danger", "办理遇到问题"));
+            "appointment.submit", new ToolLabel("success", "预约已提交并确认",
+                    "danger", "预约未能提交"),
+            "appointment.cancel", new ToolLabel("danger", "预约已取消",
+                    "danger", "取消预约未成功"),
+            "appointment.reschedule", new ToolLabel("warning", "复诊已改期",
+                    "danger", "改期未成功"),
+            "appointment.queryAlternatives", new ToolLabel("info", "提供可替代号源",
+                    "warning", "查询替代号源未成功"),
+            "schedule.checkConflict", new ToolLabel("info", "已检查日程冲突",
+                    "warning", "日程冲突未能检查"),
+            "schedule.createReminder", new ToolLabel("success", "已创建复诊提醒",
+                    "danger", "复诊提醒未创建"),
+            "travel.plan", new ToolLabel("info", "已生成出行建议",
+                    "warning", "出行建议未生成"),
+            // workflow.error 本身就是异常记录，成没成都得报，两套说法保持一致
+            "workflow.error", new ToolLabel("danger", "办理遇到问题",
+                    "danger", "办理遇到问题"));
+
+    /**
+     * 时间线上要看的那几个工具，<b>直接从 {@link #TOOL_LABELS} 的词表取</b>。
+     *
+     * <p>以前这句话在 SQL 里另写了一遍 IN 名单，和词表是两份。两份名单只要有一边加了工具名，
+     * 另一边就静默漏掉——而漏掉的表现是时间线上少一条记录，家属没法知道少了什么，比显示错更难查。
+     * 取词表当名单之后，加一个工具只改一处，看得见（有标签）和查得到（进 SQL）永远同步。
+     *
+     * <p>拼进去的都是本文件里的字面常量，不含外部输入，没有注入面。
+     */
+    private static final String TIMELINE_TOOLS = TOOL_LABELS.keySet().stream()
+            .map(name -> "'" + name + "'")
+            .collect(java.util.stream.Collectors.joining(","));
 
     /** 一条照护关系：role = FAMILY / VOLUNTEER，relationship = 女儿 / 社区志愿者 等称呼。 */
     public record CareRelation(String role, String relationship) { }

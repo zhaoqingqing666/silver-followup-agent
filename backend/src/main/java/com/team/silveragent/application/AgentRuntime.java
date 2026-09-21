@@ -22,7 +22,19 @@ final class AgentRuntime {
     record Outcome(AgentOrchestrator.Route route, ExtractedFacts facts, String replyDraft,
                    String dialogueMode, String plannerSource, String proposedTool,
                    List<PlannerToolCall> proposedTools, PlannerActionType actionType,
-                   String intent, boolean modelDriven) {
+                   String intent, boolean modelDriven, boolean javaFallback) {
+
+        /**
+         * 除「模型给了话但这话不能用」以外，所有出口都用这个：{@code javaFallback=false}，
+         * 也就是「这一轮按算出来的路由正常办」，不需要退回 Java 关键词链路。
+         */
+        Outcome(AgentOrchestrator.Route route, ExtractedFacts facts, String replyDraft,
+                String dialogueMode, String plannerSource, String proposedTool,
+                List<PlannerToolCall> proposedTools, PlannerActionType actionType,
+                String intent, boolean modelDriven) {
+            this(route, facts, replyDraft, dialogueMode, plannerSource, proposedTool, proposedTools,
+                    actionType, intent, modelDriven, false);
+        }
         /**
          * 这一轮有一个<b>过了契约校验</b>的工具调用，可以照它的意思办。
          *
@@ -263,15 +275,34 @@ final class AgentRuntime {
                 && validator.safeDirectReply(proposal.replyDraft())) {
             return outcome(AgentOrchestrator.Route.CURRENT_FLOW, proposal, null, List.of(), true);
         }
-        if ((proposal.actionType() == PlannerActionType.ANSWER
-                || proposal.actionType() == PlannerActionType.ASK_USER)
-                && validator.safeDirectReply(proposal.replyDraft())) {
+        boolean answerable = proposal.actionType() == PlannerActionType.ANSWER
+                || proposal.actionType() == PlannerActionType.ASK_USER;
+        if (answerable && validator.safeDirectReply(proposal.replyDraft())) {
             return outcome(AgentOrchestrator.Route.DIRECT_ANSWER, proposal, null, List.of(), true);
         }
         AgentOrchestrator.Route workflowRoute = modelRoute(proposal.intent(), state);
         if (workflowRoute != null) return outcome(workflowRoute, proposal, null, List.of(), true);
+        if (answerable) return rejectedAnswer(proposal);
         // 模型未给可用回答时只进入草稿更新，不再运行第二套关键词意图判断。
         return outcome(AgentOrchestrator.Route.CURRENT_FLOW, proposal, null, List.of(), true);
+    }
+
+    /**
+     * 模型给了一句回答，但这句话没通过安全校验，而它给的 intent 也归不到任何业务链路。
+     *
+     * <p>最典型的一种实测形态：老人说「帮我记一下我对青霉素过敏」，模型把它当成闲聊，
+     * 回一句「好的，我记下了」——库里一条都没有。这句话是说给老人听的最后一道关口，
+     * 所以草稿在这里直接置空（{@code modelWorkflowReply} 只在草稿非空时才用它），
+     * 任何出口都念不出它。
+     *
+     * <p>置空之后这一轮本来只会回一句「我还没听准」；标上 {@code javaFallback} 之后，
+     * 这一轮改走<b>模型离线时那条 Java 关键词链路</b>——同一句话在那里会被真的记成
+     * 一条长期备忘。模型没认出来的事，让认得出来的那套来办。
+     */
+    private Outcome rejectedAnswer(PlannerDecision proposal) {
+        return new Outcome(AgentOrchestrator.Route.CURRENT_FLOW, proposal.facts(), null,
+                normalizeDialogueMode(proposal.dialogueMode()), proposal.source(), null, List.of(),
+                proposal.actionType(), proposal.intent(), true, true);
     }
 
     /**

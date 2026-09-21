@@ -302,8 +302,16 @@ public class ConversationStore {
             // 不进快照的话，重启之后这张卡就只能对着一个 null 正文执行，或者按会话里别的什么凑
             // 一段出来——两条路都是"写进去一条他从来没在卡上看到过的备忘"。
             // 缺了这一段（更早版本写下的快照）由 ConfirmationService 判成凭据不可信，整份作废。
-            String pendingMemoText, LocalDateTime pendingMemoAt, String pendingMemoRepeat,
-            LocalDate pendingMemoDay, ConversationState.Stage memoReturnStage, boolean memoNeedsApproval,
+            String pendingMemoText, List<LocalDateTime> pendingMemoAts, String pendingMemoRepeat,
+            List<LocalDate> pendingMemoDays, ConversationState.Stage memoReturnStage, boolean memoNeedsApproval,
+            // 健康记录确认卡要写的那条数值。与备忘草稿同一条理由：卡上写着「血压 100 mmHg · 9月14日
+            // 21:30」，写进库的就必须是这一条、这一刻。不进快照的话，重启之后只剩一个项目名和一个数值
+            // 还留在会话里，时间只能拿确认那一刻顶替——卡上写的时间和记录里的时间就是两回事了。
+            // 缺了这一段（更早版本写下的快照）由 ConfirmationService 的 payloadIntact 判成凭据不可信。
+            String pendingRecordItem, java.math.BigDecimal pendingRecordValueNum,
+            String pendingRecordValueText, String pendingRecordUnit,
+            String pendingRecordRaw, LocalDateTime pendingRecordAt,
+            String recordReturnAction, ConversationState.Stage recordReturnStage,
             boolean materialReminderDone, boolean departureReminderDone,
             boolean notificationDone, boolean scheduleChecked
     ) {
@@ -322,8 +330,12 @@ public class ConversationStore {
                     state.pendingEntityType, state.pendingEntityId, state.pendingEntityName, state.pendingEntityRaw,
                     state.confirmationId, state.confirmationKind, state.confirmationTargetIds,
                     state.originalAppointmentId,
-                    state.pendingMemoText, state.pendingMemoAt, state.pendingMemoRepeat,
-                    state.pendingMemoDay, state.memoReturnStage, state.memoNeedsApproval,
+                    state.pendingMemoText, state.pendingMemoAts, state.pendingMemoRepeat,
+                    state.pendingMemoDays, state.memoReturnStage, state.memoNeedsApproval,
+                    state.pendingRecordItem, state.pendingRecordValueNum,
+                    state.pendingRecordValueText, state.pendingRecordUnit,
+                    state.pendingRecordRaw, state.pendingRecordAt,
+                    state.recordReturnAction, state.recordReturnStage,
                     state.materialReminderDone, state.departureReminderDone,
                     state.notificationDone, state.scheduleChecked);
         }
@@ -379,11 +391,21 @@ public class ConversationStore {
             // 备忘草稿同理：原样恢复、不回填。旧快照读出来是 null，由 ConfirmationService
             // 的 payloadIntact 判成凭据不可信（绝不拿一个 null 正文去写库）。
             state.pendingMemoText = pendingMemoText;
-            state.pendingMemoAt = pendingMemoAt;
+            state.pendingMemoAts = pendingMemoAts;
             state.pendingMemoRepeat = pendingMemoRepeat;
-            state.pendingMemoDay = pendingMemoDay;
+            state.pendingMemoDays = pendingMemoDays;
             state.memoReturnStage = memoReturnStage;
             state.memoNeedsApproval = memoNeedsApproval;
+            // 健康数值草稿同理：原样恢复、不回填。旧快照读出来没有这几项（null），
+            // 由 payloadIntact 判成凭据不可信，而不是拿确认那一刻的时间替他把这一条补圆。
+            state.pendingRecordItem = pendingRecordItem;
+            state.pendingRecordValueNum = pendingRecordValueNum;
+            state.pendingRecordValueText = pendingRecordValueText;
+            state.pendingRecordUnit = pendingRecordUnit;
+            state.pendingRecordRaw = pendingRecordRaw;
+            state.pendingRecordAt = pendingRecordAt;
+            state.recordReturnAction = recordReturnAction;
+            state.recordReturnStage = recordReturnStage;
             state.materialReminderDone = materialReminderDone;
             state.departureReminderDone = departureReminderDone;
             state.notificationDone = notificationDone;

@@ -124,11 +124,20 @@ final class ConversationState {
     String arrangedArrangerId;
     /** 隐式备忘在确认前的草稿（仅会话内存；确认后写 memos 表）。 */
     String pendingMemoText;
-    java.time.LocalDateTime pendingMemoAt;
+    /**
+     * 草稿的到点时间。一句话说几天就是几条（“这周周一周二周三早八吃药”＝3 条），落库时逐条拆成备忘。
+     *
+     * <p>{@code null} 与空列表是<b>两件事</b>：空列表＝这条本来就是长期备忘（老人说了“不用提醒，
+     * 只记下”）；{@code null} 只出现在更早版本写下的快照里——那时这里存的是单个时间，
+     * 读回来是空。这跟健康记录草稿缺了记录时间是同一类问题：照着它执行只能把卡上那条提醒时间
+     * 悄悄丢掉、记成一条长期备忘。<b>写进去的又一条他从来没在卡上看到过的东西。</b>
+     * 所以 {@code ConfirmationService.payloadIntact} 把 {@code null} 判成凭据不可信，见那里。
+     */
+    java.util.List<java.time.LocalDateTime> pendingMemoAts;
     /** 草稿的重复规则（DAILY/WEEKLY/MONTHLY，null=只提醒一次）；追问钟点/日期时也要带着走。 */
     String pendingMemoRepeat;
-    /** 老人刚回答清楚的“哪一天”（原话是“这周三”这类已过去的说法时追问得来）；接下来只差钟点时带着它。 */
-    java.time.LocalDate pendingMemoDay;
+    /** 老人刚回答清楚的“哪几天”（原话是“这周三”这类已过去的说法、或只说了“这周”时追问得来）；接下来只差钟点时带着它。 */
+    java.util.List<java.time.LocalDate> pendingMemoDays;
     /** 助手侧正在改/删的那条已有备忘 id（“改第1条”点下来之后）；落地或取消后清空。仅会话内存。 */
     String pendingMemoId;
     /** 弹备忘确认卡前所在的办理阶段，确认后恢复，不打断复诊办理。 */
@@ -138,13 +147,29 @@ final class ConversationState {
     /** 会话停留在“家属/志愿者代约”管理开场（查看/改期/取消/求助）这一面，尚未转入本人新预约漏斗。
      * 仅会话内存：用于备忘记完后交回代约入口而不是反问医院；转入本人预约(askHospital)即清空。 */
     boolean managedMode;
-    /** 反问“这个数不太对”时暂存的待记数值（仅会话内存）；老人确认照记、改口重说或跑题后清空。 */
+    /**
+     * 待记的那条实测数值（项目 / 数值 / 单位 / 原话 / 什么时候量的）。
+     *
+     * <p><b>不只是反问用的暂存。</b>它有两条路都会读到：反问“这个数不太对”时暂存这一条等老人表态，
+     * 以及健康记录确认卡上写着的那条数值——后者和备忘草稿一样属于「签发那一刻定下的内容」，
+     * 所以整套字段随快照一起持久化（见 {@code ConversationStore.Snapshot}），并由
+     * {@code ConfirmationService.payloadIntact} 判「缺了就不执行」。旧快照里没有
+     * {@link #pendingRecordAt}（它是这次才进快照的），读出来是 null，那张卡当场作废、请老人重新说一遍。
+     *
+     * <p>老人确认照记、改口重说或跑题后由 {@code clearPendingRecord} 一起清空。
+     */
     String pendingRecordItem;
     java.math.BigDecimal pendingRecordValueNum;
     String pendingRecordValueText;
     String pendingRecordUnit;
-    /** 反问前 pendingAction 的值，答完要还回去，不能把正在办的复诊流程打断。 */
+    /** 老人报这条数值时的原话（“我的血压是100”）：落进记录里那一列，改了数据也还能看出他当时说的是什么。 */
+    String pendingRecordRaw;
+    /** 量到这个数的时间，<b>不是</b>点下确认的时间：卡上写着哪一刻，写进库的就必须是哪一刻。 */
+    java.time.LocalDateTime pendingRecordAt;
+    /** 反问/发卡前 pendingAction 的值，答完要还回去，不能把正在办的复诊流程打断。 */
     String recordReturnAction;
+    /** 弹健康记录确认卡前所在的办理阶段，确认或拒绝后恢复；反问那条路不用（它不改阶段）。 */
+    Stage recordReturnStage;
     boolean materialReminderDone;
     boolean departureReminderDone;
     boolean notificationDone;
