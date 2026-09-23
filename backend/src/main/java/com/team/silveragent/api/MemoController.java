@@ -46,11 +46,17 @@ public class MemoController {
         }
     }
 
+    /**
+     * 处理掉一条备忘。重复提醒的不会被结束，而是顺延到下一次；返回处理后的这条，
+     * 好让界面告诉老人“下次提醒：X月X日 08:00”（不然他看不出点没点上，会再点一次）。
+     */
     @PostMapping("/{memoId}/done")
-    public void complete(@PathVariable("userId") String userId, @PathVariable("memoId") String memoId) {
-        if (!memos.complete(userId, memoId)) {
+    public MemoStore.MemoView complete(@PathVariable("userId") String userId, @PathVariable("memoId") String memoId) {
+        MemoStore.MemoView done = memos.complete(userId, memoId);
+        if (done == null) {
             throw new IllegalArgumentException("这条备忘不存在或已经处理过了");
         }
+        return done;
     }
 
     /**

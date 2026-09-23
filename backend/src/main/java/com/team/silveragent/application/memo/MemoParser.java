@@ -175,6 +175,14 @@ public final class MemoParser {
      * 负向断言跟 WEEKLY_BARE 一个道理，保证“这个星期三”不被当成范围词——它后面跟着星期几，是确定的某一天。
      */
     private static final Pattern BARE_WEEK = Pattern.compile("(这|本|下)\\s*个?\\s*(?:周|星期|礼拜)(?![一二三四五六日天])");
+    /**
+     * “这个月/本月/下个月”后面没跟几号：跟 {@link #BARE_WEEK} 一个道理，只给了范围没说哪天。
+     *
+     * <p>负向断言挡住“这个月15号”“下个月5号”——后面跟着号数就是确定的某一天，不是范围。
+     * “每个月”也不在内：那是每月重复，归 {@link #MONTHLY_BARE} 管，这里只要“这/本/下”。
+     */
+    private static final Pattern BARE_MONTH = Pattern.compile(
+            "(这|本|下)\\s*个?\\s*月(?!\\s*" + DAY_NUM + "\\s*[号日])");
     /** 一个星期几的开头，可带“这/本/下”限定词。 */
     private static final Pattern WEEKDAY_HEAD = Pattern.compile("(?:(下|这|本)\\s*个?\\s*)?(?:周|星期|礼拜)\\s*([一二三四五六日天])");
     /** 跟在“周一”后面的裸星期字：“每周一三五”＝周一/周三/周五。前导连接符一起吃掉，好把整串换成单天。 */
@@ -264,10 +272,11 @@ public final class MemoParser {
                 : timesAt(days, clockTimeOfUnsaid(value));
         // 日期定不下来就得先问，两种情形：
         // 一种是“这周三”今天周五说——那天已经过去了，不猜上周还是下周；
-        // 另一种是“我这周要吃药”——只说了范围没说哪天。后者原来根本不问，直接按
-        // “今天已过点就顺延明天”兜底，老人周五说“这周”会被悄悄记成周六。
+        // 另一种是“我这周要吃药”“提醒我这个月我要吃药”——只说了范围没说哪天。后者原来根本不问，
+        // 直接按“今天已过点就顺延明天”兜底（老人周五说“这周”会被悄悄记成周六）；
+        // 月范围更糟：连时间都没算出来，整句话退化成一条不提醒的备忘。
         boolean needsDay = days.isEmpty()
-                ? bareWeekWord(value) != null
+                ? bareWeekWord(value) != null || bareMonthWord(value) != null
                 : tokens.stream().anyMatch(DayToken::past)
                         || remindAts.stream().anyMatch(at -> !at.isAfter(now));
         // “每周/每月”没说周几/几号：先追问锚点，否则这条重复提醒永远不到点
@@ -704,6 +713,37 @@ public final class MemoParser {
     }
 
     /**
+     * 句中的“这个月/本月/下个月”（后面没跟几号）；没有返回 null。
+     *
+     * <p>跟 {@link #bareWeekWord} 同一件事，只是范围是月：“提醒我这个月我要吃药”只说了这个月，
+     * 没说哪天。原来月范围谁也不认——时间词被丢掉，整句退化成一条<b>不提醒</b>的备忘，
+     * 老人以为设上了提醒。
+     */
+    public static String bareMonthWord(String value) {
+        Matcher month = BARE_MONTH.matcher(value == null ? "" : value);
+        return month.find() ? month.group(1) + "个月" : null;
+    }
+
+    /**
+     * 这一轮算出来的那个时刻<b>已经过去了</b>（“今天下午三点”在傍晚说）：返回那个过去的时刻，
+     * 没有返回 null。
+     *
+     * <p>给“哪一天”那类追问用：日期其实说明白了，缺的不是“哪一天”，是这一天里那个点已经过完了。
+     * 拿“您说的是‘那天’，还没说具体哪一天”去问，老人只会觉得助手没听懂。
+     *
+     * @param now 业务时区的“现在”：哪个点算过去要靠它算（见 {@link BusinessClock}）
+     */
+    public static LocalDateTime passedMoment(String value, LocalDateTime now) {
+        String normalized = normalizePeriodWords(value == null ? "" : value);
+        LocalDate today = now.toLocalDate();
+        List<LocalDate> days = daysOf(normalized, dayTokens(normalized, today), today);
+        LocalTime time = clockTimeOf(normalized);
+        if (days.isEmpty() || time == null) return null;
+        LocalDateTime at = LocalDateTime.of(days.get(0), time);
+        return at.isAfter(now) ? null : at;
+    }
+
+    /**
      * 裸周词的范围限定字（“这/本/下”）；没有返回 null。
      *
      * <p>内部判定只用这一个字：{@link #bareWeekWord} 返回的是给人看的“这周”，
@@ -945,17 +985,57 @@ public final class MemoParser {
         return conditional == null ? "当天" : conditional;
     }
 
-    /** 显式托付时去掉命令外壳，尽量留下“要记的事”。 */
+    /** 断句用的字符。摘命令外壳、收拾首尾标点都拿它判断，免得两处各写一份、改一处漏一处。 */
+    private static final String BREAK_CHARS = "，。,.、!！?？：:；; ";
+
+    /**
+     * 摘掉“记一下/提醒我”这类托付外壳，留下要记的那半句（{@link #detect} 用它当正文）。
+     *
+     * <p>外壳表比{@link #EXPLICIT}那张宽：识别只需认出“这是托付”，摘字则要摘干净。少了哪种说法，
+     * 那个字就留在正文里跟着念给家属听——实测「帮我记下：我的手机密码是1111」存成了
+     * “下：我的手机密码是1111”，「麻烦记一下，明天早上八点吃药」整句都留着。
+     */
     private static String cleanText(String value, boolean explicit) {
         if (!explicit) return value;
         String[] prefixes = {
-                "请帮我记一下", "帮我记一下", "帮我记着", "帮我记下来", "帮我记住", "请记住",
-                "记一下", "记下来", "记着", "记住", "帮我记", "给我记", "提醒我", "记得提醒", "备忘"
+                // 「先记下这个，我再去办」里的“先”也是命令外壳，不摘掉的话备忘正文就成了
+                // “先记一下，药盒放在电视柜第二层”
+                "先帮我记一下", "先给我记一下", "先帮我记下", "先给我记下", "先记一下", "先帮我记着",
+                "先帮我记", "先给我记", "先记",
+                // “麻烦”是同一件外壳的客气说法：“麻烦记一下，明天早上八点吃药”原来整句留在正文里
+                "麻烦帮我记一下", "麻烦给我记一下", "麻烦帮我记下", "麻烦记一下", "麻烦帮我记",
+                "麻烦给我记", "麻烦记下", "麻烦记着", "麻烦记住", "麻烦记",
+                "请帮我记一下", "请帮我记下", "帮我记一下", "帮我记下来", "帮我记下", "帮我记着",
+                "帮我记住", "给我记下", "请记住",
+                // “别忘了/记得”这几条原来只在**句尾**那张表里（“明天吃药，别忘了”），
+                // 挪到句首就没人摘了：“别忘了，我的复诊诊室是908”整句进正文。
+                // 长的排在前由长度决定，不必靠表序
+                "别忘了提醒我", "别忘提醒我", "别忘了", "别忘", "记得提醒我", "记得提醒",
+                "记一下", "记下来", "记下", "记着", "记住", "帮我记", "给我记", "提醒我", "备忘"
         };
         String text = value;
+        // 取**最长**的那个匹配，不是表里排前面的：老人说“帮我记下：我的手机密码是1111”，
+        // 表里“帮我记下”和“帮我记”都匹配得上，先撞上短的就会把正文留成“下：我的手机密码是1111”
+        // （实测就是这样）。长短谁先谁后由长度决定，表怎么排都不会再错。
+        String hit = null;
         for (String prefix : prefixes) {
-            if (text.startsWith(prefix)) { text = text.substring(prefix.length()); break; }
+            if (!text.startsWith(prefix)) continue;
+            // “记下”里的“下”也可能是下一个词的开头（“帮我记**下午**的药”）：那就不是外壳，
+            // 摘了就剩“午的药”。这种退回去让短一点的“帮我记”来摘。
+            if (prefix.endsWith("记下") && continuesXiaWord(text, prefix.length())) continue;
+            if (hit == null || prefix.length() > hit.length()) hit = prefix;
         }
+        if (hit != null) text = text.substring(hit.length());
+        // 命令词后面还挂着一个补语（“给**我记上**我今天走了5000步”“帮我记**好**”）：那个字是命令
+        // 的一部分，不是要记的内容。原来只摘命令词本身，实测“给我记上我今天走了5000步”存成了
+        // “上我今天走了5000步”——半截话，而这条是要念给家属看的。
+        // 和“记下”里的“下”同一个道理：它也可能是下一个词的开头（“记**上午**的药”），能接成词就不摘。
+        if (hit != null && hit.endsWith("记") && hasCommandTail(text)) text = text.substring(1);
+        // 再摘一道补语：命令词的尾巴也有整个词的（“给**我记一下**，…”“**记着点**，…”）。
+        // 上面那一条只管“上/下/好/住/着”这种单字，而“一下”“点”从没被摘过：实测老人说
+        // “记着点，明天早上八点吃药”，首页那条备忘的正文是“点，吃药”；“给我记一下，…”是
+        // “一下，吃药”。
+        if (hit != null) text = stripCommandComplement(text);
         String[] suffixes = {
                 "，记得提醒我", "，别忘了提醒我", "，别忘", "，提醒我", "，记得",
                 "记得提醒我", "别忘了提醒我", "别忘了", "别忘", "提醒我"
@@ -964,13 +1044,54 @@ public final class MemoParser {
             if (text.endsWith(suffix)) { text = text.substring(0, text.length() - suffix.length()); break; }
         }
         text = text.trim();
-        while (!text.isEmpty() && "，。,.、!！?？：:；; ".indexOf(text.charAt(0)) >= 0) {
+        while (!text.isEmpty() && BREAK_CHARS.indexOf(text.charAt(0)) >= 0) {
             text = text.substring(1).trim();
         }
-        while (!text.isEmpty() && "，。,.、!！?？：:；; ".indexOf(text.charAt(text.length() - 1)) >= 0) {
+        while (!text.isEmpty() && BREAK_CHARS.indexOf(text.charAt(text.length() - 1)) >= 0) {
             text = text.substring(0, text.length() - 1).trim();
         }
+        // 整句只有托付、没有内容（“帮我记一下”）时摘完就是空的：这里退回原话，由上游照旧处理。
+        // 改成返回空串能让上游问一句“您想记点什么”，但那要 {@code FollowupAgentService} 跟着动，
+        // 单改这一处只会把正文存成空串。
         return text.isEmpty() ? value : text;
+    }
+
+    /**
+     * 命令词后面挂着的补语（“记**一下**，…”“记**着点**，…”“帮我记**一点**”）。
+     *
+     * <p>它属于命令，不属于要记的那件事。两字以上的（一下/一点儿/一点/点儿/一些）本身就是个词，
+     * 摘掉不会把后面切成半截——“记一下下雨要收衣服”摘完是“下雨要收衣服”。单字的（点/些/上/下/好/住/着）
+     * 得看着点：只有它后面正好断句（“记着点**，**…”）才算补语，否则可能是下一个词的开头
+     * （“记**点心**的做法”里的“点”不能摘）。
+     */
+    private static String stripCommandComplement(String text) {
+        String[] words = {"一下", "一点儿", "一点", "点儿", "一些", "点", "些", "上", "下", "好", "住", "着"};
+        for (String word : words) {
+            if (!text.startsWith(word)) continue;
+            int after = word.length();
+            boolean atEdge = after >= text.length() || BREAK_CHARS.indexOf(text.charAt(after)) >= 0;
+            if (word.length() >= 2 || atEdge) return text.substring(after).trim();
+        }
+        return text;
+    }
+
+    /**
+     * {@code text} 在 {@code index} 上的那个字，能不能把它前面的“下”接成一个词
+     * （下+午=下午、下+周=下周、下+次=下次…）。
+     *
+     * <p>能接的话，那个“下”其实属于后面那个词，不是“记下”这个命令词的一部分——
+     * 「帮我记下午的药」摘完就成了“午的药”。判断“记下”系列的外壳时用它。
+     *
+     * <p>“上”也走这张表（上+午=上午、上+课=上课）：摘完“记”之后剩下的那个补语同样可能是
+     * 下一个词的开头，“记上午的药”不能变成“午的药”。
+     */
+    private static boolean continuesXiaWord(String text, int index) {
+        return index < text.length() && "午周次个月面班雨回课楼学铺".indexOf(text.charAt(index)) >= 0;
+    }
+
+    /** 摘掉命令词之后，开头那个字是不是命令的补语（“给我记**上**…”“帮我记**好**…”“记**着**…”）。 */
+    private static boolean hasCommandTail(String text) {
+        return !text.isEmpty() && "上下好住着".indexOf(text.charAt(0)) >= 0 && !continuesXiaWord(text, 1);
     }
 
     private static final Pattern RELATIVE = Pattern.compile(

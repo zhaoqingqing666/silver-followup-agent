@@ -91,23 +91,29 @@ public class CareService {
                 """, (rs, row) -> {
             result.add(new NotificationView(
                     rs.getString(1), rs.getString(2), rs.getString(3),
-                    rs.getString(4), rs.getTimestamp(5).toLocalDateTime()));
+                    rs.getString(4), "info", rs.getTimestamp(5).toLocalDateTime()));
             return null;
         }, caregiverId);
         // 2) 定向发给该照护者的协同通知（代约结果、老人改动、紧急等）
         jdbc.query("""
-                SELECT n.id, n.elder_user_id, u.name, n.content, n.created_at
+                SELECT n.id, n.elder_user_id, u.name, n.content, n.kind, n.created_at
                 FROM care_notifications n
                 JOIN users u ON u.id = n.elder_user_id
                 WHERE n.caregiver_id = ?
                 """, (rs, row) -> {
             result.add(new NotificationView(
                     rs.getString(1), rs.getString(2), rs.getString(3),
-                    rs.getString(4), rs.getTimestamp(5).toLocalDateTime()));
+                    rs.getString(4), toneOf(rs.getString(5)), rs.getTimestamp(6).toLocalDateTime()));
             return null;
         }, caregiverId);
         result.sort((left, right) -> right.sentAt().compareTo(left.sentAt()));
         return result;
+    }
+
+    /** 协同通知的 kind 对到界面色调；“求助/紧急”要在家属的消息页上显出来，不能和代约回执一个样。 */
+    private static String toneOf(String kind) {
+        CareEventLabel label = CARE_LABELS.get(kind);
+        return label == null ? "info" : label.tone();
     }
 
     /** 单长辈复诊动态：带时间戳的审计时间线，只读。 */
@@ -287,10 +293,15 @@ public class CareService {
         public record Attention(String title, String tone, String detail, LocalDateTime at) { }
     }
 
-    /** 收件箱条目。 */
+    /**
+     * 收件箱条目。
+     *
+     * @param tone 界面色调：info | success | warning | danger，与就诊动态同一套词汇。
+     *             消息页以前把所有条目渲染成一个样，家属看不出哪条是紧急、哪条只是代约回执。
+     */
     public record NotificationView(
             String notificationId, String elderId, String elderName,
-            String content, LocalDateTime sentAt) { }
+            String content, String tone, LocalDateTime sentAt) { }
 
     /** 复诊动态事件。tone: info | success | warning | danger */
     public record TimelineEvent(

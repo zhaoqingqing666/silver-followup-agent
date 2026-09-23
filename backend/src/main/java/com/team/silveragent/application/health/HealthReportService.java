@@ -39,6 +39,15 @@ public class HealthReportService {
     /** 一次汇总最多看多少条：够覆盖一个月；再多说明数据异常，别把整表拉进内存。 */
     private static final int MAX_SAMPLES = 1000;
 
+    /**
+     * 「其他」那一行最多花多少字列原话，超了就只列最近的几条。
+     *
+     * <p>原话一条最多 60 字（解析器存的时候按 value_text 列的上限截过），一个月攒下来能顶掉整条消息，
+     * 把它自己、也把后面「等 N 项未列出」一起挤出 500 字上限。所以这里先自己收口，
+     * 留够位置给六个正经项目。
+     */
+    private static final int OTHER_LIST_BUDGET = 150;
+
     private static final DateTimeFormatter DAY_LABEL = DateTimeFormatter.ofPattern("M月d日");
 
     /** 汇总里项目的先后：先血压再血糖，跟老人平时报的顺序一致；表里没有的项目不出现。 */
@@ -46,6 +55,12 @@ public class HealthReportService {
 
     /** 血压不说小数（“138/86”），别的项目留一位（“6.4”“36.6”）。 */
     private static final String BLOOD_PRESSURE = "血压";
+
+    /** 老人嘴里那个“斤”。体重按斤报是常事，汇总里得先换成公斤再算（见 {@link #inKilograms}）。 */
+    private static final String JIN_UNIT = "斤";
+
+    /** 一公斤两斤。 */
+    private static final BigDecimal JIN_PER_KG = BigDecimal.valueOf(2);
 
     private final HealthRecordStore records;
     private final FamilyNotificationTool familyTool;
@@ -160,8 +175,12 @@ public class HealthReportService {
      *
      * <p>最高/最低取的是**真实量到的那一对**（“152/94”是某一次的实际读数），
      * 不是把收缩压的最大值和舒张压的最大值拼起来——拼出来的那对血压没人量到过。
+     *
+     * <p>「其他」走 {@link #otherSegment}：那一桶里是解析器认不出项目的原话，
+     * 不能跟着一起算。
      */
     private String segment(String item, List<HealthRecordStore.RecordView> rows) {
+        if (HealthRecordParser.OTHER.equals(item)) return otherSegment(item, rows);
         List<Sample> samples = new ArrayList<>();
         int spokenOnly = 0;   // 只说了“有点高”这种、没写数值的
         for (HealthRecordStore.RecordView row : rows) {
@@ -177,12 +196,23 @@ public class HealthReportService {
         // 血压两半各按“量到了那一半的次数”平均：老人只说“血压 100”时没有舒张压，
         // 硬按同一个次数去除会把平均值算歪。所以“血压 3 次，平均 125/89”里两个数是
         // 各自真实读数的平均，只是分母可能不同（3 次收缩压、2 次舒张压）。
+        List<Sample> systolic = samples.stream().filter(sample -> sample.first() != null).toList();
         List<Sample> paired = samples.stream().filter(sample -> sample.second() != null).toList();
-        List<Sample> extremes = paired.isEmpty() ? samples : paired;
-        String average = number(average(samples, true), scale);
-        if (!paired.isEmpty()) average += "/" + number(average(paired, false), scale);
-        text.append(samples.size() == 1 ? "，" : "，平均 ").append(average).append(" ").append(rows.get(0).unit());
-        if (samples.size() > 1) {
+        // 最高/最低只能从**两半都量到**的那些里取：拼出来的那对血压没人量到过。
+        // 一条成对的都没有（全是“血压 138”这种）时退回收缩压那一列，那种情况本来就只报一个数。
+        List<Sample> both = samples.stream()
+                .filter(sample -> sample.first() != null && sample.second() != null).toList();
+        List<Sample> extremes = both.isEmpty() ? systolic : both;
+        String average = systolic.isEmpty()
+                // 整段只有“低压95”这种只说了一半的读数：直接报 95 会被当成收缩压，标出来
+                ? HealthRecordParser.DIASTOLIC_MARK + " " + number(average(paired, false), scale)
+                : number(average(systolic, true), scale)
+                  + (paired.isEmpty() ? "" : "/" + number(average(paired, false), scale));
+        text.append(samples.size() == 1 ? "，" : "，平均 ").append(average);
+        // 整条都没有单位时不补那个空格，免得行尾吊一个空格
+        String unit = arithmeticUnit(rows);
+        if (!unit.isEmpty()) text.append(" ").append(unit);
+        if (samples.size() > 1 && !extremes.isEmpty()) {
             Sample high = extreme(extremes, true);
             Sample low = extreme(extremes, false);
             if (high.first().compareTo(low.first()) != 0) {
@@ -191,6 +221,49 @@ public class HealthReportService {
             }
         }
         return text.toString();
+    }
+
+    /**
+     * 「其他」那一行：“其他 3 次：我今天走了5000步、我尿酸420”。
+     *
+     * <p>不算平均值，也不报最高/最低。这一桶收的是 {@link HealthRecordParser} 认不出项目的原话，
+     * 里面什么数都有——尿酸、步数、身高，彼此没有量纲关系。以前它跟着正经项目走同一段算术，
+     * 家属会收到“其他 2 次，平均 2710（最高 5000，最低 420）”：把“5000 步”和“尿酸 420”
+     * 平均成了一个谁也没量到过的数。而且这一桶存进去时单位是空的
+     * （解析器给「其他」传的就是空串），那行数字连个量纲都挂不上。
+     *
+     * <p>改成列原话，是回到解析器当初的本意：其他项存的就是老人**整句原话**，
+     * 不试着从里面抠“项目词 + 数值”，因为抠错了是又一轮静默失真。
+     * 家属看“我今天走了5000步”能自己判断，看“平均 2710”不能。
+     *
+     * <p>同一个说法说了多次只列一次（次数照报），否则一个月几十条重复原话就把位置占光了；
+     * 超过 {@link #OTHER_LIST_BUDGET} 就只列最近的几条，并在行里说明列了几条。
+     */
+    private String otherSegment(String item, List<HealthRecordStore.RecordView> rows) {
+        StringBuilder text = new StringBuilder(item).append(" ").append(rows.size()).append(" 次");
+        List<String> said = new ArrayList<>();
+        for (HealthRecordStore.RecordView row : rows) {
+            // 原话是主体；万一某条只有数没有文本，退回那个数，总比把这条整个丢掉强
+            String one = row.valueText() == null || row.valueText().isBlank()
+                    ? (row.valueNum() == null ? null : row.valueNum().stripTrailingZeros().toPlainString())
+                    : row.valueText().trim();
+            if (one != null && !said.contains(one)) said.add(one);
+        }
+        if (said.isEmpty()) return text.append("（未写具体内容）").toString();
+
+        List<String> listed = new ArrayList<>();
+        int length = 0;
+        for (String one : said) {
+            int next = length == 0 ? one.length() : length + 1 + one.length();
+            // 第一条再长也留着：列 0 条会变成一句光秃秃的“其他 3 次：”，比超长更难解释
+            if (next > OTHER_LIST_BUDGET && !listed.isEmpty()) break;
+            listed.add(one);
+            length = next;
+        }
+        if (listed.size() < said.size()) {
+            text.append("（只列最近 ").append(listed.size()).append(" 条）");
+        }
+        return text.append("：").append(String.join("、", listed)).toString();
     }
 
     /** 拼一条消息，超过预算就少列几项——宁可少说两项，也不能整条插不进库。 */
@@ -210,7 +283,7 @@ public class HealthReportService {
         return text.append("。").toString();
     }
 
-    /** 一次测量。舒张压只有血压有；别的项目第二个数为 null。 */
+    /** 一次测量。舒张压只有血压有；别的项目第二个数为 null。只说了一半的低压反过来：{@code first} 为 null。 */
     private record Sample(BigDecimal first, BigDecimal second) { }
 
     /**
@@ -218,6 +291,11 @@ public class HealthReportService {
      *
      * <p>血压要从 value_text 的“100/60”里拆：value_num 只存了收缩压那一个数，
      * 舒张压只在原样文本里，不拆就永远算不出“平均 138/86”这种说法。
+     *
+     * <p>“低压95”是另一回事：解析器把“只说了一半”标在值前面（见
+     * {@link HealthRecordParser#DIASTOLIC_MARK}），值在 {@code value_num} 里是 95。
+     * 只认斜杠的话它会掉进最后那个兜底分支，95 被当成**收缩压**算进平均——
+     * 家属会收到“平均 117/86”这种谁也没量到过的血压。
      */
     private static Sample sampleOf(String item, HealthRecordStore.RecordView row) {
         if (BLOOD_PRESSURE.equals(item)) {
@@ -228,8 +306,42 @@ public class HealthReportService {
                 BigDecimal diastolic = parse(text.substring(slash + 1));
                 if (systolic != null && diastolic != null) return new Sample(systolic, diastolic);
             }
+            if (HealthRecordParser.isDiastolicOnly(text) && row.valueNum() != null) {
+                return new Sample(null, row.valueNum());
+            }
         }
-        return row.valueNum() == null ? null : new Sample(row.valueNum(), null);
+        return row.valueNum() == null ? null : new Sample(inKilograms(row, row.valueNum()), null);
+    }
+
+    /**
+     * 参与算术的那个数：斤换成公斤，别的原样。
+     *
+     * <p>“体重 190 斤”和“体重 95 公斤”说的是同一个重量。两条直接平均会得出 142，
+     * 再挂上斤或公斤，就是一个谁都没量到过的数发给了家属。单位在算术里统一成公斤，
+     * 标签由 {@link #arithmeticUnit} 跟着报公斤。
+     */
+    private static BigDecimal inKilograms(HealthRecordStore.RecordView row, BigDecimal value) {
+        return JIN_UNIT.equals(row.unit())
+                ? value.divide(JIN_PER_KG, 4, RoundingMode.HALF_UP) : value;
+    }
+
+    /**
+     * 这一项“平均/最高/最低”后面跟的单位。
+     *
+     * <p>有一条是斤，整段就按公斤报（换算 {@link #inKilograms} 已经做完了），
+     * 否则会出现“平均 142 kg”那种和数字对不上的标签。
+     *
+     * <p>取第一个有单位的，不能只看最新那条：口语条（“我血压有点高”）没有单位，
+     * 它恰恰是最新的一条，拿它定标签会把整行的 mmHg 抹掉。
+     */
+    private static String arithmeticUnit(List<HealthRecordStore.RecordView> rows) {
+        for (HealthRecordStore.RecordView row : rows) {
+            if (JIN_UNIT.equals(row.unit())) return "kg";
+        }
+        for (HealthRecordStore.RecordView row : rows) {
+            if (row.unit() != null && !row.unit().isBlank()) return row.unit();
+        }
+        return "";
     }
 
     private static BigDecimal parse(String value) {

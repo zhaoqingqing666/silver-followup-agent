@@ -15,6 +15,20 @@ INSERT INTO user_preferences(user_id,auto_speak_enabled,speech_rate,speech_volum
 SELECT 'user-001',FALSE,0.9,1.0,CURRENT_TIMESTAMP
 WHERE NOT EXISTS (SELECT 1 FROM user_preferences WHERE user_id='user-001');
 
+-- 王阿姨的健康档案（模拟数据）。只在"从来没人填过"时种一次：data.sql 每次启动都会跑，
+-- 无条件 UPDATE 会把家人后来填/改的内容冲掉，所以拿 health_profile_updated_by 当"动过没有"
+-- 的标记（保存时一定会写它）——家人哪怕把内容全清空，重启也不会又给他填回去。
+--
+-- 这里故意不写 health_profile_updated_at：容器是 UTC，界面上显示的时间却一律是北京时间
+-- （备忘、健康记录都走 MemoParser 那个钟），在 SQL 里算不出北京时间，写 CURRENT_TIMESTAMP
+-- 会让这张卡片上的时间比旁边的记录早 8 小时。留空即"不知道具体几点填的"，卡片上就只说
+-- "最近由小丽填写"；等谁真的在页面上改一次，时间会由 HealthProfileStore 按北京时间的钟补上。
+UPDATE users SET allergies='青霉素过敏（做皮试时发现的）；吃海鲜会起疹子',
+                 medical_history='高血压（2019年确诊，长期服药控制）；2型糖尿病（2021年确诊）',
+                 height_cm=158, weight_kg=61.5,
+                 health_profile_updated_by='小丽'
+WHERE id='user-001' AND health_profile_updated_by IS NULL;
+
 MERGE INTO hospitals (id,name,address,hospital_level,description,specialty_tags,elderly_services,enabled) KEY(id) VALUES
 ('h001','市第一医院（模拟）','健康路1号（模拟）','三级甲等','以心血管、神经系统疾病和老年慢病复诊服务为特色。','心血管,神经内科,老年慢病管理','老年服务窗口,轮椅通道,志愿者引导',TRUE),
 ('h002','市人民医院（模拟）','人民路88号（模拟）','三级甲等','提供内分泌、骨科和常见慢性病复诊服务。','内分泌,骨科,慢性病随访','无障碍电梯,人工挂号窗口,家属等候区',TRUE);

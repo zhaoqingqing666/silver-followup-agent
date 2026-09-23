@@ -14,4 +14,11 @@ public interface HealthRecordTool {
 
     /** @param item 传 null 表示不限项目；按时间倒序取最近 limit 条。 */
     List<HealthRecordStore.RecordView> recent(String conversationId, String userId, String item, int limit);
+
+    /**
+     * 老人说“记错了”：删掉他自己最近的那一条。
+     *
+     * @return 被删掉的那一条（回读给他看删对了没有）；一条都没有返回 null
+     */
+    HealthRecordStore.RecordView deleteLatest(String conversationId, String userId);
 }

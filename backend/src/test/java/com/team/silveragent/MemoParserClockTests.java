@@ -768,4 +768,58 @@ class MemoParserClockTests {
         assertThat(MemoParser.severalClocksInOneSentence("下周三，下周五")).isFalse();
         assertThat(MemoParser.severalClocksInOneSentence("下周三，下周五，下周日晚")).isFalse();
     }
+
+    /* ---------- 只给了月范围 / 那个点已经过完了 ---------- */
+
+    /**
+     * “这个月/下个月”只给了范围，得先问哪一天；后面跟着号数就是确定的某一天，不用问。
+     * “每个月”是每月重复，归重复规则管，不能当成“这个月”。
+     */
+    @Test
+    void aMonthWithABareRangeIsNotADay() {
+        assertThat(MemoParser.bareMonthWord("提醒我这个月我要吃药")).isEqualTo("这个月");
+        assertThat(MemoParser.bareMonthWord("提醒我下个月去复查")).isEqualTo("下个月");
+        assertThat(MemoParser.bareMonthWord("提醒我本月15号吃药")).isNull();
+        assertThat(MemoParser.bareMonthWord("提醒我下个月5号去复查")).isNull();
+        assertThat(MemoParser.bareMonthWord("提醒我每个月要吃一次药")).isNull();
+        assertThat(MemoParser.bareMonthWord("提醒我明天吃药")).isNull();
+    }
+
+    /**
+     * 月范围要走到“问哪一天”这条路。
+     *
+     * <p>回归：原来月范围谁也不认——时间词被丢掉，整句退化成一条<b>不提醒</b>的备忘，
+     * 老人以为设上了，到哪天都不响。这比记错一天更糟：错的那天他还看得出来。
+     */
+    @Test
+    void aBareMonthRangeAsksWhichDayInsteadOfDroppingTheTime() {
+        java.time.LocalDateTime now = java.time.LocalDateTime.of(2026, 9, 14, 10, 0);
+
+        MemoParser.MemoIntent bare = MemoParser.detect("提醒我这个月我要吃药", now);
+        assertThat(bare.needsDay()).isTrue();
+        assertThat(bare.needsTime()).isFalse();
+        assertThat(bare.remindAts()).isEmpty();
+
+        // “本月15号”是确定的某一天（15 号在 14 号之后），不用问
+        MemoParser.MemoIntent dated = MemoParser.detect("提醒我本月15号吃药", now);
+        assertThat(dated.needsDay()).isFalse();
+    }
+
+    /**
+     * 傍晚说“今天15点吃药”：日子说明白了，缺的是这一天里那个点已经过完了。
+     * 交回那个过去的时刻，让追问能说“您说的今天 15:00 已经过了”，
+     * 而不是驴唇不对马嘴地问“哪一天”——他没说错日子。
+     */
+    @Test
+    void aMomentThatAlreadyPassedTodayIsReportedAsSuch() {
+        java.time.LocalDateTime now = java.time.LocalDateTime.of(2026, 9, 14, 15, 30);
+        java.time.LocalDateTime passed = java.time.LocalDateTime.of(2026, 9, 14, 15, 0);
+
+        assertThat(MemoParser.passedMoment("提醒我今天15点吃药", now)).isEqualTo(passed);
+        // 还没到的时刻不算“已经过了”
+        assertThat(MemoParser.passedMoment("提醒我今天18点吃药", now)).isNull();
+        // 没给日子、或没给钟点的，都不是这条要管的事
+        assertThat(MemoParser.passedMoment("提醒我明天早上八点吃药", now)).isNull();
+        assertThat(MemoParser.passedMoment("提醒我今天吃药", now)).isNull();
+    }
 }

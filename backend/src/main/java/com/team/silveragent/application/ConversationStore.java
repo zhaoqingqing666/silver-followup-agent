@@ -311,6 +311,11 @@ public class ConversationStore {
             String pendingRecordItem, java.math.BigDecimal pendingRecordValueNum,
             String pendingRecordValueText, String pendingRecordUnit,
             String pendingRecordRaw, LocalDateTime pendingRecordAt,
+            // 一句话里报的其余几条（“我的体温是36.5，心率80”里，36.5 那条之后的部分）。
+            // 与上面几样同一条理由：卡上列着两行，写进库的就必须是两条。不进快照的话，
+            // 重启之后那张两行的卡只会写下第一行，第二行在他点头之后凭空消失。
+            // 缺了这一段（更早版本写下的快照）由 payloadIntact 判成凭据不可信。
+            List<ConversationState.PendingRecord> pendingRecordRest,
             String recordReturnAction, ConversationState.Stage recordReturnStage,
             boolean materialReminderDone, boolean departureReminderDone,
             boolean notificationDone, boolean scheduleChecked
@@ -335,6 +340,7 @@ public class ConversationStore {
                     state.pendingRecordItem, state.pendingRecordValueNum,
                     state.pendingRecordValueText, state.pendingRecordUnit,
                     state.pendingRecordRaw, state.pendingRecordAt,
+                    state.pendingRecordRest,
                     state.recordReturnAction, state.recordReturnStage,
                     state.materialReminderDone, state.departureReminderDone,
                     state.notificationDone, state.scheduleChecked);
@@ -404,6 +410,9 @@ public class ConversationStore {
             state.pendingRecordUnit = pendingRecordUnit;
             state.pendingRecordRaw = pendingRecordRaw;
             state.pendingRecordAt = pendingRecordAt;
+            // 原样恢复、不回填：旧快照读出来是 null，由 payloadIntact 判成凭据不可信。
+            // 这里绝不能把 null 换成空列表——那就成了“卡上只有一行”，而他看到的是两行。
+            state.pendingRecordRest = pendingRecordRest;
             state.recordReturnAction = recordReturnAction;
             state.recordReturnStage = recordReturnStage;
             state.materialReminderDone = materialReminderDone;

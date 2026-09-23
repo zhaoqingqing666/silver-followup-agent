@@ -11,8 +11,9 @@ import java.util.UUID;
 
 /**
  * 老人上报的实测健康数值（血压/血糖/心率/体温/体重/血氧）。
- * 与 {@link com.team.silveragent.application.memo.MemoStore} 分家：备忘是“要做的事”（带提醒、可完成可删除），这里是“已经量到的数”（只增，用来回查）。
- * 写入只来自助手对话（HealthRecordTool），首页只读。
+ * 与 {@link com.team.silveragent.application.memo.MemoStore} 分家：备忘是“要做的事”（带提醒、可完成可删除），这里是“已经量到的数”（用来回查）。
+ * 写入只来自助手对话（HealthRecordTool），首页只读。删只有一个口子（{@link #deleteLatest}）：
+ * 老人说“记错了”，删掉他自己最近的那一条——除此之外没有改和删的路径，量过的数不会被人悄悄改掉。
  */
 @Repository
 public class HealthRecordStore {
@@ -37,15 +38,38 @@ public class HealthRecordStore {
      * @param valueNum  能取到数值时的数（血压 100/60 取 100）；只有说法（“有点高”）时为 null。
      * @param valueText 给人看的原值：“100/60”或“有点高”。
      * @param unit      单位：mmHg / mmol/L / 次每分 / °C / kg / %。
+     *                  <b>他没说单位、也没有数时传 null，落库成空串</b>——“血压 有点高”这条压根没量过，
+     *                  替他填一个 mmHg 就等于说他量过了；unit 列是 NOT NULL，而 schema.sql 只在全新库上跑，
+     *                  放宽列约束对已有的库不生效，所以这里收敛成空串（读的地方一律把空单位当作“不印”）。
      */
     public RecordView create(String userId, String item, BigDecimal valueNum, String valueText, String unit,
                              String rawText, String conversationId, LocalDateTime recordedAt) {
         String id = "hr-" + UUID.randomUUID();
         String safeRaw = rawText == null ? null : (rawText.length() > MAX_RAW ? rawText.substring(0, MAX_RAW) : rawText);
+        String safeUnit = unit == null ? "" : unit;
         jdbc.update("INSERT INTO health_records(id,user_id,item,value_num,value_text,unit,raw_text,conversation_id,recorded_at)"
                         + " VALUES (?,?,?,?,?,?,?,?,?)",
-                id, userId, item, valueNum, valueText, unit, safeRaw, conversationId, Timestamp.valueOf(recordedAt));
-        return new RecordView(id, item, valueText, valueNum, unit, recordedAt);
+                id, userId, item, valueNum, valueText, safeUnit, safeRaw, conversationId, Timestamp.valueOf(recordedAt));
+        return new RecordView(id, item, valueText, valueNum, safeUnit, recordedAt);
+    }
+
+    /**
+     * 老人说“记错了”：删掉他自己最近的那一条，返回删掉的那条；一条都没有返回 null。
+     *
+     * <p>为什么只给“最近一条”这一个口子，而不是让对话按 id 删：老人看不见 id，他说的“刚才那条”
+     * 指的就是时间上最近的那一条。把面放窄，误删的可能就小。
+     *
+     * <p>为什么真的删而不是标记作废：这条是他自己拿给医生看的数据，留着一条他知道是错的数，
+     * 汇总（“把这个月的血压发给女儿”）会把它算进平均里——那比少一条糟得多。
+     *
+     * @return 被删掉的那一条（回读给他看删对了没有）；没有可删的返回 null
+     */
+    public RecordView deleteLatest(String userId) {
+        List<RecordView> latest = recent(userId, null, 1, 0);
+        if (latest.isEmpty()) return null;
+        RecordView row = latest.get(0);
+        jdbc.update("DELETE FROM health_records WHERE user_id=? AND id=?", userId, row.id());
+        return row;
     }
 
     /** 按人回查最近几条；item 为 null 表示不限项目（“我最近都量了什么”）。最新的在前。 */

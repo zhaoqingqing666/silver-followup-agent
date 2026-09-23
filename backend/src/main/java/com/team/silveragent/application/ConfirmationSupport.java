@@ -2,6 +2,7 @@ package com.team.silveragent.application;
 
 import com.team.silveragent.domain.model.AgentTurnResponse;
 import com.team.silveragent.domain.model.AgentTurnResponse.QuickReply;
+import com.team.silveragent.application.health.HealthRecordStore;
 import com.team.silveragent.application.memo.MemoStore;
 
 import java.time.LocalDateTime;
@@ -87,6 +88,15 @@ abstract class ConfirmationSupport {
 
     /** 健康数值落库成功后的回读话术（“已记下：9月14日 21:30 血压 100 mmHg…”）。 */
     abstract String healthRecordedReply(String item, String valueText, String unit, LocalDateTime at);
+
+    /**
+     * 一句话报了几项、一次记下几条时的回读话术。
+     *
+     * <p>和备忘那边 {@link #memoRecordedReply} 同一条理由：收的是<b>真写进库的那几条</b>。
+     * 卡上列着两行（"体温 36.5""心率 80"），回读就得逐条念出来，老人才能发现其中哪个听错了；
+     * 念的又必须是库里那几条，不能是执行器手里那份打算写的。
+     */
+    abstract String healthRecordedReply(List<HealthRecordStore.RecordView> recorded);
 
     /** 这张卡是不是「照草稿开新预约」、而且草稿里那个时段已经过去了。 */
     abstract boolean draftSlotExpired(ConversationState state);

@@ -60,6 +60,31 @@ class HealthReportTests {
     }
 
     @Test
+    void aHalfBloodPressureReadingIsNotCountedAsSystolic() {
+        // 只说了一半的“低压95”：解析器把“低压”两个字标在值前面（见 DIASTOLIC_MARK），
+        // 汇总里不能把它当收缩压——那会算出“平均 117/86”这种谁也没量到过的血压发给家属。
+        seed("血压", "138", "138/86", "mmHg", 1);
+        seed("血压", "95", "低压95", "mmHg", 1);
+
+        HealthReportService.Report report =
+                reports.summarize("user-001", HealthReportParser.Window.WEEK, "血压", "健康记录");
+
+        // 收缩压只有 138 这一次；舒张压是 86 和 95 的平均（90.5 → 91）
+        assertThat(report.text()).contains("平均 138/91");
+        assertThat(report.text()).doesNotContain("117");
+    }
+
+    @Test
+    void aWindowWithOnlyDiastolicReadingsIsLabelledInsteadOfReportedAsSystolic() {
+        seed("血压", "95", "低压95", "mmHg", 1);
+
+        String text = reports.summarize("user-001", HealthReportParser.Window.WEEK, "血压", "健康记录").text();
+
+        // 直接报“95 mmHg”会被当成收缩压（那是个低到危险的值），标出这是低压
+        assertThat(text).contains("低压 95");
+    }
+
+    @Test
     void sentenceNamesTheWindowAndTheItem() {
         HealthReportParser.ReportIntent intent = HealthReportParser.detect("把这个月的血压发给女儿");
 
@@ -113,6 +138,64 @@ class HealthReportTests {
         HealthReportService.Report report = reports.summarize("user-001", HealthReportParser.Window.WEEK, "血压", "健康记录");
 
         assertThat(report.text()).contains("血压 1 次（未写具体数值）");
+    }
+
+    @Test
+    void weightSaidInJinIsNotAveragedTogetherWithKilograms() {
+        // 190 斤和 95 公斤是同一个重量，只是老人换了个说法
+        seed("体重", "190", "190", "斤", 0);
+        seed("体重", "95", "95", "kg", 1);
+
+        HealthReportService.Report report = reports.summarize("user-001", HealthReportParser.Window.WEEK, "体重", "健康记录");
+
+        assertThat(report.text()).contains("体重 2 次，平均 95 kg");
+        // 142 是 190 和 95 直接平均出来的数——没人量到过它，不能发到家属手上
+        assertThat(report.text()).doesNotContain("142");
+    }
+
+    @Test
+    void theOtherBucketIsListedByItsOwnWordsInsteadOfAveraged() {
+        // 「其他」是认不出项目的兜底桶：尿酸、步数、身高都落在这里，彼此没有量纲关系。
+        // 而且解析器给「其他」存的单位是空串，算出来的数连个量纲都挂不上。
+        seed("其他", "5000", "我今天走了5000步", "", 1);
+        seed("其他", "420", "我尿酸420", "", 1);
+        seed("血压", "138", "138/86", "mmHg", 1);
+
+        HealthReportService.Report report = reports.summarize("user-001", HealthReportParser.Window.WEEK, null, "健康记录");
+
+        // 列原话，家属自己看得懂；“平均 2710”是“5000 步”和“尿酸 420”凑出来的，谁也没量到过
+        assertThat(report.text()).contains("其他 2 次：", "我今天走了5000步", "我尿酸420");
+        assertThat(report.text()).doesNotContain("2710", "最高", "平均");
+        // 正经项目照旧走平均，别被这一条带歪
+        assertThat(report.text()).contains("血压 1 次，138/86 mmHg");
+    }
+
+    @Test
+    void aLongOtherBucketStillLeavesRoomForTheRealItems() {
+        // 一条原话最长能到 60 字，一个月攒下来能把整条消息顶过 family_notifications.content
+        // 的 500 字上限——那样连结尾的“等 N 项未列出”都送不出去，所以「其他」自己先收口
+        for (int index = 0; index < 12; index++) {
+            seed("其他", String.valueOf(100 + index),
+                    "我今天感觉还可以就是腿有点酸走了" + (100 + index) + "步不想再出门了", "", 1);
+        }
+        seed("血压", "138", "138/86", "mmHg", 1);
+
+        HealthReportService.Report report = reports.summarize("user-001", HealthReportParser.Window.WEEK, null, "健康记录");
+
+        assertThat(report.text()).contains("其他 12 次（只列最近", "血压 1 次，138/86 mmHg");
+        assertThat(report.text().length()).isLessThan(500);
+    }
+
+    @Test
+    void aReadingWithoutAUnitDoesNotStripTheUnitFromTheWholeLine() {
+        // 最新那条是口语条（“我血压有点高”）：没有数，也没有单位
+        seed("血压", "138", "138/86", "mmHg", 1);
+        seed("血压", null, "有点高", "", 0);
+
+        HealthReportService.Report report = reports.summarize("user-001", HealthReportParser.Window.WEEK, "血压", "健康记录");
+
+        // 单位取自那条真量过的；拿最新那条（没单位）去定，整行的 mmHg 就没了
+        assertThat(report.text()).contains("血压 2 次（另有 1 次未写数值），138/86 mmHg");
     }
 
     @Test

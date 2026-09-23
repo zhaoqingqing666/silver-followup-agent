@@ -40,6 +40,25 @@ function remindLabel(memo: HealthMemo): string {
 }
 
 /**
+ * “下次提醒：明天 08:00”。是今天/明天就直接说，老人算“9月23日离今天几天”很费劲。
+ * 重复提醒的卡片文案（“每天 08:00”）顺延前后长得一模一样，只说这个才看得出点上了。
+ */
+function fmtNextRemind(iso: string): string {
+  const [date, time] = iso.split('T');
+  if (!date) return iso;
+  const clock = time ? time.slice(0, 5) : '';
+  const now = new Date();
+  const day = (offset: number) => {
+    const at = new Date(now.getFullYear(), now.getMonth(), now.getDate() + offset);
+    return `${at.getFullYear()}-${pad2(at.getMonth() + 1)}-${pad2(at.getDate())}`;
+  };
+  if (date === day(0)) return `今天 ${clock}`;
+  if (date === day(1)) return `明天 ${clock}`;
+  const [, month, dayOfMonth] = date.split('-');
+  return `${Number(month)}月${Number(dayOfMonth)}日 ${clock}`;
+}
+
+/**
  * 一条健康备忘的卡片：展示 + 修改 + 删除（到点提醒的还多一个“已完成”）。
  * 首页（有提醒时间的那些）和「我的记录」二级页（长期备忘）共用，两边行为一致。
  */
@@ -55,19 +74,29 @@ export function MemoCard({ memo, onChanged }: {
   const [draftDate, setDraftDate] = useState('');
   const [draftTime, setDraftTime] = useState('08:00');
   const [draftRepeat, setDraftRepeat] = useState<MemoRepeat | ''>('');
+  /** 保存/删除/完成失败时的提示。以前这三处失败都当成功处理，老人以为改好了。 */
+  const [error, setError] = useState('');
+  /** 重复提醒顺延后的下一次，用来告诉老人“下次什么时候”；一次性提醒用不上。 */
+  const [nextRemind, setNextRemind] = useState('');
+
+  const failed = (cause: unknown, fallback: string) =>
+      setError(cause instanceof Error ? cause.message : fallback);
 
   const todayInput = () => {
     const now = new Date();
     return `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
   };
 
-  // 修改：把原内容/提醒时间带进草稿，这一条就地变成编辑卡片
+  // 修改：把原内容和提醒时间带进草稿，这一条就地变成编辑卡片。
+  // **周期不带过来**，默认「仅一次」：和助手那边同一条规矩——周期只认明说的。
+  // 原来把原周期也带进来，于是在这里只改个钟点、保存下去还是「每天」，
+  // 而助手那边同一件事只提醒一次，两条路对不上。少了周期这件事下面会明写出来。
   const startEdit = () => {
     setEditing(true);
     setDraftText(memo.text);
     const timed = memo.remindAt != null;
     setRemindOn(timed);
-    setDraftRepeat(memo.repeatRule ?? '');
+    setDraftRepeat('');
     if (timed && memo.remindAt) {
       const [date, time] = memo.remindAt.split('T');
       setDraftDate(date);
@@ -84,11 +113,38 @@ export function MemoCard({ memo, onChanged }: {
     const remindAt = remindOn && draftDate ? `${draftDate}T${draftTime || '08:00'}:00` : null;
     // 选了“不提醒”就没有重复可言；重复规则只在有到点时间时生效
     const repeat = remindAt && draftRepeat ? draftRepeat : null;
-    setEditing(false);
-    void updateMemo(memo.id, text, remindAt, repeat).then(onChanged).catch(onChanged);
+    setError('');
+    setNextRemind('');
+    // 保存成功才收起编辑卡片：失败时留在编辑态、内容不丢，老人也不用重新输入一遍
+    void updateMemo(memo.id, text, remindAt, repeat)
+        .then(() => { setEditing(false); onChanged(); })
+        .catch(cause => failed(cause, '修改没保存成功，请再试一次'));
+  };
+
+  /**
+   * 「已完成」。重复提醒的点了不会结束，后端把它顺延到下一次，这里把新的到点说出来——
+   * 卡片文案（“每天 08:00”）顺延前后一模一样，不说的话老人会以为没点着，再点一次就把
+   * 明天的也推掉了。
+   */
+  const markDone = () => {
+    setError('');
+    void completeMemo(memo.id)
+        .then(updated => {
+          setNextRemind(updated.repeatRule && updated.remindAt ? fmtNextRemind(updated.remindAt) : '');
+          onChanged();
+        })
+        .catch(cause => failed(cause, '没能标记完成，请再试一次'));
+  };
+
+  const removeMemo = () => {
+    setConfirming(false);
+    setError('');
+    void deleteMemo(memo.id).then(onChanged).catch(cause => failed(cause, '没能删掉，请再试一次'));
   };
 
   const timed = memo.remindAt != null;
+  /** 这条本来就重复、而这次选的不是重复：保存下去周期就没了，得在保存之前说出来。 */
+  const droppingRepeat = remindOn && memo.remindAt !== null && memo.repeatRule !== null && !draftRepeat;
 
   if (editing) {
     return (
@@ -112,6 +168,13 @@ export function MemoCard({ memo, onChanged }: {
             </div>
           </div>
         )}
+        {droppingRepeat && memo.remindAt && memo.repeatRule && (
+          // 亮着的格子就是要保存的那个，但它和这条现在的样子不一样，光看格子看不出少了什么：
+          // 每天吃药的那条从此只响一次，而他可能只是来改个字。明写出来，别让他保存完才发现。
+          <p className="mt-2 rounded-xl border border-[#e0a866] bg-[#fff4e2] px-3 py-2 text-base font-bold text-[#7a4a24]">
+            这条现在是{fmtRepeat(memo.remindAt, memo.repeatRule)}提醒；按这样保存，以后就只提醒这一次。要接着{REPEAT_OPTIONS.find(option => option.value === memo.repeatRule)?.label}提醒，点上面那一格。
+          </p>
+        )}
         {remindOn && (
           <div className="mt-2 grid grid-cols-2 gap-2">
             <div className="rounded-xl border bg-background px-3 py-2">
@@ -124,9 +187,12 @@ export function MemoCard({ memo, onChanged }: {
             </div>
           </div>
         )}
+        {error && (
+          <p role="alert" className="mt-3 rounded-xl bg-[#fdf0ed] px-3 py-2 text-base font-bold text-[#b3452f]">{error}</p>
+        )}
         <div className="mt-3 flex gap-3">
           <button type="button" disabled={!draftText.trim()} onClick={saveEdit} className="flex min-h-12 flex-1 items-center justify-center rounded-2xl bg-[#1f7a4d] text-base font-bold text-white disabled:opacity-40">保存</button>
-          <button type="button" onClick={() => setEditing(false)} className="flex min-h-12 flex-1 items-center justify-center rounded-2xl bg-secondary text-base font-bold text-secondary-foreground">取消</button>
+          <button type="button" onClick={() => { setEditing(false); setError(''); }} className="flex min-h-12 flex-1 items-center justify-center rounded-2xl bg-secondary text-base font-bold text-secondary-foreground">取消</button>
         </div>
       </li>
     );
@@ -136,18 +202,25 @@ export function MemoCard({ memo, onChanged }: {
     <li className="rounded-3xl border bg-card p-4 shadow-sm">
       <p className="break-words text-[17px] leading-7">{memo.text}</p>
       <p className="mt-1 text-sm text-muted-foreground">{remindLabel(memo)}</p>
+      {nextRemind && (
+        <output className="mt-2 block rounded-xl bg-[#e7f3ec] px-3 py-2 text-base font-bold text-[#1f7a4d]">已记下，下次提醒：{nextRemind}</output>
+      )}
+      {error && (
+        <p role="alert" className="mt-2 rounded-xl bg-[#fdf0ed] px-3 py-2 text-base font-bold text-[#b3452f]">{error}</p>
+      )}
       {confirming ? (
         <div className="mt-3 flex items-center justify-between gap-3 rounded-2xl border border-[#e5b7ac] bg-[#fdf1ee] px-3 py-2">
           <span className="text-base font-bold text-[#7a2e1f]">删除这条备忘？</span>
           <span className="flex shrink-0 gap-2">
-            <button type="button" onClick={() => { setConfirming(false); void deleteMemo(memo.id).then(onChanged).catch(onChanged); }} className="min-h-11 rounded-xl bg-[#b3452f] px-4 text-base font-bold text-white">删除</button>
+            <button type="button" onClick={removeMemo} className="min-h-11 rounded-xl bg-[#b3452f] px-4 text-base font-bold text-white">删除</button>
             <button type="button" onClick={() => setConfirming(false)} className="min-h-11 rounded-xl bg-secondary px-4 text-base font-bold text-secondary-foreground">取消</button>
           </span>
         </div>
       ) : (
         <div className="mt-3 flex gap-2 border-t pt-3">
           {timed && (
-            <button type="button" onClick={() => { void completeMemo(memo.id).then(onChanged).catch(onChanged); }} className="flex min-h-12 flex-1 items-center justify-center rounded-2xl bg-[#e7f3ec] text-base font-bold text-[#1f7a4d]">已完成</button>
+            // 重复提醒上写“已完成”会让人以为是“这条以后都完了”——它的意思只是“这次做完了”
+            <button type="button" onClick={markDone} className="flex min-h-12 flex-1 items-center justify-center rounded-2xl bg-[#e7f3ec] text-base font-bold text-[#1f7a4d]">{memo.repeatRule ? '这次做完了' : '已完成'}</button>
           )}
           <button type="button" onClick={startEdit} className="flex min-h-12 flex-1 items-center justify-center rounded-2xl bg-secondary text-base font-bold text-secondary-foreground">修改</button>
           <button type="button" onClick={() => setConfirming(true)} className="flex min-h-12 flex-1 items-center justify-center rounded-2xl bg-[#fdf0ed] text-base font-bold text-[#b3452f]">删除</button>

@@ -8,6 +8,17 @@ CREATE TABLE IF NOT EXISTS users (
 ALTER TABLE users ADD COLUMN IF NOT EXISTS home_longitude DOUBLE PRECISION;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS home_latitude DOUBLE PRECISION;
 
+-- 健康档案：过敏史、既往病史、身高、体重（当前值），以及"最近是谁填的、什么时候"。
+-- 用 ADD COLUMN IF NOT EXISTS 追加，已有的库重启就自动加上，不用清数据。
+-- 身高体重存的是**当前值**（由人填），每一次测量的历史在 health_records 里；两者可能不一致，
+-- 家属端那一页会把"最近一次记录"一起显示出来（见 HealthProfileStore 的说明）。
+ALTER TABLE users ADD COLUMN IF NOT EXISTS allergies VARCHAR(300);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS medical_history VARCHAR(500);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS height_cm INT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS weight_kg DOUBLE PRECISION;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS health_profile_updated_by VARCHAR(40);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS health_profile_updated_at TIMESTAMP;
+
 CREATE TABLE IF NOT EXISTS hospitals (
   id VARCHAR(40) PRIMARY KEY,
   name VARCHAR(100) NOT NULL,

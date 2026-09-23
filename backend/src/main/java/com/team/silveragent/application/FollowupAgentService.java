@@ -1,5 +1,6 @@
 package com.team.silveragent.application;
 
+import com.team.silveragent.application.ConversationState.PendingRecord;
 import com.team.silveragent.application.care.CareBookingService;
 import com.team.silveragent.application.care.CareCatalogRepository;
 import com.team.silveragent.application.care.CareService;
@@ -179,6 +180,15 @@ public class FollowupAgentService extends ConfirmationSupport {
     };
     /** 老人表示不记了。注意判定要排在“记”之前，否则“别记下来”会被当成“记下来”。 */
     private static final String[] RECORD_DROP_WORDS = {"不记", "不用记", "别记", "不要记", "算了", "取消", "不存"};
+    /**
+     * 老人说他没有数（“没量过”“记不清”）。
+     *
+     * <p>这不是“不记”：他说了这么一句关于血压的话，只是手上没有数，那就照他的话记下来。
+     * 追第二遍是难为他——他要是量过，第一遍就说出来了。
+     */
+    private static final String[] NO_NUMBER_WORDS = {
+            "没量过", "没量", "没测过", "没测", "没数", "不记得", "记不清", "不知道", "说不好"
+    };
     /** 助手指认备忘用的“第2条 / 第二条”。 */
     private static final Pattern MEMO_ORDINAL = Pattern.compile("第\\s*([0-9]{1,2}|[一二两三四五六七八九十]{1,2})\\s*条");
 
@@ -512,6 +522,33 @@ public class FollowupAgentService extends ConfirmationSupport {
                 return resolved;
             }
         }
+        // 反问“这是斤还是公斤”之后老人的回答（“是斤”“95公斤”）。同样：答的不是单位就返回 null，
+        // 这句话照常走下面的链路，不把老人卡在这一问上。
+        if ("RECORD_UNIT".equals(state.pendingAction)) {
+            AgentTurnResponse resolved = applyRecordUnit(state, value);
+            if (resolved != null) {
+                conversations.addMessage(state.id, "user", value);
+                return resolved;
+            }
+        }
+        // 反问“量出来是多少”之后老人的回答（“135”“没量过”）。同样：说的不是这件事就返回 null，
+        // 这句话照常走下面的链路，不把老人卡在这一问上。
+        if ("RECORD_VALUE".equals(state.pendingAction)) {
+            AgentTurnResponse resolved = applyRecordValue(state, value);
+            if (resolved != null) {
+                conversations.addMessage(state.id, "user", value);
+                return resolved;
+            }
+        }
+        // 反问“这是哪一项”之后老人的回答（点按钮“血压”，或直接说“血压”）。同样：答的不是
+        // 项目就返回 null，这句话照常走下面的链路，不把老人卡在这一问上。
+        if ("RECORD_ITEM".equals(state.pendingAction)) {
+            AgentTurnResponse resolved = applyRecordItem(state, value);
+            if (resolved != null) {
+                conversations.addMessage(state.id, "user", value);
+                return resolved;
+            }
+        }
         AgentContext context = new AgentContext(state.stage.name(), knownFacts(state),
                 clock.today(), conversations.recentMessages(state.id), identityOf(state),
                 conversations.recentVision(state.id));
@@ -558,13 +595,20 @@ public class FollowupAgentService extends ConfirmationSupport {
             if (report != null && dailyHealthContext(state)) {
                 return healthReportReply(state, report);
             }
-            // 实测数值（“我的血压是100”“我最近血压多少”）：备忘是“要做的事”，这是“已经量到的数”，分家存
-            HealthRecordParser.RecordIntent record = HealthRecordParser.detect(value);
-            if (record != null && (record.kind() == HealthRecordParser.Kind.QUERY || dailyHealthContext(state)
-                    || replacesPendingHealthRecord(state, record))) {
-                return healthRecordReply(state, record, value);
+            // 实测数值（“我的血压是100”“我最近血压多少”）：备忘是“要做的事”，这是“已经量到的数”，分家存。
+            // 一句里报了几项就取几条（“我的身高是180 体重是190”是两条，不是一条）
+            List<HealthRecordParser.RecordIntent> records = healthRecordIntents(value);
+            if (!records.isEmpty() && (records.get(0).kind() == HealthRecordParser.Kind.QUERY
+                    || dailyHealthContext(state) || replacesPendingHealthRecord(state, records.get(0)))) {
+                return healthRecordReply(state, records, value);
             }
-            // 医疗越界不在这里再判一次：函数开头的 safetyGuard.precheck 已经按
+            // 认不出项目、但老人在报一个数（“我今天量了，是135”）：问一句这是哪一项，别猜也别丢。
+        // 与上面那一段同一个闸门（dailyHealthContext），所以卡还悬着时它不会抢那张卡的话
+        if (records.isEmpty()) {
+            AgentTurnResponse whichItem = askWhichItem(state, value);
+            if (whichItem != null) return whichItem;
+        }
+        // 医疗越界不在这里再判一次：函数开头的 safetyGuard.precheck 已经按
             // MedicalBoundaryRules 拦掉了，走到这里的一定不是越界句。
             // 这里只保留本分支新加的语义（备忘、健康记录、周报）。
             // 「取消本次办理 / 取消预约 / 已保留预约 / 查医院 / 查科室 / 求推荐」不在这份名单里：
@@ -1961,6 +2005,25 @@ public class FollowupAgentService extends ConfirmationSupport {
             }
             return respond(state, "请告诉我这个数是不是要重说，还是就按 " + state.pendingRecordValueText + " 记下来。",
                     recordConfirmReplies());
+        }
+        if ("RECORD_UNIT".equals(state.pendingAction)) {
+            if ("RECORD_UNIT".equals(action)) return applyRecordUnit(state, safeValue);
+            return respondWithoutModel(state, "您说的是「"
+                            + spokenRecord(state.pendingRecordItem, state.pendingRecordValueText, null)
+                            + "」，这是斤还是公斤？",
+                    recordUnitReplies(state.pendingRecordValueText));
+        }
+        if ("RECORD_VALUE".equals(state.pendingAction)) {
+            if ("RECORD_VALUE".equals(action)) return applyRecordValue(state, safeValue);
+            return respondWithoutModel(state, "您说的是「"
+                            + spokenRecord(state.pendingRecordItem, state.pendingRecordValueText, null)
+                            + "」，量出来是多少？",
+                    recordValueReplies(state.pendingRecordValueText));
+        }
+        if ("RECORD_ITEM".equals(state.pendingAction)) {
+            if ("RECORD_ITEM".equals(action)) return applyRecordItem(state, safeValue);
+            return respondWithoutModel(state, "请点一下这是哪一项，也可以直接告诉我，比如说“血压”。",
+                    recordItemReplies());
         }
         if ("CANCEL_TASK".equals(action)) return cancelTask(state);
         if ("RETRY_EXECUTION".equals(action) && state.stage == ConversationState.Stage.PARTIAL) {
@@ -4671,8 +4734,7 @@ public class FollowupAgentService extends ConfirmationSupport {
         } else {
             for (LocalDateTime at : times) {
                 memoTool.create(state.id, state.userId,
-                        prefix + MemoParser.stripSchedule(
-                                MemoParser.textForDay(memoText, at.toLocalDate(), clock.today())),
+                        prefix + MemoParser.stripSchedule(MemoParser.textForDay(memoText, at.toLocalDate(), clock.today())),
                         at, repeat);
             }
         }
@@ -4982,13 +5044,15 @@ public class FollowupAgentService extends ConfirmationSupport {
                 // “把这个月的血压发给女儿”里也有“记录”字样，先让发周报认走，否则永远发不出去
                 HealthReportParser.ReportIntent report = HealthReportParser.detect(value);
                 if (report != null && dailyHealthContext(state)) return healthReportReply(state, report);
-                HealthRecordParser.RecordIntent record = HealthRecordParser.detect(value);
-                if (record == null) return null;
+                List<HealthRecordParser.RecordIntent> records = healthRecordIntents(value);
+                // 认不出项目、但老人在报一个数（“我今天量了，是135”）：问一句这是哪一项，别猜也别丢。
+                // 不在能落地的上下文里时它返回 null，退回原链路
+                if (records.isEmpty()) return askWhichItem(state, value);
                 // 回查历史数值不受上下文限制；要落一条新记录的仍然只在日常上下文里进行——
                 // 例外是他手上那张健康记录卡还没点头时又报了一条新数（见 replacesPendingHealthRecord）
-                if (record.kind() != HealthRecordParser.Kind.QUERY && !dailyHealthContext(state)
-                        && !replacesPendingHealthRecord(state, record)) return null;
-                return healthRecordReply(state, record, value);
+                if (records.get(0).kind() != HealthRecordParser.Kind.QUERY && !dailyHealthContext(state)
+                        && !replacesPendingHealthRecord(state, records.get(0))) return null;
+                return healthRecordReply(state, records, value);
             }
             default -> {
                 return null;
@@ -5188,9 +5252,10 @@ public class FollowupAgentService extends ConfirmationSupport {
     }
 
     /**
-     * 日期没定下来时先问清楚是哪一天。两种情形：
-     * 老人说的那天已经过去了（周四说“这周三”），或者只说了范围没说哪天（“我这周要吃药”）。
-     * 两种都不替他猜——猜出来的日期一旦错了，老人到点没被提醒还查不出原因。
+     * 日期没定下来时先问清楚是哪一天。三种情形：
+     * 老人说的那天已经过去了（周四说“这周三”）；只说了范围没说哪天（“我这周要吃药”“我这个月要吃药”）；
+     * 日子说明白了、可<b>那个点今天已经过完</b>了（傍晚说“今天下午三点”）。
+     * 三种都不替他猜——猜出来的日期一旦错了，老人到点没被提醒还查不出原因。
      */
     private AgentTurnResponse askMemoDay(ConversationState state, MemoParser.MemoIntent memo) {
         state.pendingMemoText = memo.text();
@@ -5203,19 +5268,39 @@ public class FollowupAgentService extends ConfirmationSupport {
         state.stage = ConversationState.Stage.MEMO_TIME;
         confirmations.clear(state);
         List<LocalDate> past = MemoParser.pastWeekdays(memo.text(), clock.today());
-        // “这周/下周”只说范围没说哪天，说“那天已经过去了”是无中生有——那天还没定呢
-        String scope = MemoParser.bareWeekWord(memo.text());
+        // 日期其实说明白了，缺的是这一天里那个点已经过完了（“今天下午三点”在傍晚说）。
+        // 拿“您说的是‘那天’，还没说具体哪一天”去问，老人只会觉得助手没听懂——他没说错日子。
+        // 说的是“这周三”那种已经过去的日子时不走这条：那时要问的确实是“哪一天”（多半是下周三）。
+        LocalDateTime passed = past.isEmpty() ? MemoParser.passedMoment(memo.text(), clock.now()) : null;
+        if (passed != null) {
+            String moved = memoTimeLabel(passed.plusDays(1));
+            return respond(state, "您说的" + memoTimeLabel(passed) + "已经过了。要改成" + moved + "吗？"
+                            + "也可以直接说个时间，比如“明天早上八点”；不需要提醒就说“不用提醒，只记下”。",
+                    List.of(q("改成明天", "MEMO_DAY", "明天"),
+                            q("不用提醒，只记下", "MEMO_DAY", "不用提醒，只记下")));
+        }
+        // “这周/下周”“这个月/下个月”只说范围没说哪天，说“那天已经过去了”是无中生有——那天还没定呢
+        String week = MemoParser.bareWeekWord(memo.text());
+        String scope = week != null ? week : MemoParser.bareMonthWord(memo.text());
         String opening = !past.isEmpty()
                 ? "您说的“" + memoDaysLabel(past) + "”已经过去了。"
                 : "您说的是“" + (scope == null ? "那天" : scope) + "”，还没说具体哪一天。";
-        String suggest = MemoParser.weekDaySuggestion(memo.text(), clock.today());
-        return respond(state, opening
-                        + "您是指哪一天呢？可以告诉我“" + suggest + "”，或者直接说个日期，比如“9月16号”。"
-                        + "不需要提醒就说“不用提醒，只记下”。",
+        // 周范围点得出一个“这周日/下周三”；月范围里没有哪个日子是“显然”的，
+        // 就不摆那枚按钮——替他在这个月里挑一天，比不挑更糟。让他自己说个日期。
+        String suggest = week == null ? null : MemoParser.weekDaySuggestion(memo.text(), clock.today());
+        String how = suggest == null
+                ? "您是指哪一天呢？直接说个日期就行，比如“9月16号”。"
+                : "您是指哪一天呢？可以告诉我“" + suggest + "”，或者直接说个日期，比如“9月16号”。";
+        return respond(state, opening + how + "不需要提醒就说“不用提醒，只记下”。",
                 memoDayReplies(suggest));
     }
 
+    /** 第一枚按钮是给周范围的“这周日/下周三”；月范围给不出具体哪天，就只摆后两枚。 */
     private List<QuickReply> memoDayReplies(String suggest) {
+        if (suggest == null) {
+            return List.of(q("明天", "MEMO_DAY", "明天"),
+                    q("不用提醒，只记下", "MEMO_DAY", "不用提醒，只记下"));
+        }
         return List.of(
                 q(suggest, "MEMO_DAY", suggest),
                 q("明天", "MEMO_DAY", "明天"),
@@ -5476,6 +5561,10 @@ public class FollowupAgentService extends ConfirmationSupport {
             cancelMemoCommand(state);
             return memoHandoff(state, "好的，已把「" + text + "」改成不再提醒，只留在健康备忘里。" + tail);
         }
+        // 周期只认老人**这一句里说了的**。他没说周期，这条改完就只剩这一次——不能替他沿用
+        // 这条备忘原来那个：老人说的是“明天早上七点”这一天，系统照原来的周期办就成了
+        // “以后每周三 07:00”“以后每月23号 07:00”，等于替他许了个他从没提过的长期承诺，
+        // 原来那个周五/12号还一并丢了。想接着重复的，说“改成每天早上七点”就行，一句话的事。
         String repeat = MemoParser.repeatRuleIn(value);
         LocalDate anchor = null;
         if (repeat != null && !"DAILY".equals(repeat)) {
@@ -5496,12 +5585,21 @@ public class FollowupAgentService extends ConfirmationSupport {
             return respond(state, "没听清要改成什么时候。请再说一个时间，比如“明天早上八点”；不想再提醒就说“不用提醒了”。",
                     memoStopRemindReply());
         }
+        // 重复提醒存在 remind_at 里的始终是“下一次到点”（见 MemoStore 类注释）：老人说的那个钟点
+        // 可能已经过去了（周三 16:00 说“改到每周三下午三点”），直接存会留一条已经过期的提醒。
+        LocalDateTime remindAt = repeat == null ? at : MemoStore.nextOccurrence(at, repeat, clock.now());
         callTool(state, "memo.update",
-                Map.of("memoId", memo.id(), "remindAt", at, "repeat", repeat == null ? "仅一次" : repeat),
-                () -> memoTool.update(state.id, state.userId, memo.id(), text, at, repeat));
+                Map.of("memoId", memo.id(), "remindAt", remindAt, "repeat", repeat == null ? "仅一次" : repeat),
+                () -> memoTool.update(state.id, state.userId, memo.id(), text, remindAt, repeat));
         cancelMemoCommand(state);
-        String when = repeat == null ? memoTimeLabel(at) : "以后" + memoRepeatLabel(at, repeat);
-        return memoHandoff(state, "好的，已把「" + text + "」的提醒改成" + when + "，到点打开应用会提醒您。" + tail);
+        // 说的是**存进去的那个**时间：顺延过之后 at 可能已经不对了
+        String when = repeat == null ? memoTimeLabel(remindAt) : "以后" + memoRepeatLabel(remindAt, repeat);
+        // 原来重复、这一句又没说周期：改完就只剩这一次了。这件事必须说出来——不说的话，
+        // 每天吃的那顿药从此不再响，而他以为自己只是换了个钟点，从回话里看不出任何异常。
+        String dropped = repeat == null && memo.repeatRule() != null
+                ? "（这条原来" + memoRepeatLabel(memo.remindAt(), memo.repeatRule()) + " 提醒，现在只提醒这一次。）"
+                : "";
+        return memoHandoff(state, "好的，已把「" + text + "」的提醒改成" + when + "，到点打开应用会提醒您。" + dropped + tail);
     }
 
     /** 删之前先问一句：删掉就找不回来了。 */
@@ -5847,16 +5945,159 @@ public class FollowupAgentService extends ConfirmationSupport {
      * 由三个出口拼在<b>草稿</b>里——不是等出口把回复定稿之后再往上一贴：定稿那一步已经写进会话
      * 历史了（见 {@code finish}），补话只落在屏幕上、没落进他这一轮的记录，下一轮的上下文就对不上。
      */
-    private AgentTurnResponse healthRecordReply(ConversationState state, HealthRecordParser.RecordIntent intent,
+    private AgentTurnResponse healthRecordReply(ConversationState state, List<HealthRecordParser.RecordIntent> records,
                                                 String raw) {
         String also = alsoATimedMemoNote(raw);
-        if (intent.kind() == HealthRecordParser.Kind.QUERY) return healthRecordQuery(state, intent.item(), also);
-        // 血压 800、体温 60 这种量不出来的数：先问一句是重测还是照记。既不静默丢（老人报了数却
-        // 什么都没发生，还会顺着链路被问“去哪家医院”），也不闷头记成一条不可能的数据。
-        // 这一问本身就是一次照面：老人当场答“照记”或重报一个数，都算他为这个数表过态，
-        // 那之后直写（见 applyRecordConfirm），不再叠一张确认卡问第二遍。
-        if (intent.needsConfirm()) return askRecordConfirm(state, intent, raw, also);
-        return healthRecordConfirmCard(state, intent, raw, also);
+        HealthRecordParser.RecordIntent first = records.get(0);
+        // 撤销只有一条路，和“报了几项”无关：他说的“记错了”冲着的就是最近那一条
+        if (first.kind() == HealthRecordParser.Kind.UNDO) return undoLatestRecord(state);
+        if (records.size() == 1 && first.kind() == HealthRecordParser.Kind.QUERY) {
+            return healthRecordQuery(state, first.item(), also);
+        }
+        return continueRecords(state, records, raw, also);
+    }
+
+    /**
+     * 这一句里报了几项。
+     *
+     * <p>撤销那条（{@code Kind.UNDO}）也在里头：它解析出来的记录项目、数值、时间都是空的，
+     * 谁要是把它当成一条普通记录去发确认卡，签发那一刻就会被判成“缺了执行要用的内容”而报错。
+     * 所以 {@link #healthRecordReply} 第一件事就是把它认走。
+     */
+    private static List<HealthRecordParser.RecordIntent> healthRecordIntents(String value) {
+        return HealthRecordParser.detectAll(value);
+    }
+
+    /**
+     * 老人说“记错了”：删掉他自己最近的那一条，并把删掉的那条念给他听。
+     *
+     * <p>为什么要念：他说“记错了”，可他心里那条“错的”未必就是库里最近的那一条——很可能他刚
+     * 报了两个数，想删的是头一个。念出来他才知道究竟删掉了哪条；删错了再说一句“记错了”，
+     * 删的就是下一条。不念的话，他以为删掉的是 A、实际没的是 B，而 A 还在。
+     *
+     * <p>一条都没有时不编一句“好的已删除”：那是他说了一句话、库里什么都没发生。
+     */
+    private AgentTurnResponse undoLatestRecord(ConversationState state) {
+        HealthRecordStore.RecordView removed = callTool(state, "healthRecord.delete",
+                Map.of("userId", state.userId),
+                () -> healthRecordTool.deleteLatest(state.id, state.userId));
+        if (removed == null) {
+            return memoHandoff(state, "您还没记过数值，没有可以删的。想记就跟我说“我的血压是100”。");
+        }
+        return memoHandoff(state, "好，已经把刚才那条「" + recordLabel(removed) + "」删掉了。"
+                + "要是删错了，再说一声“记错了”，我把下一条也删掉。");
+    }
+
+    /** 一条记录念出来：“体重 190 斤”。“其他”那类是老人的原话，本身就不是“项目+数”，只念原话。 */
+    private static String recordLabel(HealthRecordStore.RecordView row) {
+        if (HealthRecordParser.OTHER.equals(row.item())) return row.valueText();
+        return spokenRecord(row.item(), row.valueText(), row.unit());
+    }
+
+    /**
+     * 一句话里报的几项按顺序办：<b>该问的先问清楚，剩下的发一张卡一次确认</b>。
+     *
+     * <p>为什么不能只办第一条（原来就是这样）：老人说了两件事，机器只做了前一件，嘴上还说
+     * “好的已记下”，第二件在他看不见的地方消失了——回看时那一条根本不在。
+     *
+     * <p>为什么要先问再发卡：卡上列着的每一行，点一次“确认记下”就要原样写进库。带着疑问的那条
+     * （血压 800 量不出来、190 没说单位）先问一句，答完它就是一条干净的记录，也就能和其余几条
+     * 一起上卡；否则卡上会写着一个我们其实还没敢认的数，而他一点头就把它当真的记下了。
+     *
+     * @param records 这一句里认出来的全部记录，按老人说的顺序
+     */
+    private AgentTurnResponse continueRecords(ConversationState state,
+                                              List<HealthRecordParser.RecordIntent> records, String raw,
+                                              String also) {
+        // 这一刻是“他说的这段话”的时刻，这一句里的每一条都取同一个：卡上写着哪一刻，
+        // 写进库的那几条就都得是哪一刻，不能第一条是这一秒、第二条是下一秒
+        LocalDateTime at = clock.now();
+        for (int i = 0; i < records.size(); i++) {
+            if (!needsAQuestion(records.get(i))) continue;
+            // 手上那张卡写着的是上一条数值，而这一问之后要记的是另一条。卡不撤下来，
+            // 他对着卡上那行点头、写进去的却是这一条（草稿换了、凭据还活着）——正是
+            // healthRecordConfirmCard 那段注释里说的那件事，这里也得撤一次。
+            String note = also;
+            if (healthRecordCardPending(state)) {
+                note = replacedRecordLabel(state) + "还没确认，我撤下来了，没有记进去。" + also;
+                confirmations.clear(state);
+            }
+            List<HealthRecordParser.RecordIntent> rest = new ArrayList<>(records);
+            rest.remove(i);
+            // 问的这一条进手上那几个暂存字段，其余几条另存一处（见 recordRestOf）：
+            // 混在一起，答完之后就分不清哪条是哪条了
+            List<PendingRecord> waiting = recordRestOf(rest, raw, at);
+            // “只有说法、没有数”（我血压有点高）问的是“量出来是多少”，和“这个数不太对”
+            // 不是同一问：混用一个状态名，他答的“没量过”会被拿去当“数不太对”的回答解析
+            return records.get(i).issue() == HealthRecordParser.Issue.NO_VALUE
+                    ? askRecordValue(state, records.get(i), raw, note, waiting, at)
+                    : askRecordConfirm(state, records.get(i), raw, note, waiting, at);
+        }
+        return healthRecordConfirmCard(state, records, raw, also);
+    }
+
+    /**
+     * 这一条要不要先问一句。
+     *
+     * <p>量不出的数（血压 800）、说反了的一对数（80/120）、没说单位的体重（190）问的是
+     * “他说的是不是这个意思”；只有说法、没有数的那条（“我血压有点高”）问的是“量出来是多少”。
+     * 四问各有各的措辞和按钮（见 {@link #askRecordValue} 与 {@link #askRecordConfirm}），
+     * 共同点是：<b>都没有一个可以直接写进库的数</b>，直接落库就是把我们没敢认的东西当真的记下。
+     */
+    private static boolean needsAQuestion(HealthRecordParser.RecordIntent intent) {
+        return intent.issue() != null;
+    }
+
+    /** 只有说法、没有数的那一条（“血压 有点高”）：按他说的那句存，不挂单位。 */
+    private static HealthRecordParser.RecordIntent spokenOnly(String item, String valueText) {
+        return new HealthRecordParser.RecordIntent(HealthRecordParser.Kind.RECORD, item, null, valueText, null, null);
+    }
+
+    /** 把还没办的那几条暂存起来：原话与量到的时刻一起带着走，接着办时不重新解析、不重新取时间。 */
+    private static List<PendingRecord> recordRestOf(List<HealthRecordParser.RecordIntent> rest, String raw,
+                                                    LocalDateTime at) {
+        List<PendingRecord> stashed = new ArrayList<>();
+        for (HealthRecordParser.RecordIntent intent : rest) {
+            stashed.add(new PendingRecord(intent.item(), intent.valueNum(), intent.valueText(), intent.unit(),
+                    raw, at, intent.issue() == null ? null : intent.issue().name()));
+        }
+        return List.copyOf(stashed);
+    }
+
+    /** 暂存的那几条还原成待办的记录（带着当时那个疑问：该问的照问，该记的照记）。 */
+    private static List<HealthRecordParser.RecordIntent> restoreRecordRest(List<PendingRecord> rest) {
+        List<HealthRecordParser.RecordIntent> intents = new ArrayList<>();
+        if (rest == null) return intents;
+        for (PendingRecord record : rest) {
+            intents.add(new HealthRecordParser.RecordIntent(HealthRecordParser.Kind.RECORD, record.item(),
+                    record.valueNum(), record.valueText(), record.unit(),
+                    record.issue() == null ? null : HealthRecordParser.Issue.valueOf(record.issue())));
+        }
+        return intents;
+    }
+
+    /**
+     * 老人把那一问问清楚了（答了单位、重报了一个数、说了“照记”）之后怎么落。
+     *
+     * <p>这一句里<b>没有别的</b>了就直接写库：他刚为这个数表过态，再叠一张卡让他点第二次头
+     * 是白问一遍——一个数问两遍，老人只会觉得这件事没完。这一句里<b>还有别的</b>几条时，
+     * 手上这条加上等着的那几条，照 {@link #continueRecords} 的规矩接着办：该问的下一问继续问，
+     * 剩下的一起上卡（多值只有一条出口，就是那张卡）。
+     */
+    private AgentTurnResponse resumeRecords(ConversationState state, HealthRecordParser.RecordIntent settled,
+                                            String raw, String also, LocalDateTime at) {
+        List<HealthRecordParser.RecordIntent> rest = restoreRecordRest(state.pendingRecordRest);
+        clearPendingRecord(state);
+        if (rest.isEmpty()) return recordValue(state, settled, raw, at);
+        List<HealthRecordParser.RecordIntent> all = new ArrayList<>();
+        all.add(settled);
+        all.addAll(rest);
+        return continueRecords(state, all, raw, also);
+    }
+
+    /** 一条读数念出来：“体重 190 斤”。没有单位时不拖一个空格，更不会印出一个 null。 */
+    private static String spokenRecord(String item, String valueText, String unit) {
+        return unit == null || unit.isBlank() ? item + " " + valueText : item + " " + valueText + " " + unit;
     }
 
     /**
@@ -5905,7 +6146,7 @@ public class FollowupAgentService extends ConfirmationSupport {
      * 不是他正在办的事——原来办到哪一步沿用最早那一次记下的，确认之后照样接着办。
      */
     private AgentTurnResponse healthRecordConfirmCard(ConversationState state,
-                                                      HealthRecordParser.RecordIntent intent, String raw,
+                                                      List<HealthRecordParser.RecordIntent> records, String raw,
                                                       String also) {
         // 先清旧凭据、再改草稿，顺序不能反：只改草稿不清凭据，屏幕上那张旧卡（写着上一条）就配上了
         // 这一条新数值——他对着卡上的「血压 138」点头，写进去的是「血糖 6.4」。清掉之后那张卡上的
@@ -5913,12 +6154,17 @@ public class FollowupAgentService extends ConfirmationSupport {
         boolean replacing = healthRecordCardPending(state);
         String replaced = replacing ? replacedRecordLabel(state) : null;
         if (replacing) confirmations.clear(state);
-        state.pendingRecordItem = intent.item();
-        state.pendingRecordValueNum = intent.valueNum();
-        state.pendingRecordValueText = intent.valueText();
-        state.pendingRecordUnit = intent.unit();
+        // 卡上列着的是一整句里的每一条，写进库的也必须是一条不少（见 HealthRecordExecutor#commit）。
+        // 手上暂存的那几个字段只装得下第一条，其余几条另存一列，一起随凭据进快照。
+        HealthRecordParser.RecordIntent first = records.get(0);
+        LocalDateTime at = clock.now();
+        state.pendingRecordItem = first.item();
+        state.pendingRecordValueNum = first.valueNum();
+        state.pendingRecordValueText = first.valueText();
+        state.pendingRecordUnit = first.unit();
         state.pendingRecordRaw = raw;
-        state.pendingRecordAt = clock.now();
+        state.pendingRecordAt = at;
+        state.pendingRecordRest = recordRestOf(records.subList(1, records.size()), raw, at);
         if (!"RECORD_CARD".equals(state.pendingAction)) {
             state.recordReturnAction = state.pendingAction;
             state.recordReturnStage = state.stage;
@@ -5926,20 +6172,29 @@ public class FollowupAgentService extends ConfirmationSupport {
         state.pendingAction = "RECORD_CARD";
         String confirmationId = confirmations.issue(state,
                 ConfirmationService.PendingOperation.Kind.HEALTH_RECORD, List.of());
-        String value = state.pendingRecordValueText + " " + state.pendingRecordUnit;
-        ConfirmationCard card = new ConfirmationCard("帮您记下这条健康数值吗？",
-                List.of("记录内容：" + state.pendingRecordItem + " " + value,
-                        "记录时间：" + state.pendingRecordAt.format(MEMO_LABEL)),
+        List<String> lines = new ArrayList<>();
+        for (HealthRecordParser.RecordIntent record : records) {
+            lines.add("记录内容：" + spokenRecord(record.item(), record.valueText(), record.unit()));
+        }
+        lines.add("记录时间：" + at.format(MEMO_LABEL));
+        ConfirmationCard card = new ConfirmationCard("帮您记下" + readingCount(records.size()) + "健康数值吗？",
+                lines,
                 "确认后写入首页“健康记录”，随时可以查看；记错了也能删掉重记。",
                 "确认记下", "先不用", confirmationId);
         // 换卡时把被撤下那条说出来：否则他以为两个数都记了，或者以为上一条已经记进去了
+        String what = records.size() == 1 ? "您说的这个数" : "您说的这几个数";
         String question = (replaced == null
-                ? "您说的这个数，我帮您记到“健康记录”里。需要我记下吗？"
-                : "您说的这个数，我帮您记到“健康记录”里。" + replaced + "还没确认，我撤下来了，"
-                        + "没有记进去。需要我记下现在这一条吗？") + also;
+                ? what + "，我帮您记到“健康记录”里。需要我记下吗？"
+                : what + "，我帮您记到“健康记录”里。" + replaced + "还没确认，我撤下来了，"
+                        + "没有记进去。需要我记下现在" + (records.size() == 1 ? "这一条" : "这几条") + "吗？") + also;
         return finish(state, new AgentTurnResponse(state.id, state.stage.name(),
                 question, List.of(),
                 null, card, null, traces.findByConversation(state.id)));
+    }
+
+    /** 卡上那几行怎么称呼：“这条 / 这两条 / 这几条”。 */
+    private static String readingCount(int count) {
+        return count == 1 ? "这条" : count == 2 ? "这两条" : "这几条";
     }
 
     /** 手上那张卡上记的是哪一条（“刚才那条「血压 138 mmHg」”），只说给老人听，不作任何判据。 */
@@ -5954,8 +6209,29 @@ public class FollowupAgentService extends ConfirmationSupport {
     /** 健康数值落库成功后的回读话术（确认卡与反问后直写两条路共用）。 */
     @Override
     String healthRecordedReply(String item, String valueText, String unit, LocalDateTime at) {
-        return "好的，已记下：" + at.format(MEMO_LABEL) + " " + item + " " + valueText + " " + unit
+        // 单位可能是空的（“我血压有点高”这条只存了他说的话，没挂单位）：不拖一个空格，也不印 null
+        return "好的，已记下：" + at.format(MEMO_LABEL) + " " + item + " " + valueText
+                + (unit == null || unit.isBlank() ? "" : " " + unit)
                 + "。以后想回看，问我“我最近" + item + "多少”就行，首页“健康记录”里也留着。";
+    }
+
+    @Override
+    String healthRecordedReply(List<HealthRecordStore.RecordView> recorded) {
+        if (recorded.isEmpty()) return "好的，已记下。";
+        if (recorded.size() == 1) {
+            HealthRecordStore.RecordView only = recorded.get(0);
+            return healthRecordedReply(only.item(), only.valueText(), only.unit(), only.recordedAt());
+        }
+        // 一句里报了几项就逐条念几项：他只说了“都记下了”是看不出哪一个听错的，
+        // 念出来他才能当场发现“我说的不是这个数”。念的是写进库的那几条，不是打算写的那几条。
+        StringBuilder readings = new StringBuilder();
+        for (HealthRecordStore.RecordView row : recorded) {
+            if (readings.length() > 0) readings.append("、");
+            readings.append(row.unit() == null || row.unit().isBlank()
+                    ? row.item() + " " + row.valueText() : row.item() + " " + row.valueText() + " " + row.unit());
+        }
+        return "好的，已记下：" + recorded.get(0).recordedAt().format(MEMO_LABEL) + " " + readings
+                + "。以后想回看，问我“我最近血压多少”就行，首页“健康记录”里也留着。";
     }
 
     /**
@@ -6003,11 +6279,16 @@ public class FollowupAgentService extends ConfirmationSupport {
     }
 
     /**
-     * 数值看起来不对时先反问，暂存这一条等老人表态。
-     * 这里只判断“量不出这个数”，不判断“这个数好不好”——后者是医学判断，助手不做。
+     * 数值看起来不对（或者单位没交代）时先反问，暂存这一条等老人表态。
+     * 这里只判断“量不出这个数”“这是斤还是公斤”，不判断“这个数好不好”——后者是医学判断，助手不做。
+     *
+     * @param rest 这一句里<b>其余几条</b>（已经暂存好、原顺序不动），等他答完这一问接着办
+     *             （见 {@link #continueRecords}）
+     * @param at   这一段话的时刻：这一问的这条和等着的那几条共用同一个，答完之后卡上写的、
+     *             写进库的都是它
      */
     private AgentTurnResponse askRecordConfirm(ConversationState state, HealthRecordParser.RecordIntent intent,
-                                               String raw, String also) {
+                                               String raw, String also, List<PendingRecord> rest, LocalDateTime at) {
         state.pendingRecordItem = intent.item();
         state.pendingRecordValueNum = intent.valueNum();
         state.pendingRecordValueText = intent.valueText();
@@ -6015,18 +6296,33 @@ public class FollowupAgentService extends ConfirmationSupport {
         // 原话与量到的时刻一起暂存：他答“照记”时落库的仍是这一条（同一个数、同一刻），
         // 不是“反问之后我们又重新理解了一遍”的另一条
         state.pendingRecordRaw = raw;
-        state.pendingRecordAt = clock.now();
-        // 反问前正在办的流程（复诊办理、改期草稿）要记下来，答完还回去
-        if (!"RECORD_CONFIRM".equals(state.pendingAction)) state.recordReturnAction = state.pendingAction;
-        state.pendingAction = "RECORD_CONFIRM";
-        String value = intent.valueText() + " " + intent.unit();
+        state.pendingRecordAt = at;
+        state.pendingRecordRest = rest == null ? List.of() : rest;
+        // 没说单位的体重走另一个状态名：“这是斤还是公斤”和“这个数不太对”是两个不同的问题，
+        // 混用一个名字，他答的“公斤”会被当成“这个数不太对”的回答去解析。
+        boolean unitAsk = intent.issue() == HealthRecordParser.Issue.UNIT;
+        String pending = unitAsk ? "RECORD_UNIT" : "RECORD_CONFIRM";
+        // 反问前正在办的流程（复诊办理、改期草稿）要记下来，答完还回去。手上刚撤下来一张卡时
+        // 不能记 "RECORD_CARD"：那是个“屏幕上正显示着一张卡”的状态，凭据已经撤了，
+        // 还回去只会让会话停在一个没有卡的空状态上——要还的是那张卡弹出来之前的动作。
+        String previous = "RECORD_CARD".equals(state.pendingAction) ? state.recordReturnAction : state.pendingAction;
+        if (!pending.equals(previous)) state.recordReturnAction = previous;
+        state.pendingAction = pending;
+        String value = spokenRecord(intent.item(), intent.valueText(), intent.unit());
+        // 数没问题、单位没交代（“我体重190”）：190 斤和 190 公斤都说得通，替他挑一个就是替他改数据。
+        // 给两个按钮，点一下就是一个准确的答案，比让他再说一句“是公斤”省事。
+        // 走不经过模型的出口：这一问就是“二选一”，措辞被改写就可能把选项说糊。
+        if (unitAsk) {
+            return respondWithoutModel(state, "您说的是「" + value + "」，这是斤还是公斤？" + also,
+                    recordUnitReplies(intent.valueText()));
+        }
         if (intent.issue() == HealthRecordParser.Issue.SWAPPED) {
-            return respond(state, "您说的是「" + intent.item() + " " + value + "」，这两个数是不是说反了？"
+            return respond(state, "您说的是「" + value + "」，这两个数是不是说反了？"
                             + "血压的前一个数要比后一个大。您重新说一遍，还是就按 " + intent.valueText() + " 记下来？"
                             + also,
                     recordConfirmReplies());
         }
-        return respond(state, "您说的是「" + intent.item() + " " + value + "」，这个数好像不太对："
+        return respond(state, "您说的是「" + value + "」，这个数好像不太对："
                         + intent.item() + "一般量不出这个数来，可能是听错了或者看错了。"
                         + "您重新量一个，还是就按 " + intent.valueText() + " 记下来？" + also,
                 recordConfirmReplies());
@@ -6048,11 +6344,13 @@ public class FollowupAgentService extends ConfirmationSupport {
         // 直接回一个数（“150”“5.6”）：当成重测值，不用老人再把“我的血压是”说一遍
         HealthRecordParser.RecordIntent retry = HealthRecordParser.detect(item + "是" + value);
         if (retry != null && retry.kind() == HealthRecordParser.Kind.RECORD) {
-            // 补话传空串：这是他在回答上一轮的反问（“150”），不是在说第二件事
-            if (retry.needsConfirm()) return askRecordConfirm(state, retry, value, "");  // 换了个数还是量不出来
-            clearPendingRecord(state);
+            // 重报的这个数还带着疑问（量不出来）：再问一遍，这一问换了条记录但其余几条照样等着
+            if (needsAQuestion(retry)) {
+                return askRecordConfirm(state, retry, value, "", state.pendingRecordRest, clock.now());
+            }
             // 重报的这个数记“他说这句话的时刻”：这是新量的一次，不是刚才那条被反问的数
-            return recordValue(state, retry, value);
+            // 重报的这个数记“他说这句话的时刻”：这是新量的一次，不是刚才那条被反问的数
+            return resumeRecords(state, retry, value, "", clock.now());
         }
         if (containsAny(value, RECORD_RETRY_WORDS)) return askRetryRecord(state, item);
         // 短促的应声（“好的”“嗯”）不是别的意思，再问一遍，别当成换了话题
@@ -6065,7 +6363,157 @@ public class FollowupAgentService extends ConfirmationSupport {
         return null;
     }
 
-    /** 老人说“照记”：就按他说的数写进去，他的数据他做主。 */
+    /**
+     * 老人回答“这是斤还是公斤”。
+     *
+     * <p>两种答法都认：点按钮（值就是“斤/公斤”），或者自己说一句（“是斤”“190斤”“95公斤”）。
+     * 说了个数带单位就按那个数记（“95公斤”跟刚才的 190 不是同一个数，他自己改了口）；
+     * 只说了单位就按刚才暂存的那个数记——这就是非要问这一句的原因，替他挑一个单位等于替他改数据。
+     *
+     * <p>答的不是单位（说了别的事）返回 null：把话头交回下面的链路，不把老人卡在这一问上——
+     * 和“这个数不太对”那条反问一个规矩。
+     */
+    private AgentTurnResponse applyRecordUnit(ConversationState state, String answer) {
+        String item = state.pendingRecordItem;
+        if (item == null) {                    // 状态不完整：清掉，别把老人卡在这个问题上
+            clearPendingRecord(state);
+            return null;
+        }
+        String value = answer == null ? "" : answer.trim();
+        if (containsAny(value, RECORD_DROP_WORDS)) {
+            clearPendingRecord(state);
+            return memoHandoff(state, "好的，这条数值先不记了。");
+        }
+        // 他自己又说了一个带单位的数（“95公斤”）：按新说的那个记，数也听他的
+        HealthRecordParser.RecordIntent restated = HealthRecordParser.detect(item + "是" + value);
+        if (restated != null && restated.kind() == HealthRecordParser.Kind.RECORD && !needsAQuestion(restated)) {
+            return resumeRecords(state, restated, "老人回答单位：" + value, "", clock.now());
+        }
+        String unit = unitWord(value);
+        if (unit == null) {
+            // 短促的应声（“嗯”“是这个”）没回答问题，再问一遍；别的说法就当换了话题
+            if (value.length() <= 4 && value.chars().noneMatch(Character::isDigit)) {
+                return respondWithoutModel(state, "您说的是「"
+                                + spokenRecord(item, state.pendingRecordValueText, null) + "」，这是斤还是公斤？",
+                        recordUnitReplies(state.pendingRecordValueText));
+            }
+            clearPendingRecord(state);
+            return null;
+        }
+        // 原话和量到的时刻都在 clearPendingRecord 之前取出来（那个方法会把这些字段清空），
+        // 免得 raw 里留下一个 null、记录时间变成“答单位那一刻”。这一问只是问了一句，
+        // 没有把这条变成另一次测量，写进库的还得是他量到的那一刻。
+        String raw = "老人答了单位：" + state.pendingRecordValueText + unit;
+        LocalDateTime at = state.pendingRecordAt == null ? clock.now() : state.pendingRecordAt;
+        HealthRecordParser.RecordIntent settled = new HealthRecordParser.RecordIntent(
+                HealthRecordParser.Kind.RECORD, item, state.pendingRecordValueNum,
+                state.pendingRecordValueText, unit, null);
+        return resumeRecords(state, settled, raw, "", at);
+    }
+
+    /**
+     * 项目认得出、话里却没有数（“我血压有点高”）时，先问一句数。
+     *
+     * <p>为什么不直接记：一条“血压 有点高”里没有一个数，量出来是多少没人知道，回看时
+     * 帮不上任何忙；为什么不丢掉：老人确实说了这么一句关于血压的话，静默扔掉跟骗他记下了
+     * 是一回事。所以先问一句——答得上就落一个实数，答不上来再按他说的这句记（见
+     * {@link #applyRecordValue}）。
+     *
+     * <p>走 {@code respondWithoutModel}：这一问和后头那排按钮是严丝合缝的一件事，
+     * 措辞被改写就可能问歪。
+     */
+    private AgentTurnResponse askRecordValue(ConversationState state, HealthRecordParser.RecordIntent intent,
+                                             String raw, String also, List<PendingRecord> rest, LocalDateTime at) {
+        state.pendingRecordItem = intent.item();
+        state.pendingRecordValueNum = null;
+        state.pendingRecordValueText = intent.valueText();
+        state.pendingRecordUnit = null;         // 只有说法的那条不挂单位，这一问之后也不挂
+        state.pendingRecordRaw = raw;
+        state.pendingRecordAt = at;
+        state.pendingRecordRest = rest == null ? List.of() : rest;
+        // 反问前正在办的流程（复诊办理、改期草稿）要记下来，答完还回去。与 askRecordConfirm 同一条
+        // 规矩：刚撤下来一张卡时要还的是那张卡弹出来之前的动作，不是 “RECORD_CARD” 这个空状态。
+        String previous = "RECORD_CARD".equals(state.pendingAction) ? state.recordReturnAction : state.pendingAction;
+        if (!"RECORD_VALUE".equals(previous)) state.recordReturnAction = previous;
+        state.pendingAction = "RECORD_VALUE";
+        return respondWithoutModel(state, "您说的是「" + spokenRecord(intent.item(), intent.valueText(), null)
+                        + "」，量出来是多少？" + also,
+                recordValueReplies(intent.valueText()));
+    }
+
+    /**
+     * “量出来是多少”那两个按钮：一个是他刚才那句话（点一下就是“没量过，就这么记”），
+     * 一个是先不记。点一下的成本远低于让老人再组织一句话。
+     */
+    private List<QuickReply> recordValueReplies(String valueText) {
+        String shown = valueText == null ? "" : "“" + valueText + "”";
+        return List.of(q("没量过，就记" + shown, "RECORD_VALUE", "没量过"),
+                q("先不用记", "RECORD_VALUE", "不用记"));
+    }
+
+    /**
+     * 老人对“量出来是多少”的回答。
+     *
+     * <p>三种答法都认：说了个数（“135”“135/85”）按那个数记；还是只说个说法（“就是有点高”）
+     * 或者明说没量过（“没量过”“记不清”）→ <b>不追第二遍</b>，就按他说的那句记成一条没有数值的记录；
+     * 说的完全是别的事 → 返回 null，这句话照常走下面的链路，不把老人卡在这一问上——
+     * 和“这个数不太对”“这是斤还是公斤”两条反问一个规矩。
+     */
+    private AgentTurnResponse applyRecordValue(ConversationState state, String answer) {
+        String item = state.pendingRecordItem;
+        if (item == null || state.pendingRecordValueText == null) {   // 状态不完整：清掉，别把人卡住
+            clearPendingRecord(state);
+            return null;
+        }
+        String value = answer == null ? "" : answer.trim();
+        // 先看“不记”再看别的：否则“不用记”会被当成别的意思
+        if (containsAny(value, RECORD_DROP_WORDS)) {
+            clearPendingRecord(state);
+            return memoHandoff(state, "好的，这条数值先不记了。");
+        }
+        String spoken = state.pendingRecordValueText;   // 他说过的那个说法，追的这一问就是冲着它来的
+        HealthRecordParser.RecordIntent restated = HealthRecordParser.detect(item + "是" + value);
+        if (restated != null && restated.kind() == HealthRecordParser.Kind.RECORD) {
+            if (restated.issue() == HealthRecordParser.Issue.NO_VALUE) {
+                return resumeRecords(state, spokenOnly(item, spoken), "老人说没有数：" + value, "", clock.now());
+            }
+            if (needsAQuestion(restated)) {
+                // 补的这个数还得问（量不出来）：接着问，其余几条照样等着
+                return askRecordConfirm(state, restated, value, "", state.pendingRecordRest, clock.now());
+            }
+            return resumeRecords(state, restated, "老人补了数值：" + value, "", clock.now());
+        }
+        if (containsAny(value, NO_NUMBER_WORDS)) {
+            return resumeRecords(state, spokenOnly(item, spoken), "老人说没有数：" + value, "", clock.now());
+        }
+        // 短促的应声（“嗯”“是这个”）不是别的意思，再问一遍，别当成换了话题
+        if (value.length() <= 4 && value.chars().noneMatch(Character::isDigit)) {
+            return respondWithoutModel(state, "您说的是「" + spokenRecord(item, spoken, null)
+                    + "」，量出来是多少？", recordValueReplies(spoken));
+        }
+        // 老人改说了别的事：这一问作废，让这句话照常走下面的链路
+        clearPendingRecord(state);
+        return null;
+    }
+
+    /** 老人嘴里那个单位词换算成库里存的单位：“斤”是斤，“公斤/千克”是 kg；都没说返回 null。 */
+    private String unitWord(String value) {
+        if (containsAny(value, "公斤", "千克")) return "kg";
+        return value.contains("斤") ? "斤" : null;
+    }
+
+    /** “这是斤还是公斤”的两个按钮：他说的那个数，两种单位各一个。 */
+    private List<QuickReply> recordUnitReplies(String valueText) {
+        return List.of(q(valueText + " 斤", "RECORD_UNIT", "斤"),
+                q(valueText + " 公斤", "RECORD_UNIT", "公斤"));
+    }
+
+    /**
+     * 老人说“照记”：就按他说的数写进去，他的数据他做主。
+     *
+     * <p>这句话里还报了别的几项时（“我身高180 体重190”），手上这条和其余几条一起接着办：
+     * 一条直写、其余几条上卡。
+     */
     private AgentTurnResponse recordPendingValue(ConversationState state) {
         HealthRecordParser.RecordIntent intent = new HealthRecordParser.RecordIntent(
                 HealthRecordParser.Kind.RECORD, state.pendingRecordItem, state.pendingRecordValueNum,
@@ -6075,8 +6523,12 @@ public class FollowupAgentService extends ConfirmationSupport {
         String raw = state.pendingRecordRaw == null
                 ? intent.item() + " " + intent.valueText() + " " + intent.unit() : state.pendingRecordRaw;
         LocalDateTime at = state.pendingRecordAt == null ? clock.now() : state.pendingRecordAt;
-        clearPendingRecord(state);
-        return recordValue(state, intent, raw, at);
+        if (state.pendingRecordRest == null || state.pendingRecordRest.isEmpty()) {
+            clearPendingRecord(state);
+            return recordValue(state, intent, raw, at);
+        }
+        // 这一句里还有别的：他刚为这条表过态，其余几条里该问的接着问、剩下的上卡
+        return resumeRecords(state, intent, raw, "", at);
     }
 
     /** 老人要重测：暂存的这条留着，他接下来直接说个数就能对上项目。 */
@@ -6100,6 +6552,103 @@ public class FollowupAgentService extends ConfirmationSupport {
         return List.of(q("重新说一个", "RECORD_RETRY", ""), q("就按这个记下来", "RECORD_KEEP", ""));
     }
 
+    /**
+     * 老人报了个数、但没说清是哪一项（“我今天量了，是135”）时，让他点一下这是哪一项。
+     *
+     * <p>猜一个项目记下去是假记录（这一条落到记录页、还会跟着“发给女儿”出门），
+     * 直接回“没听准”又让他把整句话重说一遍——点一下的成本远低于重新组织一句话，
+     * 而且归属这一下就变成他自己定的了。
+     *
+     * <p>闸门用的是 {@link #dailyHealthContext}：手上那张健康记录卡还没点头时这一句<b>不问</b>。
+     * 那时他说“是135”更可能是对卡上那个数的回答，而不是新量的一次；此时再问“这是哪一项”
+     * 恰好问错——卡上已经写着是哪一项了。答不上的这一句照旧走原链路，不抢那张卡的话。
+     *
+     * @return 不在这个上下文里、或这句话根本不是“报了一个说不清项目的数”时返回 null，
+     *         由调用方放它走原来的链路
+     */
+    private AgentTurnResponse askWhichItem(ConversationState state, String value) {
+        HealthRecordParser.MeasurementPrompt prompt = HealthRecordParser.unknownMeasurement(value);
+        if (prompt == null || !dailyHealthContext(state)) return null;
+        String shown = prompt.value().stripTrailingZeros().toPlainString();
+        state.pendingRecordItem = null;             // 哪一项还没定，等他点
+        state.pendingRecordValueNum = prompt.value();
+        state.pendingRecordValueText = shown;
+        state.pendingRecordUnit = null;             // 项目都还不知道，单位无从谈起
+        state.pendingRecordRaw = prompt.raw();
+        // 时刻按他说的这一刻定死，不按他点按钮的那一刻：答话可能在几分钟以后，
+        // 而“什么时候量的”是这句话本身带着的事实（与确认卡那条同一个规矩）
+        state.pendingRecordAt = clock.now();
+        state.pendingRecordRest = List.of();
+        if (!"RECORD_ITEM".equals(state.pendingAction)) state.recordReturnAction = state.pendingAction;
+        state.pendingAction = "RECORD_ITEM";
+        // 走不经过模型的出口：这一轮什么都没写，交给模型改措辞就可能变成“已经给您记下了”
+        // （改写守卫会把这种话换成那句通用的“没听准”，连“点一下”也一起丢掉），
+        // 而这句话本身就是要和下面那排按钮严丝合缝的
+        return respondWithoutModel(state, "您说的「" + shown + "」，我还没听准是哪一项。"
+                + "点一下我就帮您记下来。", recordItemReplies());
+    }
+
+    /**
+     * 老人点/说出了这是哪一项：把刚才那个数按这一项记下来。
+     *
+     * <p>“其他”是他自己挑的归属，原话照存、数值留着；其余项目走和别处一样的解析
+     * （单位反问、离谱值反问都复用），所以点成“血糖”却给了 135 这种配不上的组合，
+     * 还是会先反问一句再决定——他点的只是“这是哪一项”，不是“别问了直接写”。
+     *
+     * <p>答的不是项目（说了别的事）时返回 null：草稿作废，这句话照常走下面的链路，
+     * 不把老人卡在这个提问上——和“这个数不太对”那条反问一个规矩。
+     */
+    private AgentTurnResponse applyRecordItem(ConversationState state, String answer) {
+        String value = answer == null ? "" : answer.trim();
+        if (containsAny(value, RECORD_DROP_WORDS)) {
+            String dropped = state.pendingRecordValueText;
+            clearPendingRecord(state);
+            return memoHandoff(state, dropped == null ? "好的，这条数值先不记了。"
+                    : "好的，这条数值（" + dropped + "）先不记了。");
+        }
+        if (state.pendingRecordValueText == null) {   // 草稿失效：清掉，别把老人卡在这个问题上
+            clearPendingRecord(state);
+            return memoHandoff(state, "刚才那个数作废了，请重新对我说一遍。");
+        }
+        String item = HealthRecordParser.matchItem(value);
+        if (item == null) {
+            // 短、又没有数字：多半是没点准（“这个”“嗯”）。再问一遍，不把草稿丢了——
+            // 丢了就得让他把“我今天量了，是135”整句重说一次。
+            if (value.length() <= 4 && value.chars().noneMatch(Character::isDigit)) {
+                return respondWithoutModel(state, "请点一下这是哪一项，也可以直接告诉我，比如说“血压”。",
+                        recordItemReplies());
+            }
+            clearPendingRecord(state);
+            return null;
+        }
+        String raw = state.pendingRecordRaw == null ? value : state.pendingRecordRaw;
+        LocalDateTime at = state.pendingRecordAt == null ? clock.now() : state.pendingRecordAt;
+        HealthRecordParser.RecordIntent intent;
+        if (HealthRecordParser.OTHER.equals(item)) {
+            intent = new HealthRecordParser.RecordIntent(HealthRecordParser.Kind.RECORD,
+                    HealthRecordParser.OTHER, state.pendingRecordValueNum, raw, "", null);
+        } else {
+            // 用他挑的项目 + 刚才那个数重跑一遍解析：单位怎么补、这个数配不配得上这一项，
+            // 仍旧只有那一个解析器说了算，不在这里另写一套判断
+            intent = HealthRecordParser.detect(item + "是" + state.pendingRecordValueText);
+        }
+        if (intent == null || intent.kind() != HealthRecordParser.Kind.RECORD) {
+            clearPendingRecord(state);
+            return memoHandoff(state, "这条没记上，请重新对我说一遍。");
+        }
+        if (intent.needsConfirm()) return askRecordConfirm(state, intent, raw, "", List.of(), at);
+        clearPendingRecord(state);
+        return recordValue(state, intent, raw, at);
+    }
+
+    /** 问“这是哪一项”时给老人点的那排按钮：他自己点一下，归属就是他自己定的。 */
+    private List<QuickReply> recordItemReplies() {
+        List<QuickReply> replies = new ArrayList<>();
+        for (String item : HealthRecordParser.itemChoices()) replies.add(q(item, "RECORD_ITEM", item));
+        replies.add(q("不用记", "RECORD_ITEM", "不用记"));
+        return replies;
+    }
+
     /** 回查最近的实测数值；一条都没有时教老人怎么上报。 */
     private AgentTurnResponse healthRecordQuery(ConversationState state, String item, String also) {
         List<HealthRecordStore.RecordView> rows = callTool(state, "healthRecord.query",
@@ -6117,7 +6666,8 @@ public class FollowupAgentService extends ConfirmationSupport {
             if (index > 0) text.append("；");
             text.append(row.recordedAt().format(MEMO_LABEL)).append(" ");
             if (item == null) text.append(row.item()).append(" ");
-            text.append(row.valueText()).append(" ").append(row.unit());
+            text.append(row.valueText());
+            if (row.unit() != null && !row.unit().isBlank()) text.append(" ").append(row.unit());
         }
         return respond(state, text.append("。").append(also).toString(), replies);
     }

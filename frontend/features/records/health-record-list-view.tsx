@@ -169,7 +169,7 @@ function RecordList({ item, onGoAssistant }: {
   item: string | null;
   onGoAssistant: () => void;
 }) {
-  const { rows, loaded, hasMore, loading, loadMore } = usePagedList<HealthRecord>(
+  const { rows, loaded, error, hasMore, loading, loadMore, reload } = usePagedList<HealthRecord>(
       (offset, limit) => getHealthRecords(limit, offset, item), RECORD_PAGE_SIZE);
   // 条数单独问：分页之后“这一页有几条”已经不等于“一共几条”了
   const [total, setTotal] = useState(0);
@@ -189,7 +189,18 @@ function RecordList({ item, onGoAssistant }: {
         <h2 className="text-xl font-bold">{item ?? '健康记录'}</h2>
         <span className="text-sm text-muted-foreground">{total > 0 ? `共${total}条` : '按时间倒序'}</span>
       </div>
-      {loaded && rows.length === 0 ? (
+      {/* 读不到 ≠ 一条都没有：后端没起或网络断了的时候，下面那张空态大卡会理直气壮地
+          说「还没有血压记录，跟助手说一句…」，老人就会以为自己的记录丢了 */}
+      {loaded && error && (
+        <section className="mb-3 rounded-3xl border bg-card p-6 text-center shadow-sm">
+          <p className="text-lg">{error}</p>
+          <button type="button" onClick={reload}
+                  className="mt-4 inline-flex min-h-12 items-center justify-center gap-2 rounded-2xl bg-primary px-5 font-bold text-white">
+            重新读取
+          </button>
+        </section>
+      )}
+      {loaded && !error && (rows.length === 0 ? (
         <button onClick={onGoAssistant} className="w-full rounded-3xl border border-dashed border-[#dba976] bg-[#fffaf3] p-6 text-center shadow-sm">
           <Activity className="mx-auto size-9 text-primary" aria-hidden="true" />
           <strong className="mt-3 block text-xl">还没有{item ?? '健康'}记录</strong>
@@ -223,7 +234,7 @@ function RecordList({ item, onGoAssistant }: {
           ))}
           <LoadMore hasMore={hasMore} loading={loading} onLoadMore={loadMore} endText="没有更早的了" />
         </>
-      )}
+      ))}
     </>
   );
 }

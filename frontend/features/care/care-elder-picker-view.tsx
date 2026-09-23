@@ -111,6 +111,13 @@ export function CareElderPickerView({ kind, caregiverId, elders, loading, error,
       );
     }
     const appt = elder.latestAppointment;
+    // 后端在一条“已预约”都没有时，会把最近的那条（可能是“已取消”）当快照给出来。
+    // 这里不看状态就成了“还有一张约”，家属按这个安排陪同会白跑一趟；
+    // 首页和预约页都会写明已取消，只有这张选择卡原来不会。
+    const cancelled = appt.status === 'CANCELLED';
+    // 出发建议只给这次真的陪同的那位看。列表页和详情页都是这个口径，
+    // 这里原来谁看到这张卡谁就看到长辈的出发时间和交通方式。
+    const accompanying = appt.accompaniedBy === caregiverId;
     return (
       <div className="mt-4 flex gap-4 rounded-2xl bg-[#fff0dc] p-4 ring-1 ring-[#efcda4]">
         <div className="grid min-w-16 place-items-center rounded-xl bg-secondary px-2 py-1.5 text-center text-secondary-foreground">
@@ -120,7 +127,9 @@ export function CareElderPickerView({ kind, caregiverId, elders, loading, error,
         <div className="min-w-0 flex-1">
           <p className="text-lg font-bold">{formatHM(appt.time)} {formatDate(appt.date)} 复诊</p>
           <p className="mt-1 truncate text-base">{appt.hospital} · {appt.department}</p>
-          {(appt.departureAt || appt.transport) && (
+          {cancelled ? (
+            <p className="mt-1 text-base font-bold text-[#b3452f]">这次复诊已取消</p>
+          ) : accompanying && (appt.departureAt || appt.transport) && (
             <p className="mt-1 flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
               {appt.departureAt && <span>建议 {formatHM(appt.departureAt)} 出发</span>}
               {appt.transport && <span>{appt.transport}</span>}

@@ -340,7 +340,11 @@ final class ConfirmationService {
             // 顶替，写进去的会是一条时间对不上、而卡上从没出现过的时间。
             return state.pendingRecordItem != null && !state.pendingRecordItem.isBlank()
                     && state.pendingRecordValueText != null && !state.pendingRecordValueText.isBlank()
-                    && state.pendingRecordAt != null;
+                    && state.pendingRecordAt != null
+                    // 同一句话里报的其余几条也判一次。卡上列着两行（"体温 36.5""心率 80"），
+                    // 缺了这一列就只会写下第一行，第二行在他点头之后凭空消失。null 与空列表
+                    // 在这里是两件事：空列表＝这句话确实只有一条；null 只是"这份快照里没有"。
+                    && state.pendingRecordRest != null;
         }
         return true;
     }

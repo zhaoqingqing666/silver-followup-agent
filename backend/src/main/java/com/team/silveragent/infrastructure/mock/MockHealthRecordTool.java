@@ -44,4 +44,20 @@ public class MockHealthRecordTool implements HealthRecordTool {
                 Map.of("count", rows.size()), true);
         return rows;
     }
+
+    /**
+     * 删掉最近一条。没有可删的也留一条留痕、判成失败：老人说了“记错了”而库里一条都没有，
+     * 这件事本身得看得见，不能因为“本来就没东西可删”就当它成功了。
+     */
+    @Override
+    public HealthRecordStore.RecordView deleteLatest(String conversationId, String userId) {
+        HealthRecordStore.RecordView removed = records.deleteLatest(userId);
+        Map<String, Object> request = new HashMap<>();
+        request.put("userId", userId);
+        request.put("item", removed == null ? null : removed.item());
+        request.put("value", removed == null ? null : removed.valueText());
+        traces.record(conversationId, "healthRecord.delete", request,
+                Map.of("removed", removed != null), removed != null);
+        return removed;
+    }
 }

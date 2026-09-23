@@ -4,7 +4,10 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
 import java.sql.Timestamp;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
+import java.time.YearMonth;
 import java.util.List;
 import java.util.UUID;
 
@@ -96,10 +99,77 @@ public class MemoStore {
     /** @param timed 到点提醒的条数；@param standing 长期备忘的条数。 */
     public record MemoCounts(int timed, int standing) { }
 
-    /** 标记完成；仅本人进行中的备忘可完成。返回是否更新到。 */
-    public boolean complete(String userId, String memoId) {
-        return jdbc.update("UPDATE memos SET status='DONE' WHERE id=? AND user_id=? AND status='ACTIVE'",
-                memoId, userId) > 0;
+    /**
+     * 处理掉一条备忘；仅本人进行中的备忘可处理。
+     *
+     * <p>“只提醒一次”的标记完成，整条就结束了。<b>重复提醒的不结束</b>——“每天八点吃药”
+     * 那条上按「已完成」，老人说的是“这次吃完了”，不是“以后都别提醒我吃药了”。
+     * 所以这里把 {@code remind_at} 顺延到下一次，条目继续留着提醒。
+     *
+     * @return 处理后的这条：调用方要拿新的 {@code remindAt} 告诉老人“下次什么时候提醒”
+     *         （界面不变的话他会以为没点着，再点一次就把下一次也推掉了）；
+     *         这条不存在、或已经处理过，返回 null。
+     */
+    public MemoView complete(String userId, String memoId) {
+        List<MemoView> found = jdbc.query("""
+                SELECT id,text,remind_at,repeat_rule,status,created_at FROM memos
+                WHERE id=? AND user_id=? AND status='ACTIVE'
+                """, (rs, row) -> new MemoView(
+                rs.getString(1), rs.getString(2),
+                rs.getTimestamp(3) == null ? null : rs.getTimestamp(3).toLocalDateTime(),
+                rs.getString(4), rs.getString(5), rs.getTimestamp(6).toLocalDateTime()), memoId, userId);
+        if (found.isEmpty()) return null;
+        MemoView memo = found.get(0);
+        String repeat = normalizeRepeat(memo.repeatRule());
+        if (repeat == null || memo.remindAt() == null) {
+            return jdbc.update("UPDATE memos SET status='DONE' WHERE id=? AND user_id=? AND status='ACTIVE'",
+                    memoId, userId) > 0
+                    ? new MemoView(memo.id(), memo.text(), null, null, "DONE", memo.createdAt())
+                    : null;
+        }
+        LocalDateTime next = nextOccurrence(memo.remindAt(), repeat, MemoParser.nowInDemoZone());
+        return jdbc.update("UPDATE memos SET remind_at=? WHERE id=? AND user_id=? AND status='ACTIVE'",
+                Timestamp.valueOf(next), memoId, userId) > 0
+                ? new MemoView(memo.id(), memo.text(), next, repeat, "ACTIVE", memo.createdAt())
+                : null;
+    }
+
+    /**
+     * 重复提醒的下一次到点：从锚点按周期往后找，直到<b>晚于</b> {@code now}。
+     *
+     * <p>不能只加一个周期就算完——一条“每天八点吃药”的锚点可能是上周设的，加一天还是在过去，
+     * 老人按一下「已完成」界面上的时间没变（会以为没点着）。也不能把中间漏掉的那些天补出来，
+     * 那会一次连弹好几条；漏了就漏了，下一次就是下一个还没到的点。
+     *
+     * <p>MONTHLY 必须按“几号”找，不能让日期落到别的号上：2 月没有 31 号就跳到 3 月。
+     * {@code remind_at} 同时充当“每月几号”的锚点（见类注释），一旦被顺延成 28 号，
+     * “每月31号”就被永久改写成“每月28号”了，再也回不去。
+     *
+     * @param anchor 锚点（存着的 {@code remind_at}）：既给出时刻，也给出星期几/几号
+     * @param repeat 见 {@link #normalizeRepeat}；调用方保证非 null
+     * @param now    业务时区的“现在”（{@link MemoParser#nowInDemoZone()}），不是 JVM 时钟——
+     *               {@code remind_at} 是按业务时区存进去的
+     */
+    public static LocalDateTime nextOccurrence(LocalDateTime anchor, String repeat, LocalDateTime now) {
+        LocalTime time = anchor.toLocalTime();
+        if ("MONTHLY".equals(repeat)) {
+            int dayOfMonth = anchor.getDayOfMonth();
+            YearMonth month = YearMonth.from(anchor);
+            // 上界只是防死循环（一百个月，够用了），正常一两次就找到
+            for (int step = 0; step < 1200; step++) {
+                if (month.lengthOfMonth() >= dayOfMonth && month.atDay(dayOfMonth).atTime(time).isAfter(now)) {
+                    return month.atDay(dayOfMonth).atTime(time);
+                }
+                month = month.plusMonths(1);
+            }
+            return anchor;
+        }
+        int periodDays = "WEEKLY".equals(repeat) ? 7 : 1;
+        LocalDate day = anchor.toLocalDate();
+        for (int step = 0; step < 4000 && !day.atTime(time).isAfter(now); step++) {
+            day = day.plusDays(periodDays);
+        }
+        return day.atTime(time);
     }
 
     /** 删除备忘；仅本人可删。返回是否更新到。 */

@@ -583,6 +583,66 @@ class MemoFlowTests {
         assertThat(onlyMemo().remindAt()).isEqualTo(sunday.atTime(8, 0));
     }
 
+    /**
+     * 月范围只说了范围没说哪天，也要先问哪一天。
+     *
+     * <p>回归：原来月范围谁也不认——“提醒我这个月我要吃药”里的时间词被丢掉，
+     * 整句退化成一条<b>不提醒</b>的备忘，老人以为设上了，到哪天都不响。
+     * 这比记错一天更糟：记错的那天他回看还看得出来，不响的这条连个错都看不见。
+     */
+    @Test
+    void monthScopeAloneAsksTheDayBeforeTheClock() {
+        AgentTurnResponse start = start();
+        AgentTurnResponse askDay = service.chat(start.conversationId(), "提醒我这个月我要吃药");
+
+        assertThat(askDay.stage()).isEqualTo("MEMO_TIME");
+        assertThat(askDay.reply()).contains("这个月", "还没说具体哪一天").doesNotContain("几点");
+        // 月范围里没有哪个日子是“显然”的：不摆“这周日”那类按钮替他挑一天，让他自己说个日期
+        assertThat(askDay.quickReplies()).extracting(AgentTurnResponse.QuickReply::label)
+                .containsExactly("明天", "不用提醒，只记下");
+        assertThat(memoCount()).isZero();
+
+        // 他给出了日子，接下来才轮到钟点
+        AgentTurnResponse askClock = service.chat(start.conversationId(), "明天");
+        assertThat(askClock.reply()).contains("还差具体几点");
+        assertThat(memoCount()).isZero();
+
+        AgentTurnResponse done = service.chat(start.conversationId(), "早上八点");
+
+        assertThat(done.reply()).contains("已记下");
+        assertThat(onlyMemo().remindAt()).isEqualTo(LocalDate.now(DEMO_ZONE).plusDays(1).atTime(8, 0));
+        assertThat(onlyMemo().text()).contains("吃药");
+    }
+
+    /**
+     * 傍晚说“今天15点吃药”：日子没说错，是这一天里那个点已经过完了。
+     *
+     * <p>拿“您说的是‘那天’，还没说具体哪一天”去问，老人只会觉得助手没听懂。
+     * 这里要问的是“要不要改成明天”，而且点一下就得真存到明天那个点——
+     * 只把日期换成明天、把钟点丢了，等于又让他说一遍他说过的话。
+     */
+    @Test
+    void aMomentThatAlreadyPassedIsOfferedTomorrow() {
+        java.time.LocalDateTime now = java.time.LocalDateTime.now(DEMO_ZONE);
+        // 凌晨倒推会跨天（“今天0点”不是这句话的形态），这条用例不适用
+        org.junit.jupiter.api.Assumptions.assumeTrue(now.getHour() >= 2, "运行时刻太靠近零点");
+        java.time.LocalDateTime passed = now.minusHours(1).withMinute(0).withSecond(0).withNano(0);
+        AgentTurnResponse start = start();
+
+        AgentTurnResponse ask = service.chat(start.conversationId(), "提醒我今天" + passed.getHour() + "点吃药");
+
+        assertThat(ask.stage()).isEqualTo("MEMO_TIME");
+        assertThat(ask.reply()).contains("已经过了", "要改成").doesNotContain("还没说具体哪一天");
+        assertThat(ask.quickReplies()).extracting(AgentTurnResponse.QuickReply::label)
+                .containsExactly("改成明天", "不用提醒，只记下");
+        assertThat(memoCount()).isZero();
+
+        AgentTurnResponse saved = service.chat(start.conversationId(), "明天");
+
+        assertThat(saved.reply()).contains("已记下");
+        assertThat(onlyMemo().remindAt()).isEqualTo(passed.plusDays(1));
+    }
+
     @Test
     void bareWeeklyAsksWhichWeekdayThenSavesRepeatRule() {
         // 回归：只说“每周”没说周几，原来会存成一条永远不到点的备忘；现在要先追问
@@ -813,8 +873,50 @@ class MemoFlowTests {
         assertThat(done.reply()).contains("量血压", "去掉");
         MemoStore.MemoView memo = onlyMemo();
         assertThat(memo.text()).isEqualTo("量血压");
+        // 这一句只说了“明天早上九点”这一天，没说“每月”：就按他说的改这一天，周期不再重复。
         assertThat(memo.repeatRule()).isNull();
         assertThat(memo.remindAt()).isEqualTo(LocalDate.now(DEMO_ZONE).plusDays(1).atTime(9, 0));
+        // 但周期掉了这件事得说出来：不说的话老人以为只是换了个钟点，其实以后再也不提醒了
+        assertThat(done.reply()).contains("只提醒这一次");
+    }
+
+    @Test
+    void editingTheTimeOfARepeatingMemoSaysTheRepeatIsGone() {
+        // 老人对「每天八点吃药」说“改到明天早上七点”：这句话说的是**明天**这一天，
+        // 所以照他说的改这一次，周期不替他顺延——原来那套“沿用原周期”会把一句只说了
+        // 某一天的话办成“以后每周三/每月23号”，凭空许一个他从没提过的长期承诺。
+        // 代价是每天那顿药从此不再响，所以回话里必须说明白，他才能当场改回去。
+        AgentTurnResponse start = start();
+        service.chat(start.conversationId(), "每天早上八点提醒我吃药");
+        assertThat(onlyMemo().repeatRule()).isEqualTo("DAILY");
+
+        service.chat(start.conversationId(), "改第1条");
+        AgentTurnResponse done = service.chat(start.conversationId(), "明天早上七点");
+
+        MemoStore.MemoView memo = onlyMemo();
+        assertThat(memo.repeatRule()).isNull();
+        assertThat(memo.remindAt()).isEqualTo(LocalDate.now(DEMO_ZONE).plusDays(1).atTime(7, 0));
+        assertThat(done.reply()).contains("07:00", "原来每天 08:00", "只提醒这一次");
+    }
+
+    @Test
+    void editingAWeeklyMemoToOneDayDoesNotInventAWeeklyCommitment() {
+        // 回归：探针实测出来的——「每周五 15:00 量血压」+“改到明天早上七点”（明天是周三），
+        // 沿用原周期那版会存成 WEEKLY 并回话“以后每周三 07:00”：老人没说周三、也没说每周。
+        AgentTurnResponse start = start();
+        LocalDateTime friday = LocalDate.now(DEMO_ZONE).plusDays(1).atTime(15, 0);
+        while (friday.getDayOfWeek() != java.time.DayOfWeek.FRIDAY) friday = friday.plusDays(1);
+        memos.create("user-001", "量血压", friday, "WEEKLY");
+
+        service.chat(start.conversationId(), "改第1条");
+        AgentTurnResponse done = service.chat(start.conversationId(), "改到明天早上七点");
+
+        MemoStore.MemoView memo = onlyMemo();
+        assertThat(memo.repeatRule()).isNull();
+        assertThat(memo.remindAt()).isEqualTo(LocalDate.now(DEMO_ZONE).plusDays(1).atTime(7, 0));
+        // 回话里会提到“原来是每周五”（那是他原来那条），但不能出现“以后每周…”这种新的承诺
+        assertThat(done.reply()).doesNotContain("以后每周");
+        assertThat(done.reply()).contains("只提醒这一次");
     }
 
     @Test

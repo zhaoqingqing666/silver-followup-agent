@@ -18,12 +18,19 @@ interface CareProfileProps {
 /** 协同照护端我的页：身份卡（含切换身份）、协同长辈入口与设置等。 */
 export function CareProfileView({ caregiverId, actorName, onSwitchActor, onBack, onOpenElders, onOpenSettings }: CareProfileProps) {
   const [elders, setElders] = useState<CareElder[]>([]);
+  const [eldersError, setEldersError] = useState('');
 
   useEffect(() => {
-    void getCareElders(caregiverId).then(setElders).catch(() => setElders([]));
+    void getCareElders(caregiverId)
+        .then(list => { setElders(list); setEldersError(''); })
+        .catch(cause => setEldersError(cause instanceof Error ? cause.message : '无法读取协同的长辈'));
   }, [caregiverId]);
 
-  const elderLine = elders.length > 0 ? elders.map(elder => elder.name).join('、') : '查看协同长辈与关系';
+  // 读失败和「确实没绑长辈」必须是两句不同的话。原来 catch 里吞掉错误、副标题退回同一句
+  // 「查看协同长辈与关系」，家属分不清是自己没绑长辈，还是这行字没读出来。
+  const elderLine = eldersError
+    ? '没读出来，点进去可以重试'
+    : elders.length > 0 ? elders.map(elder => elder.name).join('、') : '查看协同长辈与关系';
   const comingSoon = () => window.alert('该功能将在后续版本提供，敬请期待。');
   const helpAndFeedback = () => window.alert('这里是比赛演示的人工帮助入口，当前页面信息已经为您保留。');
 

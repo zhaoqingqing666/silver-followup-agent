@@ -166,6 +166,31 @@ final class ConversationState {
     String pendingRecordRaw;
     /** 量到这个数的时间，<b>不是</b>点下确认的时间：卡上写着哪一刻，写进库的就必须是哪一刻。 */
     java.time.LocalDateTime pendingRecordAt;
+    /**
+     * 这一句里报的<b>其余几条</b>，按老人说的顺序排好，等着手上这条办完接着办
+     * （“我的体温是36.5，心率80”里，36.5 那条之后的部分）。
+     *
+     * <p>确认卡上列着几行、写进库的就得是几条——这一列不在的话，重启之后那张写着两行的卡
+     * 只会写下第一行，第二行在他点头之后凭空消失。所以它和上面那几样一样随快照持久化，
+     * 并由 {@code ConfirmationService.payloadIntact} 判「缺了就不执行」。
+     *
+     * <p>{@code null} 与空列表是两件事：空列表＝这句话只有一条；{@code null} 只出现在
+     * 更早版本写下的快照里，一律判成凭据不可信。新会话从空列表起步（见字段初值），
+     * 而还原快照时是<b>原样赋值</b>——旧快照里没有这一列，读回来就是 null，不回填成空列表，
+     * 否则那张写着两行的卡会照着"只有一行"执行。
+     */
+    java.util.List<PendingRecord> pendingRecordRest = java.util.List.of();
+
+    /**
+     * 待办的一条实测数值。确认卡上列着的那几行、以及反问之后等着写进库的那几条，都是它。
+     *
+     * <p>{@code issue} 存的是 {@code HealthRecordParser.Issue} 的名字：这一条还带着疑问
+     * （量不出的数、没说单位的体重）时不能直接写，得照原样再问一次。存名字而不是重解析原话，
+     * 是因为原话在这里已经拆开了，重新认一遍可能认成另一条。
+     */
+    record PendingRecord(String item, java.math.BigDecimal valueNum, String valueText, String unit,
+                         String raw, java.time.LocalDateTime at, String issue) { }
+
     /** 反问/发卡前 pendingAction 的值，答完要还回去，不能把正在办的复诊流程打断。 */
     String recordReturnAction;
     /** 弹健康记录确认卡前所在的办理阶段，确认或拒绝后恢复；反问那条路不用（它不改阶段）。 */
