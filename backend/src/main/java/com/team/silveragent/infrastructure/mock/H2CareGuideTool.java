@@ -24,16 +24,20 @@ public class H2CareGuideTool implements CareGuideTool {
     @Override
     public List<GuideArticle> search(String conversationId, String query, String hospital, String department) {
         String safeQuery = query == null || query.isBlank() ? "复诊办理流程" : query.trim();
+        // 限定条件按编号匹配：医院名在这里折算成 hospitals.id，科室名通过 JOIN 比较名称。
+        // 库里存的是外键，改医院名/科室名不会在文章上留下对不上的旧副本。
         List<Row> candidates = jdbc.query("""
-                SELECT title,content,keywords,hospital_name,department,sort_order
-                FROM care_guide_articles
-                WHERE enabled=TRUE
-                  AND (hospital_name IS NULL OR hospital_name=?)
-                  AND (department IS NULL OR department=?)
-                ORDER BY sort_order
+                SELECT g.title,g.content,g.keywords,g.hospital_id,g.department_id,g.sort_order
+                FROM care_guide_articles g
+                LEFT JOIN departments d ON d.id=g.department_id
+                WHERE g.enabled=TRUE
+                  AND (g.hospital_id IS NULL
+                       OR g.hospital_id=(SELECT MIN(h.id) FROM hospitals h WHERE h.name=?))
+                  AND (g.department_id IS NULL OR d.name=?)
+                ORDER BY g.sort_order
                 """, (rs, row) -> new Row(rs.getString("title"), rs.getString("content"),
-                        rs.getString("keywords"), rs.getString("hospital_name"),
-                        rs.getString("department"), rs.getInt("sort_order")),
+                        rs.getString("keywords"), rs.getString("hospital_id"),
+                        rs.getString("department_id"), rs.getInt("sort_order")),
                 hospital, department);
 
         List<GuideArticle> result = candidates.stream()

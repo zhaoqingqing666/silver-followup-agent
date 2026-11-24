@@ -7,7 +7,7 @@ import java.util.Optional;
 
 public interface MaterialPreparationTool {
     List<AppointmentMaterial> initialize(String conversationId, String appointmentId,
-                                         String department, List<String> materialNames);
+                                         String hospital, String department, List<String> materialNames);
 
     List<AppointmentMaterial> list(String userId, String appointmentId);
 

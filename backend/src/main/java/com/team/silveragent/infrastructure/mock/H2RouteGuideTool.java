@@ -28,8 +28,9 @@ public class H2RouteGuideTool implements RouteGuideTool {
                 SELECT r.transport,r.duration_minutes,COALESCE(r.distance_meters,0),
                        h.longitude,h.latitude,
                        r.polyline,r.route_steps,COALESCE(r.route_source,'SIMULATED')
-                FROM users u JOIN hospitals h ON h.id=?
-                JOIN travel_routes r ON r.origin=u.home_address AND r.destination=h.address AND r.transport=?
+                FROM users u
+                JOIN travel_routes r ON r.hospital_id=? AND r.origin=u.home_address AND r.transport=?
+                JOIN hospitals h ON h.id=r.hospital_id
                 WHERE u.id=? ORDER BY r.id LIMIT 1
                 """, (rs, row) -> {
             List<GeoPoint> polyline = points(rs.getString(6));

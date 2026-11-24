@@ -132,4 +132,4 @@ AGENT_MODEL_HISTORY_LIMIT=16
 
 页面不直接调用大模型，大模型也不能直接提交预约。`LlmConversationPlanner` 可提出回答、一个或多个只读工具及工作流动作；工具的真实结构化结果会回到同一个规划器，模型可继续选择下一项只读工具或生成最终回答。单轮最多续跑 3 次，并拦截相同工具和参数的重复调用。`AgentRuntime`、`ToolRegistry`、`ToolPolicy` 和 `ActionValidator` 负责白名单、权限和回复边界；办事流程来自 `careGuide.search`，材料、路线、楼层和诊室来自数据库工具。普通聊天只调用一次模型；预约、取消、创建提醒和通知家属仍全部经过 Java 明确确认。
 
-本文件只讲怎么跑起来和团队怎么配合；当前版本做了什么、验证到什么程度、还有哪些限制，看 `docs/records/PROGRESS.md` 与 `docs/报名解决方案.md` 的迭代计划。
+本文件只讲怎么跑起来和团队怎么配合；当前版本做了什么、验证到什么程度、还有哪些限制，看 `docs/records/PROGRESS.md` 与 `docs/命题解决方案.md` 的迭代计划。

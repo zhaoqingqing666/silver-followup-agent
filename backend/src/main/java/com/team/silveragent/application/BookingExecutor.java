@@ -86,7 +86,7 @@ final class BookingExecutor {
             state.notificationDone = true;
             conversations.save(state, null);
         }
-        materialPreparationTool.initialize(state.id, state.appointmentId, state.department, state.materials);
+        materialPreparationTool.initialize(state.id, state.appointmentId, state.hospital, state.department, state.materials);
         // 老人把“由安排者约好的复诊”改期成功 → 通知安排者
         if (state.arrangedArrangerId != null && state.appointmentId != null && state.selectedSlot != null) {
             careBooking.notifyCaregiver(state.arrangedArrangerId, state.userId,

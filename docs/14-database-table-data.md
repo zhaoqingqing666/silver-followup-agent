@@ -11,6 +11,13 @@
 > - `USERS`：移除 `HOME_LONGITUDE`、`HOME_LATITUDE`，新增 `PHONE`。
 > - `FAMILY_CONTACTS`：`USER_ID` / `NAME` / `RELATIONSHIP` / `PHONE` 改为 `USER` / `CONTACT`，两列都是 `USERS.ID` 外键。
 >
+> **2026-11-24 的结构变更已并入本文档，但数据未重新导出：**
+>
+> - `MATERIAL_TEMPLATES`：`DEPARTMENT`（中文科室名）改为 `DEPARTMENT_ID`（`DEPARTMENTS.ID` 外键，NULL = 通用）；同一科室名在不同医院各有一行，种子数据由 8 行变为 11 行。
+> - `CARE_GUIDE_ARTICLES`：`HOSPITAL_NAME` / `DEPARTMENT` 改为 `HOSPITAL_ID` / `DEPARTMENT_ID`，均为可空外键（NULL = 不限）。
+> - `TRAVEL_ROUTES`：`DESTINATION`（医院地址字符串）改为 `HOSPITAL_ID`（`HOSPITALS.ID` 外键）；`ORIGIN` 是出发地展示文字，不参与外键。
+> - 业务表补齐外键：`DEPARTMENTS`、`CLINICS`、`APPOINTMENTS`、`USER_SCHEDULES`、`APPOINTMENT_MATERIALS`、`USER_PREFERENCES`、`REMINDERS`、`FAMILY_NOTIFICATIONS`、`CONVERSATION_SESSIONS`、`CARE_RELATIONS`、`CARE_NOTIFICATIONS`、`MEMOS`、`HEALTH_RECORDS`、`USER_MEMORIES`；预约被删除时材料与提醒级联删除。
+>
 > 需要一份与当前数据库完全一致的数据快照时，在开发容器内启动后端后重新执行导出脚本（见文末「重新生成」）。
 
 本文档是运行中开发数据库的只读快照，包含静态种子数据、滚动生成数据和当时已产生的业务/会话数据。
@@ -825,30 +832,35 @@
 
 ### `MATERIAL_TEMPLATES`
 
-用途：复诊材料模板。当前共 **8** 行。
+用途：复诊材料模板。当前共 **11** 行。
 
 字段定义：
 
 | 字段 | 类型 | 允许空值 | 长度或精度 |
 | --- | --- | --- | --- |
 | ID | CHARACTER VARYING | NO | 50 |
-| DEPARTMENT | CHARACTER VARYING | NO | 60 |
+| DEPARTMENT_ID | CHARACTER VARYING | YES | 40 |
 | MATERIAL_NAME | CHARACTER VARYING | NO | 120 |
 | REQUIRED | BOOLEAN | NO | — |
 | SORT_ORDER | INTEGER | NO | 32 |
 
-全部数据：
+`DEPARTMENT_ID` 为 `NULL` 表示所有科室通用，非空时外键指向 `DEPARTMENTS.ID`。
 
-| ID | DEPARTMENT | MATERIAL_NAME | REQUIRED | SORT_ORDER |
+全部数据（`DEPARTMENT_ID` 列为 2026-11-24 新结构下的对应值，记录内容仍是 09-13 快照）：
+
+| ID | DEPARTMENT_ID | MATERIAL_NAME | REQUIRED | SORT_ORDER |
 | --- | --- | --- | --- | --- |
-| m001 | 通用 | 身份证 | TRUE | 1 |
-| m002 | 通用 | 医保卡或电子医保凭证 | TRUE | 2 |
-| m003 | 通用 | 上次就诊病历 | TRUE | 3 |
-| m004 | 通用 | 既往检查报告 | TRUE | 4 |
-| m005 | 通用 | 正在使用的药物清单 | FALSE | 5 |
-| m006 | 心内科 | 血压和心率记录 | FALSE | 10 |
-| m007 | 内分泌科 | 近期血糖记录 | FALSE | 10 |
-| m008 | 内分泌科 | 最近一次化验单 | FALSE | 11 |
+| m001 | NULL | 身份证 | TRUE | 1 |
+| m002 | NULL | 医保卡或电子医保凭证 | TRUE | 2 |
+| m003 | NULL | 上次就诊病历 | TRUE | 3 |
+| m004 | NULL | 既往检查报告 | TRUE | 4 |
+| m005 | NULL | 正在使用的药物清单 | FALSE | 5 |
+| m006 | d001 | 血压和心率记录 | FALSE | 10 |
+| m006-d006 | d006 | 血压和心率记录 | FALSE | 10 |
+| m007 | d003 | 近期血糖记录 | FALSE | 10 |
+| m007-d005 | d005 | 近期血糖记录 | FALSE | 10 |
+| m008 | d003 | 最近一次化验单 | FALSE | 11 |
+| m008-d005 | d005 | 最近一次化验单 | FALSE | 11 |
 
 ### `CARE_GUIDE_ARTICLES`
 
@@ -863,14 +875,16 @@
 | TITLE | CHARACTER VARYING | NO | 120 |
 | CONTENT | CHARACTER LARGE OBJECT | NO | 9223372036854775807 |
 | KEYWORDS | CHARACTER VARYING | NO | 300 |
-| HOSPITAL_NAME | CHARACTER VARYING | YES | 100 |
-| DEPARTMENT | CHARACTER VARYING | YES | 60 |
+| HOSPITAL_ID | CHARACTER VARYING | YES | 40 |
+| DEPARTMENT_ID | CHARACTER VARYING | YES | 40 |
 | SORT_ORDER | INTEGER | NO | 32 |
 | ENABLED | BOOLEAN | NO | — |
 
-全部数据：
+`HOSPITAL_ID` / `DEPARTMENT_ID` 为 `NULL` 表示该文章不限医院/科室；非空时分别外键指向 `HOSPITALS.ID` / `DEPARTMENTS.ID`。
 
-| ID | TOPIC | TITLE | CONTENT | KEYWORDS | HOSPITAL_NAME | DEPARTMENT | SORT_ORDER | ENABLED |
+全部数据（两列 ID 在 09-13 快照里对应 NULL，数据库未重新导出）：
+
+| ID | TOPIC | TITLE | CONTENT | KEYWORDS | HOSPITAL_ID | DEPARTMENT_ID | SORT_ORDER | ENABLED |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | guide-arrival | ARRIVAL | 到院后的办理步骤 | 到院后可先查看预约凭证，按照医院指引报到、候诊。找不到入口时，可以向门诊服务台、志愿者服务点或对应科室护士站询问。具体安排以医院现场通知为准。 | 到院,报到,候诊,护士,服务台,咨询 | NULL | NULL | 2 | TRUE |
 | guide-change | CHANGE | 改期、取消和迟到处理 | 需要改期或取消已确认预约时，应先查询本人预约并再次确认，系统不会根据一句模糊表达直接执行。可能迟到时，请尽快联系医院确认是否还能报到。 | 改期,取消,退掉,撤销,迟到,预约 | NULL | NULL | 4 | TRUE |
@@ -935,8 +949,8 @@
 | 字段 | 类型 | 允许空值 | 长度或精度 |
 | --- | --- | --- | --- |
 | ID | CHARACTER VARYING | NO | 50 |
+| HOSPITAL_ID | CHARACTER VARYING | NO | 40 |
 | ORIGIN | CHARACTER VARYING | NO | 200 |
-| DESTINATION | CHARACTER VARYING | NO | 200 |
 | TRANSPORT | CHARACTER VARYING | NO | 40 |
 | DURATION_MINUTES | INTEGER | NO | 32 |
 | DISTANCE_METERS | INTEGER | YES | 32 |
@@ -946,13 +960,13 @@
 
 全部数据：
 
-| ID | ORIGIN | DESTINATION | TRANSPORT | DURATION_MINUTES | DISTANCE_METERS | ROUTE_STEPS | POLYLINE | ROUTE_SOURCE |
+| ID | HOSPITAL_ID | ORIGIN | TRANSPORT | DURATION_MINUTES | DISTANCE_METERS | ROUTE_STEPS | POLYLINE | ROUTE_SOURCE |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| route-001 | 幸福小区（模拟） | 健康路1号（模拟） | 家属开车 | 30 | 8700 | 从幸福小区东门出发\|沿幸福路向南行驶\|在健康路口左转\|从市第一医院门诊楼南门进入 | 116.365300,39.921900;116.374800,39.918300;116.386500,39.913600;116.397428,39.909230 | SIMULATED |
-| route-002 | 幸福小区（模拟） | 健康路1号（模拟） | 打车 | 35 | 9100 | 在幸福小区东门上车\|沿幸福路和健康路行驶\|在市第一医院门诊楼南门下车 | 116.365300,39.921900;116.377200,39.919100;116.389300,39.912800;116.397428,39.909230 | SIMULATED |
-| route-003 | 幸福小区（模拟） | 健康路1号（模拟） | 公交 | 50 | 10200 | 步行约6分钟到幸福小区公交站\|乘坐12路公交车\|在市第一医院南门站下车\|步行约3分钟到门诊楼南门 | 116.365300,39.921900;116.370600,39.919900;116.383100,39.914600;116.397428,39.909230 | SIMULATED |
-| route-004 | 幸福小区（模拟） | 人民路88号（模拟） | 家属开车 | 25 | 7600 | 从幸福小区东门出发\|沿人民路向东行驶\|从市人民医院门诊楼东门进入 | 116.365300,39.921900;116.389900,39.916500;116.412600,39.909800;116.430200,39.905600 | SIMULATED |
-| route-005 | 幸福小区（模拟） | 人民路88号（模拟） | 打车 | 30 | 8000 | 在幸福小区东门上车\|沿人民路行驶\|在市人民医院门诊楼东门下车 | 116.365300,39.921900;116.392600,39.915200;116.416800,39.908700;116.430200,39.905600 | SIMULATED |
+| route-001 | h001 | 幸福小区（模拟） | 家属开车 | 30 | 8700 | 从幸福小区东门出发\|沿幸福路向南行驶\|在健康路口左转\|从市第一医院门诊楼南门进入 | 116.365300,39.921900;116.374800,39.918300;116.386500,39.913600;116.397428,39.909230 | SIMULATED |
+| route-002 | h001 | 幸福小区（模拟） | 打车 | 35 | 9100 | 在幸福小区东门上车\|沿幸福路和健康路行驶\|在市第一医院门诊楼南门下车 | 116.365300,39.921900;116.377200,39.919100;116.389300,39.912800;116.397428,39.909230 | SIMULATED |
+| route-003 | h001 | 幸福小区（模拟） | 公交 | 50 | 10200 | 步行约6分钟到幸福小区公交站\|乘坐12路公交车\|在市第一医院南门站下车\|步行约3分钟到门诊楼南门 | 116.365300,39.921900;116.370600,39.919900;116.383100,39.914600;116.397428,39.909230 | SIMULATED |
+| route-004 | h002 | 幸福小区（模拟） | 家属开车 | 25 | 7600 | 从幸福小区东门出发\|沿人民路向东行驶\|从市人民医院门诊楼东门进入 | 116.365300,39.921900;116.389900,39.916500;116.412600,39.909800;116.430200,39.905600 | SIMULATED |
+| route-005 | h002 | 幸福小区（模拟） | 打车 | 30 | 8000 | 在幸福小区东门上车\|沿人民路行驶\|在市人民医院门诊楼东门下车 | 116.365300,39.921900;116.392600,39.915200;116.416800,39.908700;116.430200,39.905600 | SIMULATED |
 | route-006 | 幸福小区（模拟） | 人民路88号（模拟） | 公交 | 45 | 9400 | 步行约5分钟到幸福小区公交站\|乘坐8路公交车\|在市人民医院东门站下车\|步行约4分钟到门诊楼东门 | 116.365300,39.921900;116.378600,39.918700;116.405500,39.911200;116.430200,39.905600 | SIMULATED |
 
 ### `REMINDERS`

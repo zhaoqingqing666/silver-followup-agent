@@ -67,16 +67,20 @@ public class AppointmentRecordStore {
         return rows.stream().map(row -> new AppointmentView(
                 row.appointmentId(), row.hospital(), row.department(), row.date(), row.time(),
                 row.departureAt(), row.transport(), row.reminderStatus(), row.familyStatus(),
-                row.materials(), requiredMaterials(row.department()), row.status(), row.createdAt(),
+                row.materials(), requiredMaterials(row.hospital(), row.department()), row.status(), row.createdAt(),
                 row.arrangedBy(), row.arrangedLabel(), row.accompaniedBy())).toList();
     }
 
-    private List<String> requiredMaterials(String department) {
+    private List<String> requiredMaterials(String hospital, String department) {
         return jdbc.query("""
                 SELECT material_name FROM material_templates
-                WHERE (department='通用' OR department=?) AND required=TRUE
+                WHERE (department_id IS NULL
+                       OR department_id=(
+                            SELECT MIN(d.id) FROM departments d JOIN hospitals h ON h.id=d.hospital_id
+                            WHERE d.name=? AND h.name=?))
+                  AND required=TRUE
                 ORDER BY sort_order
-                """, (rs, row) -> rs.getString(1), department);
+                """, (rs, row) -> rs.getString(1), department, hospital);
     }
 
     private List<String> splitMaterials(String value) {
