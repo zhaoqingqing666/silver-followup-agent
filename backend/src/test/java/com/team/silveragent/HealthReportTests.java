@@ -38,10 +38,16 @@ class HealthReportTests {
         jdbc.update("DELETE FROM family_notifications");
     }
 
-    /** 记一条实测值；daysAgo>0 表示那是几天前量的（用来验时间窗）。 */
+    /**
+     * 记一条实测值；daysAgo>0 表示那是几天前量的（用来验时间窗）。
+     *
+     * <p>daysAgo=0 也刻意往前挪一分钟：汇总的窗口上界是「现在」，而 H2 的 TIMESTAMP 按微秒
+     * 四舍五入，测试若把记录种在「此刻」，存进去的值可能比窗口上界大 1 微秒而被排除。
+     * 真实使用里写入和生成报告不会挨得这么近，这是测试夹具自己的边界问题。
+     */
     private void seed(String item, String valueNum, String valueText, String unit, int daysAgo) {
         records.create("user-001", item, valueNum == null ? null : new BigDecimal(valueNum), valueText, unit,
-                "测试", "conv-seed", MemoParser.nowInDemoZone().minusDays(daysAgo));
+                "测试", "conv-seed", MemoParser.nowInDemoZone().minusDays(daysAgo).minusMinutes(1));
     }
 
     /** 从对话里报一个数并点头确认（实测数值要过确认卡才落库）。 */
