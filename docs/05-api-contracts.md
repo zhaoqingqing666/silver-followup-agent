@@ -1,5 +1,9 @@
 # 前后端 API 契约
 
+> 2026-09-16 联系人规范化：`family_contacts` 仅保留 `id`、`"USER"`、`contact`，后两列均引用 `users.id`。现有联系人响应仍返回 `id/name/relationship/maskedPhone`：id 为联系人记录编号，姓名和手机号来自 contact 对应的 users，称谓来自 care_relations（未配置则为“家属”）。前端类型和调用方式不变。
+
+> 2026-09-16 数据结构调整：`users` 移除家庭经纬度，移除 `family_member` 及其外键，新增可空的 `phone VARCHAR(32)` 保存手机号码。本次未新增 HTTP 字段；路线响应中的 `origin` 改从路线 `polyline` 首点获取，响应结构及前端类型不变。缺少路线坐标时返回配置错误，不虚构起点。
+
 > 文档版本：v0.2　更新日期：2026年9月12日
 
 服务地址：http://localhost:8080

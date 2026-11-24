@@ -1,6 +1,5 @@
 package com.team.silveragent.api;
 
-import com.team.silveragent.application.demo.DemoScenario;
 
 import com.team.silveragent.agent.model.ModelGateway;
 import com.team.silveragent.agent.model.ModelRequest;

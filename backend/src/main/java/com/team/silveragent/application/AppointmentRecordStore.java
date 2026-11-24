@@ -35,13 +35,16 @@ public class AppointmentRecordStore {
 
     public List<AppointmentView> allFor(String userId) {
         List<AppointmentView> rows = jdbc.query("""
-                SELECT a.id,s.hospital_name,s.department,s.appointment_date,s.appointment_time,
+                SELECT a.id,h.name,d.name,s.appointment_date,s.appointment_time,
                        a.departure_time,a.transport,a.reminder_status,a.family_status,a.materials,
                        a.status,a.created_at,a.arranged_by,a.accompanied_by,
                        (SELECT r.relationship FROM care_relations r
                         WHERE r.caregiver_id=a.arranged_by AND r.elder_user_id=a.user_id) AS arr_rel,
                        arr.name AS arr_name
-                FROM appointments a JOIN appointment_slots s ON s.id=a.slot_id
+                FROM appointments a
+                JOIN appointment_slots s ON s.id=a.slot_id
+                JOIN hospitals h ON h.id=s.hospital
+                JOIN departments d ON d.id=s.department
                 LEFT JOIN users arr ON arr.id=a.arranged_by
                 WHERE a.user_id=?
                 ORDER BY a.created_at DESC

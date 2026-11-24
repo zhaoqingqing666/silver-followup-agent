@@ -832,9 +832,11 @@ class RecommendationTests {
     @Test void anAppointmentRouteIgnoresTheTransportPassedInTheSameCall() {
         // 预约里的交通方式是「家属开车」；这一轮模型多带了一个「公交」，不能被它带偏。
         jdbc.update("""
-                INSERT INTO appointment_slots(id,hospital_id,hospital_name,department,appointment_date,appointment_time,available)
-                VALUES ('rec-slot-rec-1','h001',?,?,?,?,TRUE)
-                """, FIRST_HOSPITAL, CARDIOLOGY, Date.valueOf(UPCOMING), Time.valueOf(DemoSeed.MORNING));
+                INSERT INTO appointment_slots(id,hospital,department,appointment_date,appointment_time,available)
+                SELECT 'rec-slot-rec-1',h.id,d.id,?,?,TRUE
+                FROM hospitals h JOIN departments d ON d.hospital_id=h.id
+                WHERE h.name=? AND d.name=?
+                """, Date.valueOf(UPCOMING), Time.valueOf(DemoSeed.MORNING), FIRST_HOSPITAL, CARDIOLOGY);
         jdbc.update("""
                 INSERT INTO appointments(id,slot_id,user_id,status,created_at)
                 VALUES ('rec-1','rec-slot-rec-1','user-001','CONFIRMED',?)
@@ -1287,10 +1289,12 @@ class RecommendationTests {
     /** 医院级证据必须就是关于这一家的：查的是市人民医院，不能拿来当市第一医院的理由。 */
     @Test void evidenceAboutAnotherHospitalIsRejected() {
         jdbc.update("""
-                INSERT INTO appointment_slots(id,hospital_id,hospital_name,department,appointment_date,appointment_time,available)
-                VALUES (?,?,?,?,?,?,TRUE)
-                """, "rec-other-slot", "h002", PEOPLE_HOSPITAL, CARDIOLOGY,
-                Date.valueOf(UPCOMING), Time.valueOf(DemoSeed.MORNING));
+                INSERT INTO appointment_slots(id,hospital,department,appointment_date,appointment_time,available)
+                SELECT ?,h.id,d.id,?,?,TRUE
+                FROM hospitals h JOIN departments d ON d.hospital_id=h.id
+                WHERE h.name=? AND d.name=?
+                """, "rec-other-slot", Date.valueOf(UPCOMING), Time.valueOf(DemoSeed.MORNING),
+                PEOPLE_HOSPITAL, CARDIOLOGY);
         String id = service.start().conversationId();
         planWithFacts("appointment.querySlots", """
                 {"hospital":"%s","department":"%s","date":"%s"}
@@ -1418,9 +1422,11 @@ class RecommendationTests {
     private void seedAppointment(String id, String userId, String hospital, String department,
                                  LocalDate day, LocalTime time, String status) {
         jdbc.update("""
-                INSERT INTO appointment_slots(id,hospital_id,hospital_name,department,appointment_date,appointment_time,available)
-                VALUES (?,?,?,?,?,?,TRUE)
-                """, "rec-slot-" + id, "h001", hospital, department, Date.valueOf(day), Time.valueOf(time));
+                INSERT INTO appointment_slots(id,hospital,department,appointment_date,appointment_time,available)
+                SELECT ?,h.id,d.id,?,?,TRUE
+                FROM hospitals h JOIN departments d ON d.hospital_id=h.id
+                WHERE h.name=? AND d.name=?
+                """, "rec-slot-" + id, Date.valueOf(day), Time.valueOf(time), hospital, department);
         jdbc.update("INSERT INTO appointments(id,slot_id,user_id,status,created_at) VALUES (?,?,?,?,?)",
                 id, "rec-slot-" + id, userId, status, Timestamp.valueOf(LocalDateTime.now()));
     }

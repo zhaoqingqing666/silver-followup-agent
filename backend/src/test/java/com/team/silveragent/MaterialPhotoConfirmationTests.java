@@ -42,9 +42,9 @@ class MaterialPhotoConfirmationTests {
         jdbc.update("DELETE FROM appointment_slots WHERE id='slot-photo'");
         jdbc.update("DELETE FROM appointments WHERE id=?", APPOINTMENT);
         jdbc.update("""
-                INSERT INTO appointment_slots(id,hospital_id,hospital_name,department,
+                INSERT INTO appointment_slots(id,hospital,department,
                     appointment_date,appointment_time,available)
-                VALUES ('slot-photo','h001','市第一医院','心内科',?,'09:00',TRUE)
+                VALUES ('slot-photo','h001','d001',?,'09:00',TRUE)
                 """, DAY);
         jdbc.update("""
                 INSERT INTO appointments(id,slot_id,user_id,status,created_at,conversation_id,materials)

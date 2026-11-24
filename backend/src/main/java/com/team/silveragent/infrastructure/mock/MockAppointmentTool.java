@@ -32,12 +32,14 @@ public class MockAppointmentTool implements AppointmentTool {
     public List<Slot> queryAvailableSlots(String conversationId, String hospitalId, String department, LocalDate date) {
         Map<String, Object> input = Map.of("hospitalId", hospitalId, "department", department, "date", date);
         List<Slot> result = jdbc.query("""
-                SELECT id,hospital_id,hospital_name,department,appointment_date,appointment_time
-                FROM appointment_slots
-                WHERE hospital_id=? AND department=?
-                  AND appointment_date=? AND available=TRUE
-                  AND (appointment_date > ? OR (appointment_date = ? AND appointment_time > ?))
-                ORDER BY appointment_time
+                SELECT s.id,s.hospital,h.name,d.name,s.appointment_date,s.appointment_time
+                FROM appointment_slots s
+                JOIN hospitals h ON h.id=s.hospital
+                JOIN departments d ON d.id=s.department
+                WHERE s.hospital=? AND d.name=?
+                  AND s.appointment_date=? AND s.available=TRUE
+                  AND (s.appointment_date > ? OR (s.appointment_date = ? AND s.appointment_time > ?))
+                ORDER BY s.appointment_time
                 """, slotMapper(), hospitalId, department, Date.valueOf(date),
                 // 「今天已经过去的时段不算号」这条判断必须和 Java 用同一个时钟。交给
                 // CURRENT_DATE/CURRENT_TIME 的话，用的是数据库连接的 JVM 默认时区：开发容器是
@@ -54,12 +56,14 @@ public class MockAppointmentTool implements AppointmentTool {
         Map<String, Object> input = Map.of("hospitalId", hospitalId, "department", department,
                 "from", from, "to", to);
         List<Slot> result = jdbc.query("""
-                SELECT id,hospital_id,hospital_name,department,appointment_date,appointment_time
-                FROM appointment_slots
-                WHERE hospital_id=? AND department=?
-                  AND appointment_date BETWEEN ? AND ? AND available=TRUE
-                  AND (appointment_date > ? OR (appointment_date = ? AND appointment_time > ?))
-                ORDER BY appointment_date,appointment_time
+                SELECT s.id,s.hospital,h.name,d.name,s.appointment_date,s.appointment_time
+                FROM appointment_slots s
+                JOIN hospitals h ON h.id=s.hospital
+                JOIN departments d ON d.id=s.department
+                WHERE s.hospital=? AND d.name=?
+                  AND s.appointment_date BETWEEN ? AND ? AND s.available=TRUE
+                  AND (s.appointment_date > ? OR (s.appointment_date = ? AND s.appointment_time > ?))
+                ORDER BY s.appointment_date,s.appointment_time
                 """, slotMapper(), hospitalId, department, Date.valueOf(from), Date.valueOf(to),
                 Date.valueOf(clock.today()), Date.valueOf(clock.today()), Time.valueOf(clock.time()));
         traces.record(conversationId, "appointment.queryUpcomingSlots", input, result, true);
@@ -73,12 +77,14 @@ public class MockAppointmentTool implements AppointmentTool {
         Map<String, Object> input = Map.of("hospitalId", hospitalId, "department", department,
                 "from", date.plusDays(1), "to", date.plusDays(3));
         List<Slot> result = jdbc.query("""
-                SELECT id,hospital_id,hospital_name,department,appointment_date,appointment_time
-                FROM appointment_slots
-                WHERE hospital_id=? AND department=?
-                  AND appointment_date BETWEEN ? AND ? AND available=TRUE
-                  AND (appointment_date > ? OR (appointment_date = ? AND appointment_time > ?))
-                ORDER BY appointment_date,appointment_time
+                SELECT s.id,s.hospital,h.name,d.name,s.appointment_date,s.appointment_time
+                FROM appointment_slots s
+                JOIN hospitals h ON h.id=s.hospital
+                JOIN departments d ON d.id=s.department
+                WHERE s.hospital=? AND d.name=?
+                  AND s.appointment_date BETWEEN ? AND ? AND s.available=TRUE
+                  AND (s.appointment_date > ? OR (s.appointment_date = ? AND s.appointment_time > ?))
+                ORDER BY s.appointment_date,s.appointment_time
                 """, slotMapper(), hospitalId, department,
                 Date.valueOf(date.plusDays(1)), Date.valueOf(date.plusDays(3)),
                 Date.valueOf(clock.today()), Date.valueOf(clock.today()), Time.valueOf(clock.time()));

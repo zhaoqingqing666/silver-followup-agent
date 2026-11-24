@@ -86,7 +86,6 @@ final class ConversationState {
     String interruptedPendingAction;
     String interruptedPendingAppointmentId;
     String sideTask;
-    String returnPolicy;
     /** 医院/科室口语只命中一个近似候选时，先保存候选并等待用户确认。 */
     String pendingEntityType;
     String pendingEntityId;

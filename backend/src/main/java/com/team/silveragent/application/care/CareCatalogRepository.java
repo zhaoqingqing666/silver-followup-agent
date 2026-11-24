@@ -82,10 +82,11 @@ public class CareCatalogRepository {
      */
     public List<LocalDate> availableDates(String hospitalId, String department, LocalDate from, int limit) {
         return jdbc.query("""
-                SELECT DISTINCT appointment_date FROM appointment_slots
-                WHERE hospital_id=? AND department=? AND appointment_date>=? AND available=TRUE
-                  AND (appointment_date > ? OR (appointment_date = ? AND appointment_time > ?))
-                ORDER BY appointment_date LIMIT ?
+                SELECT DISTINCT s.appointment_date FROM appointment_slots s
+                JOIN departments d ON d.id=s.department
+                WHERE s.hospital=? AND d.name=? AND s.appointment_date>=? AND s.available=TRUE
+                  AND (s.appointment_date > ? OR (s.appointment_date = ? AND s.appointment_time > ?))
+                ORDER BY s.appointment_date LIMIT ?
                 """, (rs, row) -> rs.getDate(1).toLocalDate(),
                 hospitalId, department, java.sql.Date.valueOf(from),
                 java.sql.Date.valueOf(clock.today()), java.sql.Date.valueOf(clock.today()),
@@ -106,7 +107,7 @@ public class CareCatalogRepository {
      * 本方法供用户资料页展示家属，电话在 Java 层脱敏。
      */
     private List<com.team.silveragent.domain.model.ToolModels.Contact> familyMembers(String userId) {
-        return jdbc.query("SELECT id,name,relationship,phone FROM family_contacts WHERE user_id=? ORDER BY id",
+        return jdbc.query("SELECT fc.id,u.name,COALESCE((SELECT MIN(cr.relationship) FROM care_relations cr WHERE cr.caregiver_id=fc.contact AND cr.elder_user_id=fc.\"USER\"),'家属'),u.phone FROM family_contacts fc JOIN users u ON u.id=fc.contact WHERE fc.\"USER\"=? ORDER BY fc.id",
                 (rs, row) -> new com.team.silveragent.domain.model.ToolModels.Contact(rs.getString(1),
                         rs.getString(2), rs.getString(3), maskPhone(rs.getString(4))), userId);
     }
@@ -117,7 +118,7 @@ public class CareCatalogRepository {
     }
 
     public List<com.team.silveragent.domain.model.ToolModels.Contact> contacts(String userId) {
-        return jdbc.query("SELECT id,name,relationship,phone FROM family_contacts WHERE user_id=? ORDER BY id",
+        return jdbc.query("SELECT fc.id,u.name,COALESCE((SELECT MIN(cr.relationship) FROM care_relations cr WHERE cr.caregiver_id=fc.contact AND cr.elder_user_id=fc.\"USER\"),'家属'),u.phone FROM family_contacts fc JOIN users u ON u.id=fc.contact WHERE fc.\"USER\"=? ORDER BY fc.id",
                 (rs, row) -> new com.team.silveragent.domain.model.ToolModels.Contact(rs.getString(1), rs.getString(2), rs.getString(3), "已隐藏"), userId);
     }
 

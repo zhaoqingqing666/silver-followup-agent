@@ -2,6 +2,51 @@
 
 进度文件记录“当前事实”，不写大段过程描述。功能完成后由负责人更新，并附对应 Pull Request 或提交。
 
+## 2026-09-14 死代码静态扫描第三轮：14 个维度全部为空，无新增死代码（未提交）
+
+- 全程纯静态文本分析，**未在宿主机执行任何构建/测试**（遵守 AGENTS.md：构建只在 Dev Container 内做）。
+- 覆盖维度：未使用 import（前端 + 后端）、未调用的 private/protected 方法、未使用 private 字段、
+  零调用 public/protected 方法、孤儿文件、孤儿导出、注释掉的代码块、SQL 未引用表、
+  CSS 未使用类、前端未使用 import、前端模块级局部声明零引用、配置键与 `@Value` 双向比对。
+  **结果全部为「无」，未删除任何文件。**
+- 逐条证伪的误报（避免以后重复排查）：
+  - `app/layout.tsx`、`app/page.tsx`、`vite.config.ts` 是 vinext 实际入口与配置；`next-env.d.ts`
+    在 `tsconfig.json` 的 `include` 中，且在 `vite.config.ts` 的 warmup 里被显式列出 → 均非孤儿。
+  - `react-dom`、`react-server-dom-webpack`、`@vitejs/plugin-react` 源码零 import，但属
+    **vinext peerDependencies**（`plugin-react` 非 optional）→ 必须保留在 devDependencies。
+  - 后端 `H2*Tool` 与 `Mock*Tool` 实现的是**不同接口**（CareGuide/RouteGuide/MyAppointment/
+    MaterialPreparation 对 Appointment/Travel/MaterialChecklist），且都被 `FollowupAgentService`
+    与 `CareBookingService` 注入 → 不是两代重复，都不可删。
+  - 全部 mock 工具为 `@Component`，Spring 按接口注入，静态引用计数 0 属正常；
+    `LlmAnswerGenerator`、`LlmConversationPlanner` 为 `@Primary @Component`。
+- 顺带发现两个**非死代码**问题，本轮未改动：
+  1. `agent.conversation.idle-timeout-seconds`(600) 与 `agent.conversation.suggest-new-after-turns`(40)
+     只在 `@Value` 内有默认值，`application.yml` 未登记 → 生效但不可发现，建议补写进 yml。
+  2. `Mock*` 前缀名不副实：构造同样注入 `JdbcTemplate`、读真实 H2，与 `H2*` 无实现差异，
+     纯历史命名（06 号文档第十二节已记录）。赛前不建议改名。
+- 扫描脚本留在 `%TEMP%\dcscan\`：`all.mjs`(A–I 主扫描)、`scan2b.mjs`(J/K/L)、`scan3.mjs`(M/N)。
+
+## 2026-09-14 重写报名解决方案 v0.3：修正表述口径，严格区分命题要求与自研设计（未提交）
+
+- 起因：主公两次纠正——①命题 4.6/4.5/4.7 的适老化原则、异常处理、服务边界是**命题要求**，
+  不能包装成"我们提出的方法论"，也不能声明为自有 IP；②四类模拟工具是命题 4.3 **点名要求设计**
+  的，同样不适合当创新点。原 v0.2 的第八节"创新规划"把两者混在一起，评委一眼可看穿。
+- 重写 `docs/报名解决方案.md` 至 v0.3，结构性调整：
+  - 文首新增**「关于本文的表述口径」**声明，把内容分为命题要求 / 本方案的设计 / 工程基本功三类。
+  - **新增第四节「命题要求覆盖对照」**：4.1–4.7 逐条列表，明说"以下均为命题要求，完整覆盖，
+    不作为原创主张"，并在 4.3 后加特别声明——工具的存在本身不是创新。
+  - **原"创新规划"一节删除**，替换为**第五节「本方案的设计（命题未规定处）」**，只保留
+    命题未规定、由本方案设计的部分：受控工具调用四层机制、双轴会话身份、机械解析与模型判断
+    分层、规则回退、六项设计取舍（越界不打断 / 只往后看 3 天 / 冲突候选只给 1 个凑 3 个按钮 /
+    提醒时点 / +20 分钟取号预留 / 保留冲突写进确认卡但不改日程）。
+  - 第八节新增知识产权声明：适老化原则、四类工具、确认与异常要求不主张；可主张的是第五节
+    工程实现，代码整体具备软著登记条件。
+  - 数据更新：后端 341 项测试通过（原 317）、四场景一键重置已实现、六分钟录屏脚本顺延至 v0.5。
+- 如实写入**已知缺口**：命题 4.7 紧急表达拦截——确定性紧急词表仅在模型不可用时执行，
+  模型模式下靠模型 EMERGENCY 分类、**缺规则兜底**（越界侧有兜底，紧急侧没有）。
+- 迭代计划表补 v0.3（本版）一行，后续版本顺延。
+- 本次为纯文档改动，未涉及代码与接口。
+
 ## 2026-09-13 确认与执行架构整理（第四阶段 4B + 4B 修复轮，未提交）
 
 - 分支 `refactor/application-packages`，这一步只做 4B：**把「确认通过之后」那三类业务执行从 `confirm()` 里搬出去**（BOOKING / MEMO / CANCEL_MANAGED），CANCEL_APPOINTMENTS 上一轮已经归 `CancellationExecutor`，这一轮不动。不提交、不推送。
@@ -99,6 +144,16 @@
 - 后端只改一行：`task.summary` 的日期从 ISO 改成 `DATE_LABEL`（`2026年9月15日`）。理由是这行字原样出现在老人端的办理卡上，`2026-09-15` 太像编号；改的是这一行的呈现，`plan.date` / `result.date` 本来就是中文，现在三处同源同格式。
 - Dev Container 验证（2026-09-13，`/workspace`）：后端完整回归 **341/341 通过**；前端 `npm run build` 通过；`oxlint` 与 HEAD 基线逐条比对**未引入新命中**（仍是那 4 条既有命中，仅行号位移）。页面用 Playwright 的 chromium 按 390×844 手机视口实检 **39/39 通过**（气泡、朗读设置、页头固定普通/大字、预约记录默认三次与展开收起、真模型跑一遍预约流程后的紧凑卡），另跑一组边界数据 **5/5 通过**（10 条全是「即将到来的已确认」时展开后仍能收起）。
 - 未解决：`mvn -o test` 在一次运行里出现过 218 个 `ApplicationContext` 报错（表现为 `USER_SCHEDULES` / `APPOINTMENT_SLOTS` 表不存在），重跑与在 HEAD 基线上重跑都是全绿，**没能复现，原因未知**。可以排除的方向：全部 18 个 `@SpringBootTest` 都显式覆盖成 H2 内存库，测试不与开发服务器共用 `backend/data/silver-agent` 文件库，两边不存在争用同一个数据库文件这回事。
+
+## 2026-09-13 死代码复查第二轮 + 模拟工具实现说明并入 06 号文档（未提交）
+
+- 死代码复查（静态扫描，未在宿主机构建）：删除 `frontend/next.config.ts`（Next.js 时代残留，空配置 `{}` 且 `import type { NextConfig } from 'next'`，而 `package.json` 已无 `next`；项目跑 vinext，vinext 支持不提供 next.config）。删除 5 处未使用 import：`agent/MedicalBoundaryRules.java`（HealthRecordParser）、`api/DemoController.java`（DemoScenario）、`application/demo/DemoScenarioService.java`（LocalDate）、`test/CareBookingServiceTests.java`（LocalDate）、`test/MemoFlowTests.java`（MemoParser）——后三处仅在 Javadoc/注释里被提及。
+- 确认保留、不属死代码：`FactExtractor` 接口（仅一个实现，经确认作为扩展点保留）；前端 `react-dom` / `react-server-dom-webpack` / `@vitejs/plugin-react` / `@vitejs/plugin-rsc`（源码零 import，但是 vinext 的 peerDependencies）；`tw-animate-css` / `shadcn`（在 `globals.css` 里 `@import`）；`TemplateAnswerGenerator` / `RuleConversationPlanner`（LLM 版的 fallback）；两类 mock 工具（接口与实现一对一，Spring 按接口注入）。
+- 扫描结论：前端无孤儿文件与孤儿导出，后端 69 个 Spring bean 无孤儿，无注释掉的代码块残留，`NEXT_PUBLIC_*` 五个变量与 `compose.yml` 一致。
+- `docs/06-mock-data-design.md` 升到 v0.3，**新增第十二节「模拟工具的实现方式」**：三层数据填充（结构 / 静态目录 / 滚动数据）、四类骨架工具（预约查询 / 日程管理 / 出行规划 / 家属通知）各自的 SQL 与实现要点、两层守门（`ToolRegistry` + `ToolPolicy`，`READ_ONLY` vs `CONFIRMATION_ONLY`）、`callTool` 与 `ToolTraceStore` 的定位、CAS 条件更新与两种幂等范式，并说明 `Mock*` / `H2*` 前缀属历史遗留命名。
+- 同时在第十一节与 `00-reading-order.md` 登记「演示话术避开『步行』」：`travel_routes` 只配了家属开车 / 打车 / 公交三种，而 `RuleFactExtractor` 的口语解析认得「步行」，说「我走过去」会命中未配置路线而走异常分支。
+- `00-reading-order.md` 的 v0.2 导航段新增一条指引到 06 号文档第十二节。
+- 两处文档改动均为纯说明，未改动任何代码与接口，不涉及前后端字段同步。第六节 5 处 import 删除属清理，需在 Dev Container 内跑一次后端测试确认编译通过。
 
 ## 2026-09-12 自然语言确认与批量取消预约（未提交）
 

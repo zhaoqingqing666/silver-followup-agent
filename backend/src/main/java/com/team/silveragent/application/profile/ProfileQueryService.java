@@ -70,7 +70,10 @@ public class ProfileQueryService {
 
     /** 两张表的连接方式是固定的，只有过滤条件会变；拼在一起免得四处各写一份。 */
     private static final String FROM_JOIN =
-            " FROM appointments a JOIN appointment_slots s ON s.id = a.slot_id ";
+            " FROM appointments a"
+                    + " JOIN appointment_slots s ON s.id = a.slot_id"
+                    + " JOIN hospitals h ON h.id = s.hospital"
+                    + " JOIN departments d ON d.id = s.department ";
 
     private final JdbcTemplate jdbc;
     private final CareService careService;
@@ -101,7 +104,7 @@ public class ProfileQueryService {
         int confirmedTotal = count(new Filters(subject, filters, "CONFIRMED"));
 
         List<AppointmentFact> facts = new ArrayList<>();
-        jdbc.query("SELECT s.hospital_name, s.department, s.appointment_date, s.appointment_time, a.status"
+        jdbc.query("SELECT h.name, d.name, s.appointment_date, s.appointment_time, a.status"
                         + FROM_JOIN + unmatched.where()
                         + " ORDER BY s.appointment_date DESC, s.appointment_time DESC LIMIT ?",
                 (org.springframework.jdbc.core.RowCallbackHandler) rs -> {
@@ -146,7 +149,7 @@ public class ProfileQueryService {
 
         Filters filters = new Filters(subject, query, "CONFIRMED");
         List<Booking> scan = new ArrayList<>();
-        jdbc.query("SELECT s.hospital_name, s.department, s.appointment_time"
+        jdbc.query("SELECT h.name, d.name, s.appointment_time"
                         + FROM_JOIN + filters.where()
                         + " ORDER BY s.appointment_date DESC, s.appointment_time DESC LIMIT ?",
                 (org.springframework.jdbc.core.RowCallbackHandler) rs -> {
@@ -262,11 +265,11 @@ public class ProfileQueryService {
                 args.add(status);
             }
             if (query.hospital() != null) {
-                sql.append(" AND s.hospital_name LIKE ?");
+                sql.append(" AND h.name LIKE ?");
                 args.add("%" + query.hospital() + "%");
             }
             if (query.department() != null) {
-                sql.append(" AND s.department LIKE ?");
+                sql.append(" AND d.name LIKE ?");
                 args.add("%" + query.department() + "%");
             }
             if (query.from() != null) {

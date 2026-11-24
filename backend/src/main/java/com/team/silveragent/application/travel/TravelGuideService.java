@@ -31,13 +31,13 @@ public class TravelGuideService {
                                                   String traceConversationId) {
         List<Context> rows = jdbc.query("""
                 SELECT a.id,COALESCE(a.conversation_id,'appointment-' || a.id),
-                       s.hospital_id,h.name,s.department,d.id,s.clinic_location_id,
+                       s.hospital,h.name,d.name,d.id,s.clinic_location_id,
                        s.appointment_date,s.appointment_time,
                        COALESCE(a.transport,u.preferred_transport,'家属开车')
                 FROM appointments a
                 JOIN appointment_slots s ON s.id=a.slot_id
-                JOIN hospitals h ON h.id=s.hospital_id
-                JOIN departments d ON d.hospital_id=s.hospital_id AND d.name=s.department
+                JOIN hospitals h ON h.id=s.hospital
+                JOIN departments d ON d.id=s.department
                 JOIN users u ON u.id=a.user_id
                 WHERE a.user_id=? AND a.id=?
                 ORDER BY d.id LIMIT 1

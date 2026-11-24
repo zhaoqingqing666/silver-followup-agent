@@ -3717,7 +3717,6 @@ public class FollowupAgentService extends ConfirmationSupport {
             state.interruptedStage = state.stage;
             state.interruptedPendingAction = state.pendingAction;
             state.interruptedPendingAppointmentId = state.pendingAppointmentId;
-            state.returnPolicy = "ASK_TO_RESUME";
         }
         state.sideTask = sideTask;
     }
@@ -3736,7 +3735,6 @@ public class FollowupAgentService extends ConfirmationSupport {
         state.interruptedPendingAction = null;
         state.interruptedPendingAppointmentId = null;
         state.sideTask = null;
-        state.returnPolicy = null;
     }
 
     private void discardInterruption(ConversationState state) { clearInterruption(state); }

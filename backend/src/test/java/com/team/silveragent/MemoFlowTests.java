@@ -1,6 +1,5 @@
 package com.team.silveragent;
 
-import com.team.silveragent.application.memo.MemoParser;
 
 import com.team.silveragent.application.FollowupAgentService;
 import com.team.silveragent.application.memo.MemoStore;

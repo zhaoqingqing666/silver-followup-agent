@@ -294,7 +294,7 @@ public class ConversationStore {
             Contact contact, List<String> materials, String pendingAction, String appointmentId,
             String pendingAppointmentId, ConversationState.Stage interruptedStage,
             String interruptedPendingAction, String interruptedPendingAppointmentId,
-            String sideTask, String returnPolicy,
+            String sideTask,
             String pendingEntityType, String pendingEntityId, String pendingEntityName, String pendingEntityRaw,
             String confirmationId, String confirmationKind, List<String> confirmationTargetIds,
             String originalAppointmentId,
@@ -331,7 +331,7 @@ public class ConversationStore {
                     state.contact, state.materials, state.pendingAction, state.appointmentId,
                     state.pendingAppointmentId, state.interruptedStage,
                     state.interruptedPendingAction, state.interruptedPendingAppointmentId,
-                    state.sideTask, state.returnPolicy,
+                    state.sideTask,
                     state.pendingEntityType, state.pendingEntityId, state.pendingEntityName, state.pendingEntityRaw,
                     state.confirmationId, state.confirmationKind, state.confirmationTargetIds,
                     state.originalAppointmentId,
@@ -382,7 +382,6 @@ public class ConversationStore {
             state.interruptedPendingAction = interruptedPendingAction;
             state.interruptedPendingAppointmentId = interruptedPendingAppointmentId;
             state.sideTask = sideTask;
-            state.returnPolicy = returnPolicy;
             state.pendingEntityType = pendingEntityType;
             state.pendingEntityId = pendingEntityId;
             state.pendingEntityName = pendingEntityName;

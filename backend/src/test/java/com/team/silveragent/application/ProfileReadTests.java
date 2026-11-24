@@ -59,7 +59,7 @@ class ProfileReadTests {
     private static final String FIRST_HOSPITAL = "市第一医院（模拟）";
     private static final String PEOPLE_HOSPITAL = "市人民医院（模拟）";
     /** 只属于另一个老人（user-002）的医院：一旦出现在本人的结果里，就是越权读到了别人的数据。 */
-    private static final String OTHERS_HOSPITAL = "市第三医院（模拟）";
+    private static final String OTHERS_HOSPITAL = "市人民医院（模拟）";
     /** 按钮流里写医院用的是目录名（不带「（模拟）」也认），断言一律用子串比较。 */
     private static final String FIRST_HOSPITAL_INPUT = "市第一医院";
     private static final String PEOPLE_HOSPITAL_INPUT = "市人民医院";
@@ -677,9 +677,11 @@ class ProfileReadTests {
     private void seedAppointment(String id, String userId, String hospital, String department,
                                  LocalDate day, LocalTime time, String status) {
         jdbc.update("""
-                INSERT INTO appointment_slots(id,hospital_id,hospital_name,department,appointment_date,appointment_time,available)
-                VALUES (?,?,?,?,?,?,TRUE)
-                """, "hist-slot-" + id, "h001", hospital, department, Date.valueOf(day), Time.valueOf(time));
+                INSERT INTO appointment_slots(id,hospital,department,appointment_date,appointment_time,available)
+                SELECT ?,h.id,d.id,?,?,TRUE
+                FROM hospitals h JOIN departments d ON d.hospital_id=h.id
+                WHERE h.name=? AND d.name=?
+                """, "hist-slot-" + id, Date.valueOf(day), Time.valueOf(time), hospital, department);
         jdbc.update("INSERT INTO appointments(id,slot_id,user_id,status,created_at) VALUES (?,?,?,?,?)",
                 id, "hist-slot-" + id, userId, status, Timestamp.valueOf(LocalDateTime.now()));
     }

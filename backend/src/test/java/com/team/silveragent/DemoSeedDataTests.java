@@ -99,8 +99,9 @@ class DemoSeedDataTests {
             // 「未来」的基准同样用业务时钟，不用 SQL 的 CURRENT_DATE：后者取的是数据库连接的
             // JVM 默认时区（UTC），和号源生成用的业务时区不是同一个钟面。
             Integer days = jdbc.queryForObject("""
-                    SELECT COUNT(DISTINCT appointment_date) FROM appointment_slots
-                    WHERE department=? AND available=TRUE AND appointment_date > ?
+                    SELECT COUNT(DISTINCT s.appointment_date)
+                    FROM appointment_slots s JOIN departments d ON d.id=s.department
+                    WHERE d.name=? AND s.available=TRUE AND s.appointment_date > ?
                     """, Integer.class, department, Date.valueOf(clock.today()));
             assertThat(days).as("科室 %s 未来还有几天可约", department).isGreaterThanOrEqualTo(3);
         }
