@@ -119,4 +119,6 @@ NEXT_PUBLIC_AMAP_SECURITY_CODE=你的安全密钥
 - **改 pom/package.json 后不生效**：重启对应进程；改了 Dockerfile/依赖版本才需要重建容器。
 - **填写 `.devcontainer/.env` 后仍是规则模式**：确认是通过“Dev Container: 后端服务”任务启动，并先停止旧后端。已运行的 Java 进程不会自动重新读取环境变量。
 - **停止后端后前端是否会关闭**：不会。开发容器里的前端和后端是两个独立任务，需要分别启动和停止。
+- **怎么关开发容器**：VS Code **远程资源管理器（Remote Explorer）→ Containers → 对正在运行的容器右键 →「停止容器」**；或关掉连着远程的窗口并在弹窗里选 Stop Container。⚠️ 这条命令**不在命令面板里**（插件把它隐藏了），也**不要**从宿主机敲 `docker stop <容器id>`。**顺序不能反：先在 VS Code 里停容器，再退 Docker Desktop**——先退引擎就没有后端了，`docker stop` 会报 `500 … check if the server supports the requested API version`（那句话说「版本不对」是误导，实为引擎半死）。详见 `docs/records/PITFALLS.md` 2026-09-14 条。
+- **停容器会丢数据吗**：不会。H2 数据在具名卷 `silver-backend-data`，前端依赖与 Maven 缓存也各自在卷里，下次「在容器中重新打开」接着用。唯一会清数据的是 Docker Desktop 的 Troubleshoot → Purge，平时碰不到。
 - **Windows 防火墙弹窗**：首次转发端口放行即可。

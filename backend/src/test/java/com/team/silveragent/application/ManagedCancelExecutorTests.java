@@ -51,7 +51,8 @@ class ManagedCancelExecutorTests {
                 LocalDateTime.of(date, time.minusHours(1)), "打车",
                 "复诊及出发提醒已创建", "已通知女儿小丽", List.of("身份证"),
                 List.of("身份证"), "CONFIRMED", LocalDateTime.of(2026, 9, 13, 10, 0),
-                "user-f001", "女儿 小丽", null);
+                "user-f001", "女儿 小丽", null,
+                null, null, null, null);
     }
 
     /** 卡片上冻结的那一条。 */

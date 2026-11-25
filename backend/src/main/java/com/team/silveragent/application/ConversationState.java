@@ -72,8 +72,28 @@ final class ConversationState {
     String timePreference;
     LocalTime requestedTime;
     List<Slot> alternatives = List.of();
+    /**
+     * 选医诉求（阶段 2）。{@code doctorQuery} 是老人说出的医生线索（全名或姓氏），
+     * {@code doctorId} 是在真实号源里对上号的医生；对上后候选只在这位医生的号源里出。
+     * {@code wantsExpert} 表示老人要专家号——当天没有专家号时触发「7 天内最近专家号」
+     * 的推荐分支，绝不静默换日期。换科室清空三者；换日期保留（诉求跟着人走，不跟日期走）。
+     */
+    String doctorQuery;
+    String doctorId;
+    boolean wantsExpert;
     /** 最近一次日程检查查到的冲突。用户选择「仍保留这个时间」后，确认卡要把它列出来。 */
     List<Conflict> conflicts = List.of();
+    /**
+     * 用户已明确「仍保留这个时间」。
+     *
+     * <p>冲突提示现在出现在号源锁定的那一刻，那时陪同、出行和通知都还没问，{@code ready()} 不成立。
+     * 老人答完那些问题之后还会再走一遍 {@code checkSchedule}：没有这个标记，同一个冲突会被问第二次，
+     * 他永远到不了确认卡。换号源和新建办理时清零。
+     *
+     * <p>刻意不放进 {@code invalidate(state)}：答「需要陪同」这类问题不该作废「保留时间」这个决定，
+     * 而 {@code invalidate} 会被每一个 {@code SET_*} 动作触发。
+     */
+    boolean conflictKept;
     TravelPlan travelPlan;
     Contact contact;
     List<String> materials = List.of();

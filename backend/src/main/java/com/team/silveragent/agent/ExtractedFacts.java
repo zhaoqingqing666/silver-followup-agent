@@ -33,11 +33,12 @@ public record ExtractedFacts(
         String emotion,
         String concern,
         String familyContact,
+        /** 老人本轮提到的医生：全名 / 姓氏+职称 / “专家”这类号别诉求，由 Java 再解析。 */
+        String doctor,
         List<String> excludedHospitals
 ) {
     /**
-     * 16 参兼容构造：不涉及排除条件的调用点（规则抽取、确认动作、测试脚手架）不必跟着改。
-     * <p>只读工具轮那条「拿掉会落到草稿上的字段」的路径要显式传下去——排除不是草稿字段。
+     * 16 参兼容构造：不涉及医生与排除条件的调用点（规则抽取、确认动作、测试脚手架）不必跟着改。
      */
     public ExtractedFacts(String intent, String hospital, String department, LocalDate date,
                           Boolean acceptAlternative, Boolean needCompanion, Boolean needTravel,
@@ -46,7 +47,18 @@ public record ExtractedFacts(
                           String emotion, String concern, String familyContact) {
         this(intent, hospital, department, date, acceptAlternative, needCompanion, needTravel,
                 notifyFamily, transport, selectedTime, timePreference, acceptRecommendedTime,
-                acknowledgement, emotion, concern, familyContact, List.of());
+                acknowledgement, emotion, concern, familyContact, null, List.of());
+    }
+
+    /** 17 参兼容构造：带医生、不带排除条件的调用点。 */
+    public ExtractedFacts(String intent, String hospital, String department, LocalDate date,
+                          Boolean acceptAlternative, Boolean needCompanion, Boolean needTravel,
+                          Boolean notifyFamily, String transport, LocalTime selectedTime,
+                          String timePreference, Boolean acceptRecommendedTime, String acknowledgement,
+                          String emotion, String concern, String familyContact, String doctor) {
+        this(intent, hospital, department, date, acceptAlternative, needCompanion, needTravel,
+                notifyFamily, transport, selectedTime, timePreference, acceptRecommendedTime,
+                acknowledgement, emotion, concern, familyContact, doctor, List.of());
     }
 
     public ExtractedFacts {
@@ -55,6 +67,19 @@ public record ExtractedFacts(
 
     public static ExtractedFacts empty() {
         return new ExtractedFacts("UNKNOWN", null, null, null, null, null, null, null,
-                null, null, null, null, null, null, null, null);
+                null, null, null, null, null, null, null, null, null, List.of());
+    }
+
+    /**
+     * 只换 {@code selectedTime} 一个分量，其余原样拷贝。
+     *
+     * <p>模型链路补口语时间用（{@code AgentRuntime}）：那里只有「补一个空槽」这一件事，
+     * 在调用点摆一串 17 参构造，加字段时就得回来数第几个参数。
+     */
+    public ExtractedFacts withSelectedTime(LocalTime time) {
+        return new ExtractedFacts(intent, hospital, department, date, acceptAlternative,
+                needCompanion, needTravel, notifyFamily, transport, time, timePreference,
+                acceptRecommendedTime, acknowledgement, emotion, concern, familyContact,
+                doctor, excludedHospitals);
     }
 }

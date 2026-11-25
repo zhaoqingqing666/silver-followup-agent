@@ -1,7 +1,7 @@
 'use client';
 
 import { FormEvent, useEffect, useRef, useState, type ChangeEvent } from 'react';
-import { CalendarSearch, Camera, ClipboardCheck, History, Image as ImageIcon, LoaderCircle, Lock, NotebookPen, Plus, RefreshCw, Send, Sparkles, SquarePen, X } from 'lucide-react';
+import { Ban, CalendarSearch, Camera, ClipboardCheck, History, Image as ImageIcon, LoaderCircle, Lock, NotebookPen, Plus, RefreshCw, Send, Sparkles, SquarePen, X } from 'lucide-react';
 import { PageHeader } from '@/components/common/page-header';
 import { useElderVoice } from '@/features/voice/elder-voice-provider';
 import { compressImageFile } from '@/lib/image-compress';
@@ -144,6 +144,14 @@ export function AssistantView({ active, onNavigate, onOpenTravel, voicePreferenc
           <Sparkles className="size-4 shrink-0 text-primary" aria-hidden="true" />
           <span className="truncate">{readOnly ? '这段对话已经结束' : turn?.task?.active ? `办理步骤：${stageLabels[turn.stage] ?? '正在处理'}` : '当前可以自由交流'}</span>
         </div>
+        {/* 「取消本次办理」原来挂在对话下面那张「复诊办理待继续」卡上，而那张卡和这一行的
+            「办理步骤」说的是同一件事，等于同一屏说两遍。卡撤掉，入口挪到状态行右侧：
+            办理中才出现，其它时候不占地方。 */}
+        {!readOnly && turn?.task?.active && <button type="button" disabled={busy}
+          onClick={() => void sendAction('CANCEL_TASK', '', '取消本次办理')}
+          className="flex min-h-10 shrink-0 items-center gap-1.5 rounded-xl border border-[#dfb98f] bg-white px-3 text-sm font-bold text-[#6c3d24] disabled:opacity-40">
+          <Ban className="size-4 text-primary" aria-hidden="true" />取消办理
+        </button>}
         <button type="button" onClick={() => setHistoryOpen(true)}
           className="flex min-h-10 shrink-0 items-center gap-1.5 rounded-xl border border-[#dfb98f] bg-white px-3 text-sm font-bold text-[#6c3d24]">
           <History className="size-4 text-primary" aria-hidden="true" />历史记录
@@ -169,7 +177,11 @@ export function AssistantView({ active, onNavigate, onOpenTravel, voicePreferenc
         </button>
       </div>
     </section>}
-    <div className="border-b bg-[#fffaf3] px-5 py-3">
+    {/* 操作按钮区跟着状态行一起吸顶：往上滚对话时这一排按钮始终停在状态行下面，
+        老人不必滑回顶部才点得到「继续办理」。
+        top 的 141px = 标题栏 76px + 状态行自身高度 65px（py-3×2 + min-h-10 按钮 + 1px 分隔线）。
+        状态行的高度是被按钮的 min-h-10 撑住的，字号放大也不会变，这个数值是稳的。 */}
+    <div className="sticky top-[141px] z-30 border-b bg-[#fffaf3]/95 px-5 py-3 backdrop-blur">
       <div className="grid grid-cols-2 gap-2">
         {/* 只读态下「预约复诊」直接禁用：后端一定会拒收，让它可点只是诱着老人白按一次。 */}
         <button disabled={busy || readOnly} onClick={() => void voice.sendAction('CONTINUE', '', turn?.task?.active ? '继续刚才的办理' : '我想预约复诊')} className="flex min-h-12 items-center justify-center gap-2 rounded-2xl bg-primary text-base font-bold text-white disabled:opacity-40"><CalendarSearch className="size-5" />{turn?.task?.active ? '继续办理' : '预约复诊'}</button>

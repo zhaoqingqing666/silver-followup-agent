@@ -19,9 +19,10 @@ import java.time.temporal.TemporalAdjusters;
  * 写死某一天的话，那天一过，「时间冲突」就再也造不出来——冲突检查查的是**预约当天**
  * 有没有别的安排，一条落在过去的日程永远不会命中，界面上看起来就像这位老人从来没有别的事。
  *
- * 体检排在「下周三」10:00-11:00：RollingAppointmentSlotInitializer 会给每个工作日生成
- * 10:30 的号源，两者必然重叠，所以演示话术「下周三去市第一医院心内科复诊」不管哪天演示
- * 都能撞上冲突。第二条排在「下周六」12:00-13:30（周六没有号源），用来验证冲突检查不会误报。
+ * 体检排在「下周三」10:00-11:00：RollingAppointmentSlotInitializer 给心内科（d001）排的
+ * 放号日固定含周三，那天上午必有一条 10:30 的号源，两者必然重叠，所以演示话术
+ * 「下周三去市第一医院心内科复诊」不管哪天演示都能撞上冲突。
+ * 第二条排在「下周六」12:00-13:30（周六没有号源），用来验证冲突检查不会误报。
  */
 @Component
 public class RollingUserScheduleInitializer implements ApplicationRunner {

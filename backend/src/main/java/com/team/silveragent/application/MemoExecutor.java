@@ -77,6 +77,12 @@ final class MemoExecutor {
         String repeat = MemoStore.normalizeRepeat(repeatRule);
         List<LocalDateTime> times = ats == null ? List.of()
                 : ats.stream().filter(at -> at != null).distinct().sorted().toList();
+        if (repeat != null) {
+            // 重复提醒存的是“下一次到点”（见 MemoStore 类注释）：周三 16:00 说“每周三下午三点”，
+            // 直接存今天就留了一条已经过期的提醒，到点永远不响。与改期那条路（memo.update）
+            // 同一个口径，从锚点顺延到晚于此刻的那个周期点。
+            times = times.stream().map(at -> MemoStore.nextOccurrence(at, repeat, clock.now())).toList();
+        }
         List<MemoStore.MemoView> created = new ArrayList<>();
         if (times.isEmpty()) {
             // 没有提醒的长期备忘不能摘正文——“9月20号家人来接我”里的日期是内容本身，

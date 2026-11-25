@@ -1203,6 +1203,17 @@ public final class MemoParser {
         };
     }
 
+    /**
+     * 从一句口语里抽「几点几分」：阿拉伯数字（7点 / 7点半 / 7:30）与中文数字
+     * （七点 / 三点半 / 七点二十五 / 十二点）都认；没写具体钟点返回 {@code null}。
+     *
+     * <p>复诊预约的规则抽取（{@code RuleFactExtractor}）与模型链路的时间兜底都调这一份，
+     * 不另写钟点正则——越界口径那次已经定过规矩：词表写两遍，迟早只剩一份是对的。
+     */
+    public static LocalTime clockIn(String value) {
+        return value == null ? null : clockTime(value);
+    }
+
     /** “几点/几点几分”。阿拉伯数字(7点/7点半/7:30)或中文数字(七点/三点半/十二点)。返回 null 表示没写具体几点。 */
     private static LocalTime clockTime(String value) {
         Matcher m = CLOCK.matcher(value);

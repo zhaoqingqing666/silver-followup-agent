@@ -6,6 +6,7 @@ import org.springframework.stereotype.Repository;
 
 import java.sql.Time;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
 
@@ -74,23 +75,27 @@ public class CareCatalogRepository {
     }
 
     /**
-     * 从 {@code from} 起还有真实可约号源的日期。
+     * 从 {@code from} 起仍可预约的日期，去重、最多 limit 个（「查看可预约日期」那排按钮用它）。
      *
-     * <p>「今天已经过去的时段不算」用业务时钟的今天/此刻做参数，不用 {@code CURRENT_DATE} /
-     * {@code CURRENT_TIME}——那两个取的是数据库连接的 JVM 默认时区，和业务时区（Asia/Shanghai）
-     * 不是一回事，在 UTC 容器里北京时间凌晨那八小时会算错日期。
+     * <p>「当天已过的时段」在这里一并滤掉，判据与号源查询同一份（{@link BusinessClock}）。
+     * 以前这一步交给 H2 的 {@code CURRENT_DATE / CURRENT_TIME}，等于把业务口径挂在容器时区上：
+     * 镜像没配时区时 JVM 走 GMT，北京 22:58 在它眼里才 14:58，「今天还剩几个时段」整片算错。
      */
     public List<LocalDate> availableDates(String hospitalId, String department, LocalDate from, int limit) {
+        if (hospitalId == null || department == null || from == null) return List.of();
         return jdbc.query("""
-                SELECT DISTINCT s.appointment_date FROM appointment_slots s
+                SELECT DISTINCT s.appointment_date, s.appointment_time FROM appointment_slots s
                 JOIN departments d ON d.id=s.department
                 WHERE s.hospital=? AND d.name=? AND s.appointment_date>=? AND s.available=TRUE
-                  AND (s.appointment_date > ? OR (s.appointment_date = ? AND s.appointment_time > ?))
-                ORDER BY s.appointment_date LIMIT ?
-                """, (rs, row) -> rs.getDate(1).toLocalDate(),
-                hospitalId, department, java.sql.Date.valueOf(from),
-                java.sql.Date.valueOf(clock.today()), java.sql.Date.valueOf(clock.today()),
-                Time.valueOf(clock.time()), limit);
+                ORDER BY s.appointment_date, s.appointment_time
+                """, (rs, row) -> LocalDateTime.of(rs.getDate(1).toLocalDate(), rs.getTime(2).toLocalTime()),
+                hospitalId, department, java.sql.Date.valueOf(from))
+                .stream()
+                .filter(moment -> !clock.isPast(moment))
+                .map(LocalDateTime::toLocalDate)
+                .distinct()
+                .limit(limit)
+                .toList();
     }
 
     public Optional<UserProfile> user(String userId) {

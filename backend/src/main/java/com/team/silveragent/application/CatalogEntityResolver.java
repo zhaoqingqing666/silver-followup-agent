@@ -25,10 +25,15 @@ final class CatalogEntityResolver {
     private static final Map<String, String> HOSPITAL_ALIASES = aliases(
             "市一", "市第一医院", "一院", "市第一医院", "第一医院", "市第一医院",
             "人民医院", "市人民医院", "市人民", "市人民医院");
+    /** 科室简称别名：口语说法 → 目录里的科室名。 */
     private static final Map<String, String> DEPARTMENT_ALIASES = aliases(
             "神内", "神经内科", "神经科", "神经内科", "神经内科门诊", "神经内科",
             "心内", "心内科", "心血管内科", "心内科", "心脏内科", "心内科",
-            "内分泌", "内分泌科", "内分泌门诊", "内分泌科", "骨科门诊", "骨科");
+            "内分泌", "内分泌科", "内分泌门诊", "内分泌科", "骨科门诊", "骨科",
+            // 2026-09-14 补：呼吸内科 / 消化内科是 DEC-026 把科室从 6 个扩到 12 个时才有的（d008~d012），
+            // 老人口语一般说「呼吸科」「消化科」，而全称精确匹配兜不住简称（「呼吸内科」不含「呼吸科」），
+            // 包含匹配也兜不住——两个方向都不互为子串，只能落到 NOT_FOUND。所以它们必须进别名表。
+            "呼吸科", "呼吸内科", "消化科", "消化内科");
 
     Match hospital(String utterance, List<HospitalProfile> rows) {
         String raw = cleanUtterance(utterance, true);
@@ -52,6 +57,12 @@ final class CatalogEntityResolver {
 
         String alias = aliases.get(query);
         if (alias != null) {
+            // 别名只是**一级先行跳转**：命中之后仍然要回到真实目录里核对，且要求目录中
+            // **恰好有一条**科室叫这个名字。目录里没有、或者有两条（跨院列表），这一支就落空，
+            // 照旧往下走包含匹配（→ AMBIGUOUS / NOT_FOUND）。
+            // 所以**补别名不会放宽科室校验**：别名表只决定「口语简称」落在哪里，
+            // 全称精确匹配、多候选追问、非法科室拒绝这三条路一个分支都没碰。
+            // 反过来说，别名永远**编不出**一个目录里不存在的科室——校验的事实源仍是目录工具。
             List<Candidate> aliased = rows.stream()
                     .filter(item -> normalize(item.name()).equals(normalize(alias))).toList();
             if (aliased.size() == 1) return new Match(MatchType.UNIQUE_APPROXIMATE, raw, aliased);

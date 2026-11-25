@@ -37,7 +37,7 @@ class TravelAppointmentBindingTests {
         }
         // 只清本类自己塞进去的历史号源：演示号源已经是滚动的，不再需要在这里挑日子放行。
         jdbc.update("DELETE FROM appointment_slots WHERE id LIKE 'slot-0908-%'");
-        jdbc.update("UPDATE appointment_slots SET available=TRUE");
+        jdbc.update("UPDATE appointment_slots SET booked=0, available=TRUE");
     }
 
     /** 造一条历史（已过去）的已确认预约：9月8日 市第一医院 心内科。 */

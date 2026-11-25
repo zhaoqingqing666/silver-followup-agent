@@ -135,7 +135,7 @@ class ProfileReadTests {
         jdbc.update("DELETE FROM appointment_slots WHERE id LIKE 'hist-%'");
         // 确认一笔预约会把那个号源置成 available=FALSE。有一条用例真的会确认（确认之后才有记忆），
         // 号源不复原的话，排在它后面的所有 bookedCard() 都会卡在选时段那一步。
-        jdbc.update("UPDATE appointment_slots SET available=TRUE");
+        jdbc.update("UPDATE appointment_slots SET booked=0, available=TRUE");
         jdbc.update("DELETE FROM reminders");
         jdbc.update("DELETE FROM family_notifications");
         jdbc.update("DELETE FROM user_memories WHERE user_id IN ('user-001','user-002','user-f001')");

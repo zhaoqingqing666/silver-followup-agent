@@ -3,14 +3,15 @@
 import { useRef, useState, type ChangeEvent } from 'react';
 import { Camera, Check, Circle, Image as ImageIcon, ImagePlus, LoaderCircle, RefreshCw } from 'lucide-react';
 import { useAppointmentMaterials } from '@/hooks/use-appointment-materials';
+import { PlainDialog } from '@/components/common/plain-dialog';
 import { compressImageFile } from '@/lib/image-compress';
 import type { MaterialItem } from '@/types/domain';
 import { CameraCapture } from '@/features/assistant/camera-capture';
 
 /** 看照片的浮层：老人自己拍的那张，占满屏幕、只有一个「关闭」按钮，不用找叉号。
- *  用原生 dialog（open）而不是 div+role：语义由浏览器给，屏幕阅读器认这个。 */
+ *  浮层用 PlainDialog（原生 dialog + 铺满全屏居中），不要退回自己写 `fixed inset-0`。 */
 function MaterialPhotoViewer({ name, url, onClose }: { name: string; url: string; onClose: () => void }) {
-  return <dialog open aria-label={`${name}的照片`} className="fixed inset-0 z-50 grid place-items-center overflow-auto bg-black/85 p-4">
+  return <PlainDialog label={`${name}的照片`} backdropClassName="bg-black/85">
     <div className="w-full max-w-[440px] space-y-3">
       <p className="text-center text-base font-bold text-white">{name}·拍照确认</p>
       {/* 老人当场拍的那张，data URL 直接显示即可，不需要打包器的图片优化 */}
@@ -18,7 +19,7 @@ function MaterialPhotoViewer({ name, url, onClose }: { name: string; url: string
       <img src={url} alt={`${name}的照片`} className="max-h-[70dvh] w-full rounded-2xl bg-white object-contain" />
       <button type="button" onClick={onClose} className="flex min-h-12 w-full items-center justify-center rounded-2xl bg-white text-base font-bold text-[#6c3d24]">关闭</button>
     </div>
-  </dialog>;
+  </PlainDialog>;
 }
 
 export function MaterialChecklist({ appointmentId, disabled = false, compact = false }: {

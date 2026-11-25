@@ -66,6 +66,21 @@ public class BusinessClock {
         return LocalDateTime.now(clock);
     }
 
+    /** 与 {@link #now()} 同义；保留这个名字是因为照护/预约链路的历史调用点较多。 */
+    public LocalDateTime nowDateTime() {
+        return now();
+    }
+
+    /**
+     * 这个时点是不是已经过去了——号源能不能约只认这一条判据。
+     *
+     * <p>与旧 SQL 的 {@code appointment_time > CURRENT_TIME} 同口径：**到点即算过**，
+     * 不用「刚好等于现在」去为难老人。
+     */
+    public boolean isPast(LocalDateTime moment) {
+        return !moment.isAfter(now());
+    }
+
     public LocalTime time() {
         return LocalTime.now(clock);
     }

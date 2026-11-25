@@ -50,6 +50,11 @@ class BusinessTimeFlowTests {
     /** 服务器默认时区（UTC）此刻的那一天：用它证明「过去日期」是按业务时区判的。 */
     private static final LocalDate SERVER_TODAY = LocalDate.of(2026, 9, 15);
     private static final LocalDate TOMORROW = LocalDate.of(2026, 9, 17);
+    /**
+     * 心内科（d001）下一台放号日：周一 / 周三 / 周五，17 号是周四不排班，18 号周五才有号。
+     * 跨午夜那条要真约一个号源，只能落在周五。
+     */
+    private static final LocalDate FRIDAY = LocalDate.of(2026, 9, 18);
 
     private static final LocalTime MORNING = LocalTime.of(9, 0);
     private static final LocalTime AFTERNOON = LocalTime.of(15, 30);
@@ -76,7 +81,7 @@ class BusinessTimeFlowTests {
         for (String table : List.of("appointments", "reminders", "family_notifications")) {
             jdbc.update("DELETE FROM " + table);
         }
-        jdbc.update("UPDATE appointment_slots SET available=TRUE");
+        jdbc.update("UPDATE appointment_slots SET booked=0, available=TRUE");
     }
 
     /**
@@ -156,20 +161,20 @@ class BusinessTimeFlowTests {
     void confirmingJustAfterMidnightKeepsTheDateOnTheCard() {
         movableClock.moveTo(TODAY_2359);
         String id = begin();
-        AgentTurnResponse card = planCard(id, TOMORROW, MORNING);
+        AgentTurnResponse card = planCard(id, FRIDAY, MORNING);
         assertThat(card.stage()).as(card.reply()).isEqualTo("AWAITING_CONFIRMATION");
-        assertThat(card.confirmation().operations().toString()).contains("2026年9月17日", "09:00");
+        assertThat(card.confirmation().operations().toString()).contains("2026年9月18日", "09:00");
 
-        // 过了午夜，业务时区的「今天」已经是 17 号了，卡上的 17 号 09:00 还没到，照约。
+        // 过了午夜，业务时区的「今天」已经是 17 号了，卡上的 18 号 09:00 还没到，照约。
         movableClock.moveTo(TOMORROW_0001);
         AgentTurnResponse done = service.confirm(id, true, card.confirmation().confirmationId());
 
         assertThat(done.stage()).as(done.reply()).isEqualTo("COMPLETED");
         assertThat(jdbc.queryForObject("SELECT slot_id FROM appointments", String.class))
-                .isEqualTo(slotId(TOMORROW, MORNING));
+                .isEqualTo(slotId(FRIDAY, MORNING));
         assertThat(jdbc.queryForObject(
-                "SELECT appointment_date FROM appointment_slots WHERE id=?", String.class, slotId(TOMORROW, MORNING)))
-                .isEqualTo(TOMORROW.toString());
+                "SELECT appointment_date FROM appointment_slots WHERE id=?", String.class, slotId(FRIDAY, MORNING)))
+                .isEqualTo(FRIDAY.toString());
     }
 
     /**
@@ -298,9 +303,16 @@ class BusinessTimeFlowTests {
         return jdbc.queryForObject("SELECT COUNT(*) FROM " + table, Integer.class);
     }
 
-    /** 号源 id 的拼法跟生产者共用同一处，避免用例里再抄一份规则。 */
+    /**
+     * 号源 id 的拼法跟生产者共用同一处，避免用例里再抄一份规则。
+     *
+     * <p>号源按「科室 + 日期 + 时刻」找出当天出诊的医生，再拼 {@code r-<doctorId>-<日期>-<时刻>}。
+     * 这天不出号（如周四的 d001）时 {@code doctorsAt} 返回空列表，用例直接报错，而不是编一条不存在的号。
+     */
     private static String slotId(LocalDate date, LocalTime time) {
-        return RollingAppointmentSlotInitializer.slotId("d001", date, time);
+        int sequence = RollingAppointmentSlotInitializer.doctorsAt("d001", date, time).get(0);
+        return RollingAppointmentSlotInitializer.slotId(
+                RollingAppointmentSlotInitializer.doctorId("d001", sequence), date, time);
     }
 
     /**

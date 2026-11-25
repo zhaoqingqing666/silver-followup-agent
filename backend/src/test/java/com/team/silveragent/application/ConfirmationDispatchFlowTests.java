@@ -50,7 +50,7 @@ class ConfirmationDispatchFlowTests {
                 "care_notifications", "memos")) {
             jdbc.update("DELETE FROM " + table);
         }
-        jdbc.update("UPDATE appointment_slots SET available=TRUE");
+        jdbc.update("UPDATE appointment_slots SET booked=0, available=TRUE");
         // 会话不能跨用例串：内存里那份缓存清掉，让下一轮从库里读。
         sessions().clear();
     }
@@ -122,7 +122,8 @@ class ConfirmationDispatchFlowTests {
         String confirmationId = card.confirmation().confirmationId();
 
         // 别人把号抢走了。卡已经签发，只能在这一刻失败。
-        jdbc.update("UPDATE appointment_slots SET available=FALSE WHERE id=?", SLOT);
+        // 名额口径下「抢走」是占满整班：submit 的原子更新判的是 booked < capacity。
+        jdbc.update("UPDATE appointment_slots SET booked=capacity, available=FALSE WHERE id=?", SLOT);
 
         AgentTurnResponse failed = service.confirm(conversationId, true, confirmationId);
 

@@ -25,7 +25,7 @@ const shorten = (text: string) =>
   text.length > MAX_BLOCK_CHARS ? `${text.slice(0, MAX_BLOCK_CHARS)}…` : text;
 
 /** 三个跳动的点。用 aria-hidden 藏起来，给屏幕阅读器的是旁边那句文字。 */
-function BouncingDots() {
+export function BouncingDots() {
   return <span className="flex items-center gap-1" aria-hidden="true">
     {[0, 1, 2].map(index => (
       <span key={index} className="size-1.5 animate-bounce rounded-full bg-primary"
@@ -38,13 +38,7 @@ function ToolStep({ step, isLast }: { step: Step; isLast: boolean }) {
   const pending = step.executedTool === null;
   // 复用「查看办理过程」的中文口径：执行完就能显示「医院目录 · 查询可办理医院」，
   // 不必为实时视图另写一套翻译。还没执行时只有模型给的意图名，如实显示原名。
-  const probe: ToolTrace = {
-    toolName: step.executedTool ?? step.proposedTool,
-    parameters: step.parameters ?? '{}',
-    result: step.result ?? 'null',
-    success: step.success ?? true,
-  };
-  const { label, note: resultNote } = describeTrace(probe);
+  const { label, note: resultNote } = describeTrace(asTrace(step));
   // 结果还没回来时不能显示这句小结：它是照着「空结果」算出来的，
   // 会说出「共查到 0 个可约时段」这种结果到位前就是假话的话。
   const note = pending ? '' : resultNote;
@@ -87,6 +81,32 @@ function ToolStep({ step, isLast }: { step: Step; isLast: boolean }) {
       <span className="font-sans font-bold">结果 </span>{shorten(response)}
     </p>}
   </li>;
+}
+
+/**
+ * 折叠着的标题栏上那一句话：面板不展开，也要看得出这一步在干什么。
+ *
+ * 与 {@code ToolStep} 同一条规矩——结果没回来就不给结果小结，
+ * 所以这里只取 label（`医院目录 · 查询可办理医院`），不取 note。
+ * 最后一步还在跑时说这一步；跑完了就回到思考类事件的最新一句
+ * （「正在整理回答…」比已经查完的那一步更贴近此刻）。
+ */
+export function currentStepLabel(events: TurnProgressEvent[]): string {
+  const { steps, status } = toSteps(events);
+  const last = steps[steps.length - 1];
+  if (!last) return status;
+  if (last.executedTool === null) return describeTrace(asTrace(last)).label;
+  return status || describeTrace(asTrace(last)).label;
+}
+
+/** 实时折出来的步骤套进「办理过程」的中文口径。两个视图共用一个工具名口径。 */
+function asTrace(step: Step): ToolTrace {
+  return {
+    toolName: step.executedTool ?? step.proposedTool,
+    parameters: step.parameters ?? '{}',
+    result: step.result ?? 'null',
+    success: step.success ?? true,
+  };
 }
 
 /**

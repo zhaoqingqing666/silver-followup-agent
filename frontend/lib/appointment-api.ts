@@ -9,6 +9,26 @@ export async function getAppointments(userId = DEMO_USER_ID): Promise<Appointmen
   return response.json();
 }
 
+/**
+ * 取消一条已预约的记录。
+ *
+ * <p>后端走的是助手那条同款取消链（释放号源、停掉关联提醒、置为 CANCELLED），
+ * 记录本身不删——所以调用方拿到的新列表里不会再有它，但库里的痕迹还在。
+ *
+ * <p>失败时把后端的 { message } 原样抛出来：那句话是给老人看的（「已经不是已预约状态了」
+ * 之类），比前端统一写一句「操作失败」有用得多。
+ */
+export async function cancelAppointment(appointmentId: string, userId = DEMO_USER_ID): Promise<void> {
+  const response = await fetch(
+    `${API_BASE}/api/users/${userId}/appointments/${appointmentId}/cancel`,
+    { method: 'POST' },
+  );
+  if (response.ok) return;
+  const body: unknown = await response.json().catch(() => null);
+  const message = (body as { message?: string } | null)?.message;
+  throw new Error(message || '取消没有成功，请稍后再试。');
+}
+
 export async function getAppointmentTravelGuide(
   appointmentId: string,
   userId = DEMO_USER_ID,

@@ -8,8 +8,17 @@ import java.util.List;
 public final class ToolModels {
     private ToolModels() { }
 
+    /**
+     * 一条可预约号源。
+     *
+     * <p>后五个分量是本次加医生维度时追加的，都允许为空——加医生维度之前生成的号源上
+     * 没有这些值，反序列化旧会话时也会是空。用包装类型（{@code Integer}）而不是 int，
+     * 就是为了让「没有值」和「0 元」能分开。
+     */
     public record Slot(String id, String hospitalId, String hospitalName, String department,
-                       LocalDate date, LocalTime time) { }
+                       LocalDate date, LocalTime time,
+                       String doctorId, String doctorName, String doctorTitle,
+                       String slotType, Integer feeCents) { }
     public record Conflict(String id, String title, LocalDateTime startAt, LocalDateTime endAt) { }
     public record Contact(String id, String name, String relationship, String maskedPhone) { }
     public record TravelPlan(String transport, int durationMinutes, LocalDateTime departureAt,

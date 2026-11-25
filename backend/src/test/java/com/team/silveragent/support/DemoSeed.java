@@ -5,6 +5,7 @@ import com.team.silveragent.infrastructure.persistence.RollingUserScheduleInitia
 
 import java.time.LocalDate;
 import java.time.LocalTime;
+import java.util.List;
 
 /**
  * 演示种子数据的日期全部是滚动的，回归用例一律从这里取，不要再写死某一天。
@@ -32,17 +33,31 @@ public final class DemoSeed {
         return RollingUserScheduleInitializer.dinnerDate();
     }
 
-    /** 体检那天的后一天：改期用例的目标日，和体检日程错开，避免撞上冲突判定。 */
+    /**
+     * 改期用例的目标日：体检日之后，**心内科与内分泌科都放号**的最早一天。
+     *
+     * <p>原来写的是「体检日的后一天」。现在每个科室每周固定只放 3 天号，体检日（周三）的
+     * 后一天（周四）心内科并不放号，所以这里按真实排班反推——仍然是滚动的，不会过期。
+     * 六个科室的放号日都是「五个工作日里挑 3 个」，两个科室必然有共同放号日，循环收得住。
+     */
     public static LocalDate laterDay() {
-        return checkupDay().plusDays(1);
+        LocalDate day = checkupDay().plusDays(1);
+        for (int guard = 0; guard < 14; guard++, day = day.plusDays(1)) {
+            if (RollingAppointmentSlotInitializer.isOpenDay(CARDIOLOGY, day)
+                    && RollingAppointmentSlotInitializer.isOpenDay(ENDOCRINOLOGY, day)) {
+                return day;
+            }
+        }
+        throw new IllegalStateException(
+                "两周里找不到心内科与内分泌科同时放号的日子，排班规则可能被改坏了");
     }
 
-    /** 后一天下午的号源：改期用例用它验证「原预约同一条记录换号源」。 */
+    /** 改期目标日下午的号源：改期用例用它验证「原预约同一条记录换号源」。 */
     public static String laterDaySlot() {
         return slot(CARDIOLOGY, laterDay(), LocalTime.of(14, 0));
     }
 
-    /** 内分泌科在后一天下午的号源：「换了一家医院/科室」的覆盖用例用它，口播记为下午复诊。 */
+    /** 内分泌科在改期目标日下午的号源：「换了一家医院/科室」的覆盖用例用它，口播记为下午复诊。 */
     public static String endocrinologySlot() {
         return slot(ENDOCRINOLOGY, laterDay(), LocalTime.of(14, 0));
     }
@@ -57,7 +72,7 @@ public final class DemoSeed {
         return slot(CARDIOLOGY, checkupDay(), MORNING);
     }
 
-    /** 心内科下周三下午的号源：正常可约，且与体检不重叠——「普通办理」用它。 */
+    /** 心内科下周三下午的号源：正常可约，且与体检不重叠——「普通（非冲突）办理」用它。 */
     public static String plainSlot() {
         return slot(CARDIOLOGY, checkupDay(), LocalTime.of(14, 0));
     }
@@ -72,9 +87,25 @@ public final class DemoSeed {
         return slot(CARDIOLOGY, checkupDay(), AFTERNOON);
     }
 
-    /** 滚动号源的 id 规则由 RollingAppointmentSlotInitializer 提供，避免两处各写一遍。 */
+    /**
+     * 滚动号源的 id 规则由 RollingAppointmentSlotInitializer 提供，避免两处各写一遍。
+     *
+     * <p>号源挂在**医生**身上，所以要先按「科室 + 日期 + 时段」定出那天坐诊的是哪位医生——
+     * 用的是生成器同一份排班规则（纯函数、不查库，用例把号源 id 收在 {@code static final}
+     * 字段里时 Spring 还没起来）。
+     *
+     * <p>**一个时刻恰好一位医生**（一天 4 格、每格 1 人），所以这里取的就是唯一那一位。
+     * 这天不放号时**直接报错**——不返回一条根本不存在的 id，
+     * 否则用例会把它当成「这天本来就没号」，而不是「排班规则对不上了」。
+     */
     public static String slot(String departmentId, LocalDate day, LocalTime time) {
-        return RollingAppointmentSlotInitializer.slotId(departmentId, day, time);
+        List<Integer> sequences = RollingAppointmentSlotInitializer.doctorsAt(departmentId, day, time);
+        if (sequences.isEmpty()) {
+            throw new IllegalStateException("演示号源取不到：" + departmentId + " 在 " + day + " "
+                    + time + " 没有排班，检查 RollingAppointmentSlotInitializer 的排班规则");
+        }
+        return RollingAppointmentSlotInitializer.slotId(
+                RollingAppointmentSlotInitializer.doctorId(departmentId, sequences.get(0)), day, time);
     }
 
     /** 取号源所在的那一天，用于 SET_DATE 这类需要「日期」参数的调用。 */

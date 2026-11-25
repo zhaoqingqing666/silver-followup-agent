@@ -14,7 +14,12 @@
     "NEXT_PUBLIC_API_BASE_URL": "http://localhost:8080",
     // 团队默认使用回退模式；后端 VS Code 任务可用本机 .devcontainer/.env 覆盖
     "AGENT_MODEL_ENABLED": "false",
-    "SPRING_DATASOURCE_URL": "jdbc:h2:file:/workspace/backend/data/silver-agent"
+    "SPRING_DATASOURCE_URL": "jdbc:h2:file:/workspace/backend/data/silver-agent",
+    // 演示按北京时间起算「今天 / 现在」：镜像默认没配时区，容器里 JVM 的默认时区是 GMT
+    // （比北京慢 8 小时），而查号用 H2 的 CURRENT_DATE / CURRENT_TIME 把当天已过的时段滤掉，
+    // 于是「今天上午」会被当成已经过去（08:00 北京时点还会把「今天」算成昨天）。
+    // 备忘与健康周报链路另用 MemoParser.DEMO_ZONE / health-report.weekly.zone 兜底，号源链路没有。
+    "TZ": "Asia/Shanghai"
   },
   "mounts": [
     // H2 数据放具名卷，不写进 bind mount 的仓库目录（避免本地 .gitignore 落空）

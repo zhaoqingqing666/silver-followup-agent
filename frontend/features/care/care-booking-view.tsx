@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { CalendarDays, Check, ChevronLeft, ChevronRight, ClipboardCheck, Clock3, Hospital, LoaderCircle, Pencil, RefreshCw, Route, TriangleAlert, UsersRound } from 'lucide-react';
 import { PageHeader } from '@/components/common/page-header';
 import { getAppointments } from '@/lib/appointment-api';
+import { doctorLine } from '@/lib/appointment-display';
 import { cancelElderBooking, createBooking, getBookingDepartments, getBookingHospitals, getBookingWindows, modifyBooking, prepareBooking, prepareCancelBooking, prepareModifyBooking, setBookingAccompany } from '@/lib/care-api';
 import type {
   AppointmentSummary,
@@ -592,6 +593,8 @@ export function CareBookingView({ caregiverId, elder, onBack, onFinished }: {
               <div className="min-w-0 flex-1">
                 <p className="text-xl font-bold">{formatHM(upcoming.time)} {formatDate(upcoming.date)} {weekdayOf(upcoming.date)} 复诊</p>
                 <p className="mt-1 text-base">{upcoming.hospital} · {upcoming.department}</p>
+                {/* 管理视图上家属要做「修改 / 取消」的决定，光有时间与地点不够——得看得见约的是谁。 */}
+                <p className="mt-1 text-base text-muted-foreground">{doctorLine(upcoming)}</p>
                 {upcoming.arrangedLabel && <p className="mt-1 text-sm text-muted-foreground">由{upcoming.arrangedLabel}约好</p>}
               </div>
             </div>
@@ -828,9 +831,16 @@ export function CareBookingView({ caregiverId, elder, onBack, onFinished }: {
                           key={option.slotId}
                           type="button"
                           onClick={() => { setDate(window.date); setSlot(option); setSubmitError(''); }}
-                          className={`flex min-h-12 items-center gap-1.5 rounded-2xl border px-4 text-base font-bold transition active:scale-95 ${picked ? 'border-primary bg-primary text-white' : 'bg-white text-foreground'}`}
+                          aria-label={`${formatHM(option.time)} ${doctorLine(option)}`}
+                          className={`flex min-h-12 flex-col items-start justify-center gap-0.5 rounded-2xl border px-4 py-2 text-left transition active:scale-95 ${picked ? 'border-primary bg-primary text-white' : 'bg-white text-foreground'}`}
                         >
-                          <Clock3 className="size-4" aria-hidden="true" />{formatHM(option.time)}
+                          <span className="flex items-center gap-1.5 text-base font-bold">
+                            <Clock3 className="size-4" aria-hidden="true" />{formatHM(option.time)}
+                          </span>
+                          {/* 同一时段可能有两位医生出诊，光看时间分不清——必须把「谁 · 什么号」摆在按钮上 */}
+                          <span className={`text-sm font-normal ${picked ? 'text-white/90' : 'text-muted-foreground'}`}>
+                            {doctorLine(option)}
+                          </span>
                         </button>
                       );
                     })}
@@ -854,6 +864,9 @@ export function CareBookingView({ caregiverId, elder, onBack, onFinished }: {
                   <p className="text-xl font-bold">{formatHM(slot.time)} {formatDate(date)} {weekdayOf(date)} 复诊</p>
                   <p className="mt-1 text-base">{hospital.name}</p>
                   <p className="mt-1 text-base text-muted-foreground">{department.name} · 就诊位置：{department.location ?? '以医院指引为准'}</p>
+                  {/* 上一步的号源按钮已经带医生，翻到确认页反而只剩时间地点——点「确认预约」之前
+                      家属得能再看一眼约的是谁、什么号、多少挂号费。 */}
+                  <p className="mt-1 text-base text-muted-foreground">{doctorLine(slot)}</p>
                 </div>
               </div>
             </section>

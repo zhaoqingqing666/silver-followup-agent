@@ -56,7 +56,7 @@ class ConversationRecoveryTests {
         for (String table : List.of("appointments", "reminders", "family_notifications")) {
             jdbc.update("DELETE FROM " + table);
         }
-        jdbc.update("UPDATE appointment_slots SET available=TRUE");
+        jdbc.update("UPDATE appointment_slots SET booked=0, available=TRUE");
         // 会话不能跨用例串：内存里那份缓存清掉，让下一轮从库里读。
         sessions().clear();
     }

@@ -49,6 +49,34 @@ ALTER TABLE departments ADD COLUMN IF NOT EXISTS followup_scope VARCHAR(300);
 ALTER TABLE departments ADD COLUMN IF NOT EXISTS location VARCHAR(100);
 ALTER TABLE departments ADD COLUMN IF NOT EXISTS enabled BOOLEAN DEFAULT TRUE NOT NULL;
 
+-- 出诊医生（移植自 yurouxin 分支）。一个科室多名医生，号源挂在医生身上（见 appointment_slots.doctor_id）。
+-- slot_type 是这位医生出诊时放的号别，**手工指定**，不由职称推导——职称只用于展示。
+-- 之所以把号别也留在医生行上，是因为现阶段没有排班表，种子里「谁放什么号」只能写在医生上；
+-- 号源行自己另存一份 slot_type（生成时拷过去），将来要「同一位医生既出普通号又出专家号」，
+-- 只需加一张排班表覆盖号源那一列，这里的列不用动。
+-- **排班不存在这张表上**：每个科室每周放哪 3 天、一天 4 格各排谁坐诊，全部由
+-- RollingAppointmentSlotInitializer.openWeekdays / expertAt / normalAt 按
+-- 「科室 + 日期」算出来（纯函数、确定性，周末一律不放）。所以这里没有出诊星期列——
+-- 「第几个放号日坐哪一格」本来也不是一个「星期集合」能表达的。
+CREATE TABLE IF NOT EXISTS doctors (
+  id              VARCHAR(40)  PRIMARY KEY,
+  hospital_id     VARCHAR(40)  NOT NULL,
+  department_id   VARCHAR(40)  NOT NULL,
+  name            VARCHAR(40)  NOT NULL,
+  title           VARCHAR(40)  NOT NULL,
+  good_at         VARCHAR(300),
+  introduction    VARCHAR(300),
+  slot_type       VARCHAR(20)  NOT NULL DEFAULT 'NORMAL',
+  enabled         BOOLEAN DEFAULT TRUE NOT NULL
+);
+
+ALTER TABLE doctors ADD COLUMN IF NOT EXISTS slot_type VARCHAR(20) NOT NULL DEFAULT 'NORMAL';
+-- 排班搬进生成器、按「科室 + 日期」算之后，出诊星期这一列不再生效。老库上留着它只会让人
+-- 以为它还在管事，所以直接删掉（schema.sql 每次启动都跑，删不到也不会报错）。
+ALTER TABLE doctors DROP COLUMN IF EXISTS clinic_weekdays;
+
+-- 医院/科室两条外键统一放在文件末尾的外键段里。
+
 -- 表改名：clinic_locations → clinics（2026-09-16）。
 -- 旧库升级靠这一条 DROP 完成：改名后已无任何代码或外键引用 clinic_locations，
 -- 而 6 条诊室数据由 data.sql 的 MERGE 按 id 全量重建，所以直接删旧表，不留两张同义表。
@@ -86,6 +114,18 @@ ALTER TABLE appointments ADD COLUMN IF NOT EXISTS transport VARCHAR(40);
 ALTER TABLE appointments ADD COLUMN IF NOT EXISTS reminder_status VARCHAR(100);
 ALTER TABLE appointments ADD COLUMN IF NOT EXISTS family_status VARCHAR(100);
 ALTER TABLE appointments ADD COLUMN IF NOT EXISTS materials CLOB;
+
+-- 预约上存一份**医生快照**，而不是每次去关联号源查：号源是滚动重建的（周末号源会删、
+-- 过去的日期会过期），预约记录必须自己说得清「当时约的是谁」。
+-- 与 reminder_status / family_status / materials 的做法一致——结果写死在预约行上。
+-- doctor_id 指向医生主数据（定位是哪位医生），姓名/职称/号别/价格是快照
+-- （医生改职称、调价都不影响历史预约）；号别与价格也可以为空（老预约）。
+-- 旧预约没有这几列的值（NULL），前端如实显示「医生信息未记录」，不替它编一位医生。
+ALTER TABLE appointments ADD COLUMN IF NOT EXISTS doctor_id    VARCHAR(40);
+ALTER TABLE appointments ADD COLUMN IF NOT EXISTS doctor_name  VARCHAR(40);
+ALTER TABLE appointments ADD COLUMN IF NOT EXISTS doctor_title VARCHAR(40);
+ALTER TABLE appointments ADD COLUMN IF NOT EXISTS slot_type    VARCHAR(20);
+ALTER TABLE appointments ADD COLUMN IF NOT EXISTS fee_cents    INT;
 
 -- 医院和科室改为外键引用：这张表只留编号，名称不再冗余在这里。
 -- 名称的唯一来源是 hospitals/departments，改一次名不会留下对不上的旧副本；
@@ -141,6 +181,26 @@ ALTER TABLE appointment_slots ADD CONSTRAINT IF NOT EXISTS fk_appointment_slots_
   FOREIGN KEY (hospital) REFERENCES hospitals(id);
 ALTER TABLE appointment_slots ADD CONSTRAINT IF NOT EXISTS fk_appointment_slots_department
   FOREIGN KEY (department) REFERENCES departments(id);
+
+-- 号源现在多一维「医生」（移植自 yurouxin 分支）。同一天同一时段，不同医生各有一条号源
+-- （id 里带医生 id，见 RollingAppointmentSlotInitializer.slotId）。
+-- 这里**不再加 department_id**：上面的 department 列已经存科室编号，再加一列只会重复。
+--   doctor_id  出诊医生（外键在文件末尾补）；旧号源保留但不回填，NULL 表示旧数据
+--   slot_type  NORMAL=普通号 / EXPERT=专家号，由医生行带过来
+--   fee_cents  挂号费，以分为单位（整数存储，避免浮点误差）
+ALTER TABLE appointment_slots ADD COLUMN IF NOT EXISTS doctor_id VARCHAR(40);
+ALTER TABLE appointment_slots ADD COLUMN IF NOT EXISTS slot_type VARCHAR(20);
+ALTER TABLE appointment_slots ADD COLUMN IF NOT EXISTS fee_cents INT;
+
+-- 号源名额：一条号源 = 一位医生在一个时刻里的一班，capacity 是这一班能接几位，booked 是已经占了几位。
+-- 旧模型「一条号源 = 一个号」用 available 布尔表达；现在一条号源可以接多位，于是 available
+-- **降级为派生位**（available = booked < capacity），只保留给现有那 4 处查询继续用。
+-- 默认 1 是刻意的：旧库上的存量行、以及测试里手工 INSERT 的号源，都自动等价于旧模型。
+-- 不变式 0 <= booked <= capacity 由数据库约束兜底：预约时 Java 侧做乐观锁，这里再兜一层。
+ALTER TABLE appointment_slots ADD COLUMN IF NOT EXISTS capacity INT NOT NULL DEFAULT 1;
+ALTER TABLE appointment_slots ADD COLUMN IF NOT EXISTS booked   INT NOT NULL DEFAULT 0;
+ALTER TABLE appointment_slots ADD CONSTRAINT IF NOT EXISTS ck_appointment_slots_booked
+  CHECK (booked >= 0 AND booked <= capacity);
 
 CREATE TABLE IF NOT EXISTS user_schedules (
   id VARCHAR(40) PRIMARY KEY,
@@ -515,3 +575,16 @@ ALTER TABLE health_records ADD CONSTRAINT IF NOT EXISTS fk_health_records_user
 
 ALTER TABLE user_memories ADD CONSTRAINT IF NOT EXISTS fk_user_memories_user
   FOREIGN KEY (user_id) REFERENCES users(id);
+
+-- 医生主线（移植自 yurouxin 分支）：医生挂在医院/科室下，号源与预约都回指医生。
+-- appointments.doctor_id 只用于定位主数据，历史展示仍用行上的快照列。
+ALTER TABLE doctors ADD CONSTRAINT IF NOT EXISTS fk_doctors_hospital
+  FOREIGN KEY (hospital_id) REFERENCES hospitals(id);
+ALTER TABLE doctors ADD CONSTRAINT IF NOT EXISTS fk_doctors_department
+  FOREIGN KEY (department_id) REFERENCES departments(id);
+
+ALTER TABLE appointment_slots ADD CONSTRAINT IF NOT EXISTS fk_appointment_slots_doctor
+  FOREIGN KEY (doctor_id) REFERENCES doctors(id);
+
+ALTER TABLE appointments ADD CONSTRAINT IF NOT EXISTS fk_appointments_doctor
+  FOREIGN KEY (doctor_id) REFERENCES doctors(id);

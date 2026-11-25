@@ -80,7 +80,16 @@ public class CareBookingService {
 
     /** 可约日期 + 该日期下仍可预约的号源（真号源，只给有号的）。 */
     public record DateWindow(String date, List<SlotOption> slots) {
-        public record SlotOption(String slotId, String time) { }
+        /**
+         * 一条可约号源。
+         *
+         * <p>**必须带上医生与号别**：一个上午时段会同时有两位医生出诊（1 专家 + 1 普通），
+         * 只给 {@code time} 的话页面上会并排出现两个一模一样的「09:00」按钮——
+         * 家属分不清点哪个，也就不知道自己约的是谁。号别与挂号费都取自这条号源本身，
+         * 不按医生职称推。
+         */
+        public record SlotOption(String slotId, String time, String doctorName, String doctorTitle,
+                                 String slotType, Integer feeCents) { }
     }
 
     /**
@@ -150,7 +159,8 @@ public class CareBookingService {
         for (LocalDate date : dates) {
             List<Slot> slots = appointmentTool.queryAvailableSlots("", hospitalId, department.name(), date);
             List<DateWindow.SlotOption> options = slots.stream()
-                    .map(slot -> new DateWindow.SlotOption(slot.id(), slot.time().toString()))
+                    .map(slot -> new DateWindow.SlotOption(slot.id(), slot.time().toString(),
+                            slot.doctorName(), slot.doctorTitle(), slot.slotType(), slot.feeCents()))
                     .toList();
             if (!options.isEmpty()) result.add(new DateWindow(date.toString(), options));
         }

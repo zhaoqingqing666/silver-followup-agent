@@ -166,7 +166,7 @@ class RecommendationTests {
         jdbc.update("DELETE FROM appointments");
         jdbc.update("DELETE FROM appointment_slots WHERE id LIKE 'rec-%'");
         // 确认一笔预约会把号源置成 available=FALSE，后面的 useExistingCard() 就再也选不到那一格。
-        jdbc.update("UPDATE appointment_slots SET available=TRUE");
+        jdbc.update("UPDATE appointment_slots SET booked=0, available=TRUE");
         jdbc.update("DELETE FROM reminders");
         jdbc.update("DELETE FROM family_notifications");
         jdbc.update("DELETE FROM user_memories WHERE user_id IN ('user-001','user-002','user-f001')");

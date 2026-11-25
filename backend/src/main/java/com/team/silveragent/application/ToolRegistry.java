@@ -68,7 +68,12 @@ final class ToolRegistry {
                         ToolArgument.text("department", false, "科室名"),
                         ToolArgument.date("date", false, "以哪一天为基准前后找，ISO 日期")),
                 AgentOrchestrator.Route.QUERY_NEARBY_SLOTS);
-        register("appointment.checkDuplicate", "提交前查询同一用户是否已有相同医院、科室、日期和时间的预约；只读",
+        register("doctor.list", "查询科室当天或未来几天的出诊医生、职称、号别与挂号费；只读，不推荐具体医生",
+                List.of(ToolArgument.text("hospital", false, "医院名"),
+                        ToolArgument.text("department", false, "科室名"),
+                        ToolArgument.date("date", false, "以哪一天为基准往后看，ISO 日期")),
+                AgentOrchestrator.Route.QUERY_DOCTORS);
+        register("appointment.checkDuplicate", "提交前查询同一位就诊人同一天同一时刻是否已有预约（不分医院科室）；只读",
                 List.of(ToolArgument.text("hospital", false, "医院名"),
                         ToolArgument.text("department", false, "科室名"),
                         ToolArgument.date("date", false, "ISO 日期"),

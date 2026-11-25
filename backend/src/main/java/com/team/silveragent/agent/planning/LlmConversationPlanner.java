@@ -191,6 +191,7 @@ public class LlmConversationPlanner implements ConversationPlanner {
                 nullableText(node, "timePreference"), nullableBoolean(node, "acceptRecommendedTime"),
                 nullableText(node, "acknowledgement"), nullableText(node, "emotion"),
                 nullableText(node, "concern"), nullableText(node, "familyContact"),
+                first(nullableText(node, "doctor"), arguments.get("doctor")),
                 names(node, "excludedHospitals"));
     }
 

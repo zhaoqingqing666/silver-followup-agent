@@ -47,7 +47,7 @@ class CheckConflictBoundaryTests {
         gateway.planning = "";
         gateway.lastToolPhasePrompt = "";
         jdbc.update("DELETE FROM appointments");
-        jdbc.update("UPDATE appointment_slots SET available=TRUE");
+        jdbc.update("UPDATE appointment_slots SET booked=0, available=TRUE");
         jdbc.update("DELETE FROM tool_call_logs WHERE tool_name='schedule.checkConflict'");
     }
 

@@ -1,6 +1,7 @@
 package com.team.silveragent.agent;
 
 import com.team.silveragent.application.care.CareCatalogRepository;
+import com.team.silveragent.application.memo.MemoParser;
 import org.springframework.stereotype.Component;
 
 import java.time.DateTimeException;
@@ -17,6 +18,8 @@ public class RuleFactExtractor implements FactExtractor {
     private static final Pattern ISO_DATE = Pattern.compile("(20\\d{2})-(\\d{1,2})-(\\d{1,2})");
     private static final Pattern SHORT_DATE = Pattern.compile("(?<!\\d)(\\d{1,2})\\s*[./-]\\s*(\\d{1,2})(?!\\d)");
     private static final Pattern TIME = Pattern.compile("(\\d{1,2})[:：点时](\\d{1,2})?");
+    /** 点名医生的口语句式：动词 + 两三个字的人名 + 医生/大夫。 */
+    private static final Pattern DOCTOR_NAME = Pattern.compile("[找挂约看]\\s*([\\u4e00-\\u9fa5]{2,3})(?:医生|大夫)");
 
     public RuleFactExtractor(CareCatalogRepository catalog) {
         this.catalog = catalog;
@@ -42,12 +45,36 @@ public class RuleFactExtractor implements FactExtractor {
                 "ASK_NOTIFY".equals(context.stage()) ? first(stageAnswer, yesNo(message, "通知", "告诉女儿", "告诉儿子", "告诉家属")) : yesNo(message, "通知", "告诉女儿", "告诉儿子", "告诉家属"),
                 transport(message), parseTime(message), timePreference(message),
                 "CONFIRM_SLOT".equals(context.stage()) ? genericYesNo(message) : null, null,
-                emotion(message), concern(message), familyContact(message));
+                emotion(message), concern(message), familyContact(message), doctor(message));
     }
 
     private String familyContact(String value) {
         for (String name : List.of("小丽", "女儿", "儿子", "老伴", "家属")) {
             if (value.contains(name)) return name;
+        }
+        return null;
+    }
+
+    /**
+     * 规则回退也尽量把「医生」从话里捞出来。
+     *
+     * <p>两种诉求：要专家号（“挂个专家号”“找主任看”→ 记“专家”）与点名医生
+     * （“找张建国”→ 记名字）。规则回退拿不到医生名册，姓氏能不能对上由
+     * Java 在真实号源里判——这里只负责把话里的医生线索原样带出去。
+     */
+    private String doctor(String value) {
+        // 「找/挂/约 + 两三个字 + 医生/大夫」的点名句式。“看内科医生”这类把科室当宾语的
+        // 说法可能误捕一个科室名，但对不上真实医生时走「报出诊名单」的兜底，不会卡流程。
+        Matcher named = DOCTOR_NAME.matcher(value);
+        if (named.find()) return named.group(1);
+        if (containsAny(value, "专家", "主任")) {
+            String stripped = value.replace("主任医师", "").replace("副主任医师", "")
+                    .replace("主治医师", "").replace("主任", "").replace("医生", "")
+                    .replace("找", "").replace("挂", "").replace("看", "").trim();
+            // “张主任”“王主任”这类「姓氏+职称」剥掉职称后剩一个姓，仍然是有效线索；
+            // 剥完什么都没剩（“找专家”“挂个专家号”）就是纯号别诉求。
+            if (!stripped.isEmpty() && !stripped.contains("专家") && stripped.length() <= 3) return stripped;
+            return "专家";
         }
         return null;
     }
@@ -87,6 +114,7 @@ public class RuleFactExtractor implements FactExtractor {
                 "到医院后怎么走", "到医院里面", "医院里面", "进去以后", "进医院以后",
                 "我已经到医院了", "已经到医院", "我到医院了")) return "ASK_LOCATION_GUIDE";
         if (containsAny(value, "有哪些时间", "什么时候有号", "哪天有号", "可预约时间", "可预约日期", "查询号源")) return "QUERY_AVAILABLE_SLOTS";
+        if (containsAny(value, "有哪些医生", "哪些医生出诊", "哪个医生看", "医生出诊", "出诊医生")) return "QUERY_DOCTORS";
         if (containsAny(value, "有哪些科室", "有什么科室", "开设哪些科室", "科室列表")) return "QUERY_DEPARTMENTS";
         if (containsAny(value, "有哪些医院", "有什么医院", "医院列表")) return "QUERY_HOSPITALS";
         if (containsAny(value, "医院怎么样", "医院介绍", "医院资料", "了解医院")) return "QUERY_HOSPITAL_INFO";
@@ -133,14 +161,38 @@ public class RuleFactExtractor implements FactExtractor {
     }
 
     private LocalTime parseTime(String message) {
+        return spokenTime(message);
+    }
+
+    /**
+     * 从一句口语里抽「几点几分」。阿拉伯数字先走原来的正则，失配时交给
+     * {@link MemoParser#clockIn} 兜中文数字（「下午三点半」→ 15:30，与备忘共用一份钟点口径）。
+     *
+     * <p>「下午」按整句判，不只看紧挨着钟点的那几个字：老人说「我要下午的三点半的」，
+     * 「下午」和「三点半」中间隔着一个「的」，只看紧邻时段词会把它算成凌晨 3:30，
+     * 再按最近号源推荐，就会把下午的号推成上午的号。
+     *
+     * <p>模型的兜底也走这里（{@code AgentRuntime} 补 {@code selectedTime}），保持两条链路同一口径。
+     */
+    public LocalTime spokenTime(String message) {
+        if (message == null) return null;
         Matcher matcher = TIME.matcher(message);
-        if (!matcher.find()) return null;
-        try {
-            int hour = Integer.parseInt(matcher.group(1));
-            int minute = matcher.group(2) == null || matcher.group(2).isBlank() ? 0 : Integer.parseInt(matcher.group(2));
-            if (message.contains("下午") && hour < 12) hour += 12;
-            return LocalTime.of(hour, minute);
-        } catch (RuntimeException ignored) { return null; }
+        if (matcher.find()) {
+            try {
+                boolean minuteMissing = matcher.group(2) == null || matcher.group(2).isBlank();
+                int hour = Integer.parseInt(matcher.group(1));
+                // 「点半」与中文数字那边对齐：「3点半」和「三点半」必须是同一个答案。
+                int minute = minuteMissing && message.contains("点半") ? 30
+                        : (minuteMissing ? 0 : Integer.parseInt(matcher.group(2)));
+                if (message.contains("下午") && hour < 12) hour += 12;
+                return LocalTime.of(hour, minute);
+            } catch (RuntimeException ignored) { return null; }
+        }
+        LocalTime chinese = MemoParser.clockIn(message);
+        if (chinese == null) return null;
+        int hour = chinese.getHour();
+        if (message.contains("下午") && hour < 12) hour += 12;
+        return LocalTime.of(hour, chinese.getMinute());
     }
 
     private LocalDate safeDate(int year, int month, int day) {

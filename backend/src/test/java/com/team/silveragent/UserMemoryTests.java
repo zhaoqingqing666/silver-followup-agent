@@ -41,7 +41,7 @@ class UserMemoryTests {
         for (String table : List.of("user_memories", "appointments", "reminders", "family_notifications")) {
             jdbc.update("DELETE FROM " + table);
         }
-        jdbc.update("UPDATE appointment_slots SET available=TRUE");
+        jdbc.update("UPDATE appointment_slots SET booked=0, available=TRUE");
     }
 
     AgentTurnResponse action(String id, String action, String value) {

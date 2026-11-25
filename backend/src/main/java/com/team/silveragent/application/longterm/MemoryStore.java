@@ -6,6 +6,7 @@ import org.springframework.stereotype.Repository;
 import java.sql.Timestamp;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Optional;
 
 /**
  * 长期记忆：跨对话记住的、关于这位老人的事。
@@ -92,6 +93,23 @@ public class MemoryStore {
                     """, userId, key, kind, text, source, conversationId,
                     Timestamp.valueOf(now), Timestamp.valueOf(now));
         }
+    }
+
+    /**
+     * 按 key 取一条仍生效的记忆。
+     *
+     * <p>只给「少问一句」这类线索用（例如「常去的医院」落回目录）；没有这条、或老人已经忘掉时
+     * 返回空，调用方必须当成「不知道」，不能拿旧值顶上。
+     */
+    public Optional<Memory> find(String userId, String key) {
+        if (userId == null || userId.isBlank() || key == null || key.isBlank()) return Optional.empty();
+        return jdbc.query("""
+                SELECT memory_key,kind,content,source,updated_at FROM user_memories
+                WHERE user_id=? AND memory_key=? AND active=TRUE
+                """, (rs, row) -> new Memory(rs.getString(1), rs.getString(2), rs.getString(3),
+                        rs.getString(4),
+                        rs.getTimestamp(5) == null ? null : rs.getTimestamp(5).toLocalDateTime()),
+                userId, key).stream().findFirst();
     }
 
     /** 这位老人身上还生效的记忆，最近确认的在前。 */

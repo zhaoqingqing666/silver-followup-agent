@@ -55,9 +55,16 @@ class DemoScenarioTests {
 
     int count(String table) { return jdbc.queryForObject("SELECT COUNT(*) FROM " + table, Integer.class); }
 
-    private boolean slotAvailable(String slotId) {
-        return Boolean.TRUE.equals(jdbc.queryForObject(
-                "SELECT available FROM appointment_slots WHERE id=?", Boolean.class, slotId));
+    /**
+     * 这一班有没有人约。
+     *
+     * <p>名额口径下不能再看 {@code available}——一班有 3~4 个名额，约掉一个之后
+     * {@code available} 仍是 TRUE（还剩名额）。「被占住」要看 {@code booked > 0}。
+     */
+    private boolean slotTaken(String slotId) {
+        Integer booked = jdbc.queryForObject(
+                "SELECT booked FROM appointment_slots WHERE id=?", Integer.class, slotId);
+        return booked != null && booked > 0;
     }
 
     /** 走一遍真实办理并过确认门禁：这一串是「上一场演示留下的数据」里最完整的一份。 */
@@ -121,11 +128,11 @@ class DemoScenarioTests {
     @Test void resetFreesTheBookedSlotSoTheSameScenarioCanBeReplayed() {
         String slot = DemoSeed.morningSlot();
         bookAnAppointment(slot);
-        assertThat(slotAvailable(slot)).as("约掉之后号源应当被占住").isFalse();
+        assertThat(slotTaken(slot)).as("约掉之后号源应当被占住").isTrue();
 
         scenarios.reset("normal");
 
-        assertThat(slotAvailable(slot)).as("重置后同一个号源要能再约一次").isTrue();
+        assertThat(slotTaken(slot)).as("重置后同一个号源要能再约一次").isFalse();
     }
 
     @Test void theOldConversationStopsWorkingAfterAReset() {
