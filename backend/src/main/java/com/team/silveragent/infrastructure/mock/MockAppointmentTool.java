@@ -1,6 +1,6 @@
 package com.team.silveragent.infrastructure.mock;
 
-import com.team.silveragent.application.BusinessClock;
+import com.team.silveragent.application.time.BusinessClock;
 import com.team.silveragent.domain.model.ToolModels.Slot;
 import com.team.silveragent.domain.tool.AppointmentTool;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -8,6 +8,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.sql.Date;
+import java.sql.Time;
 import java.sql.Timestamp;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -30,10 +31,12 @@ public class MockAppointmentTool implements AppointmentTool {
      * 而 H2 的时钟既跟容器环境走、又不吃 {@code TimeZone.setDefault}（详见 {@link BusinessClock}）。
      */
     private static final String SLOT_SELECT = """
-            SELECT s.id,s.hospital_id,s.hospital_name,s.department,s.appointment_date,s.appointment_time,
-                   s.doctor_id,d.name,d.title,s.slot_type,s.fee_cents
+            SELECT s.id,s.hospital,h.name,dept.name,s.appointment_date,s.appointment_time,
+                   s.doctor_id,doc.name,doc.title,s.slot_type,s.fee_cents
             FROM appointment_slots s
-            LEFT JOIN doctors d ON d.id=s.doctor_id
+            JOIN hospitals h ON h.id=s.hospital
+            JOIN departments dept ON dept.id=s.department
+            LEFT JOIN doctors doc ON doc.id=s.doctor_id
             """;
 
     private final JdbcTemplate jdbc;
@@ -68,7 +71,7 @@ public class MockAppointmentTool implements AppointmentTool {
         Map<String, Object> input = Map.of("hospitalId", hospitalId, "department", department,
                 "from", from, "to", to);
         List<Slot> result = bookable(jdbc.query(SLOT_SELECT + """
-                WHERE s.hospital_id=? AND s.department=?
+                WHERE s.hospital=? AND dept.name=?
                   AND s.appointment_date BETWEEN ? AND ? AND s.available=TRUE
                 ORDER BY s.appointment_date,s.appointment_time,s.doctor_id
                 """, slotMapper(), hospitalId, department, Date.valueOf(from), Date.valueOf(to)));
@@ -83,7 +86,7 @@ public class MockAppointmentTool implements AppointmentTool {
         Map<String, Object> input = Map.of("hospitalId", hospitalId, "department", department,
                 "from", date.plusDays(1), "to", date.plusDays(3));
         List<Slot> result = bookable(jdbc.query(SLOT_SELECT + """
-                WHERE s.hospital_id=? AND s.department=?
+                WHERE s.hospital=? AND dept.name=?
                   AND s.appointment_date BETWEEN ? AND ? AND s.available=TRUE
                 ORDER BY s.appointment_date,s.appointment_time,s.doctor_id
                 """, slotMapper(), hospitalId, department,
@@ -95,7 +98,7 @@ public class MockAppointmentTool implements AppointmentTool {
     /** 这一天仍可预约的号源，**不看时刻**（含当天已经过去的时段）。取数与排序见 {@link #SLOT_SELECT}。 */
     private List<Slot> daySlots(String hospitalId, String department, LocalDate date) {
         return jdbc.query(SLOT_SELECT + """
-                WHERE s.hospital_id=? AND s.department=?
+                WHERE s.hospital=? AND dept.name=?
                   AND s.appointment_date=? AND s.available=TRUE
                 ORDER BY s.appointment_time,s.doctor_id
                 """, slotMapper(), hospitalId, department, Date.valueOf(date));

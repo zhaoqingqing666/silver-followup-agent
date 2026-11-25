@@ -1,5 +1,9 @@
 # 前后端 API 契约
 
+> 2026-09-16 联系人规范化：`family_contacts` 仅保留 `id`、`"USER"`、`contact`，后两列均引用 `users.id`。现有联系人响应仍返回 `id/name/relationship/maskedPhone`：id 为联系人记录编号，姓名和手机号来自 contact 对应的 users，称谓来自 care_relations（未配置则为“家属”）。前端类型和调用方式不变。
+
+> 2026-09-16 数据结构调整：`users` 移除家庭经纬度，移除 `family_member` 及其外键，新增可空的 `phone VARCHAR(32)` 保存手机号码。本次未新增 HTTP 字段；路线响应中的 `origin` 改从路线 `polyline` 首点获取，响应结构及前端类型不变。缺少路线坐标时返回配置错误，不虚构起点。
+
 > 文档版本：v0.2　更新日期：2026年9月12日
 
 服务地址：http://localhost:8080
@@ -29,7 +33,7 @@ POST /api/agent/messages
 POST /api/agent/actions
 请求：{"conversationId":"会话ID","action":"SELECT_SLOT","value":"r-doc-d001-01-20260916-0900","label":"9月16日 09:00"}
 按钮使用此接口，不调用模型理解节点；完成 Java 状态处理或工具执行后，可以调用模型回答节点生成用户可读回复。
-label 是可选的用户可读文字；value 可以继续使用 hospitalId、departmentId 或 slotId。号源 id 由后端按 `r-医生id-日期-时刻` 生成（如 `r-doc-d001-01-20260916-0900`），日期跟着今天滚，前端一律回传后端给的原值。**2026-09-13 起 id 里嵌的是医生 id 而不是科室 id**（医生 id 形如 `doc-d001-01`，本身就带科室），原因见 DEC-021。
+label 是可选的用户可读文字；value 可以继续使用 hospitalId、departmentId 或 slotId。号源 id 由后端按 `r-医生id-日期-时刻` 生成（如 `r-doc-d001-01-20260916-0900`），日期跟着今天滚，前端一律回传后端给的原值。**2026-09-13 起 id 里嵌的是医生 id 而不是科室 id**（医生 id 形如 `doc-d001-01`，本身就带科室），原因见 DEC-033。
 
 ## 确认关键操作
 
@@ -70,6 +74,8 @@ POST /api/agent/confirmations
 ```
 
 `status` 可取 `NONE`、`ACTIVE`、`PAUSED`、`AWAITING_CONFIRMATION`、`COMPLETED`、`CANCELLED`。前端用它展示持续任务卡，不能根据聊天文字猜测任务是否存在。
+
+`summary` 由 Java 按 `医院 · 科室 · 日期` 逐级拼，没凑齐的那段用「尚未选择医院 / 待选择科室 / 待选择日期」如实说；日期一律 `yyyy年M月d日`（`DATE_LABEL`，如 `市第一医院 · 心内科 · 2026年9月15日`），与 `plan.date`、`result.date` 同源同格式，不再用 ISO 写法。老人端助手页把它原样当「当前复诊办理」的摘要显示，所以这句话必须是给人看的。
 
 ## 模型状态
 
@@ -168,7 +174,7 @@ quickReplies：[{"label":"市第一医院","action":"SET_HOSPITAL","value":"h001
 - 复用 `AppointmentTool.cancel` 那条链，**三个动作是一套**：释放号源 → 关联提醒置 `CANCELLED` → 预约置 `CANCELLED`。**不物理删除**，`materials` / `reminders` 仍挂在原 `appointment_id` 上。
 - 归属与状态由工具内那句 `UPDATE ... WHERE id=? AND user_id=? AND status='CONFIRMED'` 一次校验：不是这位老人的预约、或已经不是「已预约」状态，都拿不到行。
 - 失败映射：工具第一句就是带 `id + user_id + status='CONFIRMED'` 的查询，「记录不存在」「不是这位老人的」「已经取消过」三种情况在那里长得一模一样，都抛 `EmptyResultDataAccessException`（`IncorrectResultSizeDataAccessException` 的子类）→ 400 + 「没有找到这条可以取消的预约，请刷新后再看。」。**故意给同一句话、也不回 404**：要分开说就得先暗示这条记录存不存在，那等于给人一个探测别人预约的口子。`IllegalStateException` 那一支是兜底（查到行之后、UPDATE 之前状态被改），平时走不到。**刻意不 catch 宽泛的 `DataAccessException`**：真故障不该被伪装成「没有这条预约」，否则线上排查会被这行代码骗过去。
-- 这个端点与助手的取消走**同一个业务方法**，不存在第二套取消逻辑（理由见 DEC-020）。
+- 这个端点与助手的取消走**同一个业务方法**，不存在第二套取消逻辑（理由见 DEC-032）。
 - `GET /api/users/{userId}/appointments` 口径**没变**：仍按创建时间倒序返回全部记录（含 `CANCELLED`）。事项页与首页是在**读到数据之后**过滤 `CANCELLED` 并按预约时间正序，过滤发生在客户端。
 
 ## 角色、工具白名单与路由（2026-09-11）
@@ -259,9 +265,9 @@ quickReplies：[{"label":"市第一医院","action":"SET_HOSPITAL","value":"h001
 
 - `GET /api/agent/memories?userId=`：返回 `[{key, kind, content, source, updatedAt}]`，最近确认的在前。`userId` 省略时用默认就诊人。
 - `DELETE /api/agent/memories?key=&userId=`：忘掉一条，204，**幂等**（再删一次也是 204）。做成软删除 `active=FALSE` 而不是 `DELETE`——这是老人自己按的按钮，但「他什么时候让我忘掉的」本身也是个事实，硬删就查不到了。
-- **只记「实际办成的事」**：写入口只有一处——确认门禁放行、预约真的落进 `appointments` 之后，记下常去的医院、科室和习惯的时段（key 分别是 `habit.hospital`、`habit.department`、`habit.period`）。草稿阶段一个字都不记：那是想法，不是习惯，记下来下次就会拿着一个过期的偏好去替他做决定。模型和前端都够不着这个写入路径。
+- **只记「实际办成的事」**：写入口只有一处——确认门禁放行、预约真的落进 `appointments` 之后，记下最近一次确认预约的医院、科室和时段（key 分别是 `habit.hospital`、`habit.department`、`habit.period`，重写修复轮后内容为「最近一次确认预约的医院是……」这类**中性历史事实**，`kind` 一律 `HISTORY`）。草稿阶段一个字都不记：那是想法，不是习惯，记下来下次就会拿着一个过期的偏好去替他做决定。模型和前端都够不着这个写入路径。**一次预约不等于习惯**：措辞里不出现「常去」「习惯」，要谈「常去」只能等统计真的数够次数。
 - **同一个 key 只留最新一版**：换了医院就覆盖，不堆历史；两版偏好同时进提示词，模型只会更糊涂。覆盖时保留第一次记住的时间，因为「什么时候开始知道的」和「最近一次确认」是两件事。
-- **怎么用**：读的时候拼成一句话（`MemoryStore.digest`）接在 `knownFacts` 末尾进提示词，措辞是「这位老人以前办过的复诊情况（仅供参考，不要当成这次已经定好的安排，拿它少问一句就好）」。记住不等于可以替他办事，写操作仍然要过确认门禁。
+- **怎么用**：**主模型的默认上下文不再注入这些记忆**。`knownFacts` 里原来挂的 `MemoryStore.digest` 已删掉（它不分来源、不带时间地把全部 `active` 记忆拼进每一轮提示词，等于让一次预约直接变成「您常去这家」）。画像改为一律经只读工具 `profile.memorySummary` **按需查询**，返回时带来源分类与更新时间，供模型区分「老人明确说过的偏好」与「系统归纳的历史事实」。`digest` 保留给「我的」页与既有测试，但**不再是主模型的画像入口**。记住不等于可以替他办事，写操作仍然要过确认门禁。
 - 没有记忆时 `digest` 返回空串，提示词与没有这个功能时**逐字相同**——老会话和既有测试都不会因为多出一个空段而漂移。
 - 前端露出在「我的」页的「助手记住的事」：整段摆出来、逐条可忘（点一下变成「确定忘掉 / 再想想」两问，忘掉不可逆，老人手抖一下不该就没了）。页面底部写明「助手只是拿它们少问您一句。真要办什么，还是您点过『确认』才算数」。
 
@@ -292,17 +298,19 @@ quickReplies：[{"label":"市第一医院","action":"SET_HOSPITAL","value":"h001
 ## 医生、号别与挂号费（2026-09-13）
 
 号源加了「医生」这一维：一个科室多名医生，号别与挂号费挂在号源上。本次只做**阶段 1**（数据模型 + 展示，
-不含选医生的交互），决策理由见 DEC-021。
+不含选医生的交互），决策理由见 DEC-033。
 
 - 新增表 `doctors`：`id`（`doc-<科室id>-<序号>`，如 `doc-d001-01`）、`hospital_id`、`department_id`、`name`、
   `title`、`good_at`、`introduction`、`slot_type`、`enabled`。**没有出诊星期列**——排班由
-  `RollingAppointmentSlotInitializer` 的纯函数算出来（DEC-022），不落在表上；`doctors` 只回答「这人是谁、
+  `RollingAppointmentSlotInitializer` 的纯函数算出来（DEC-034），不落在表上；`doctors` 只回答「这人是谁、
   放什么号别、挂号费多少」。**每科室 4 位医生**（01 / 04 主任医师 `EXPERT`、02 / 03 主治医师 `NORMAL`），
-  12 个启用科室共 **48** 位。这个是 DEC-026 改过的口径：DEC-021 时是「3 位（01 主任 `EXPERT`、
-  02 / 03 主治 `NORMAL`）、全院 18 位」，DEC-026 每个科室补了一位 04 号主任、并把科室从 6 个扩到 12 个。
-- `appointment_slots` 追加四列：`doctor_id`、`slot_type`、`department_id`、`fee_cents`。
-  另有名额两列（DEC-026）：`capacity`（这一班能接几位，主任 3 / 主治 4）与 `booked`（已占几位）。
-  `available` 自 DEC-026 起是**派生位**（`available = booked < capacity`），对客户端语义不变——仍然回答
+  12 个启用科室共 **48** 位。这个是 DEC-038 改过的口径：DEC-033 时是「3 位（01 主任 `EXPERT`、
+  02 / 03 主治 `NORMAL`）、全院 18 位」，DEC-038 每个科室补了一位 04 号主任、并把科室从 6 个扩到 12 个。
+- `appointment_slots` 追加三列：`doctor_id`（外键指向 `doctors`）、`slot_type`、`fee_cents`。
+  医院与科室沿用既有的 `hospital` / `department` 两个编号列（均为外键），**不新增 `department_id`**——
+  `department` 列里存的就是科室编号。
+  另有名额两列（DEC-038）：`capacity`（这一班能接几位，主任 3 / 主治 4）与 `booked`（已占几位）。
+  `available` 自 DEC-038 起是**派生位**（`available = booked < capacity`），对客户端语义不变——仍然回答
   「还能不能约」。所以**这两列不出现在任何接口返回体里**，前端不感知。`capacity` 的 `DEFAULT 1`
   是给手工 `INSERT` 号源的场景兜底的（测试与回滚重放），不要去掉。
 - `appointments` 追加四列，存的是**快照**：`doctor_name`、`doctor_title`、`slot_type`、`fee_cents`。
@@ -313,14 +321,61 @@ quickReplies：[{"label":"市第一医院","action":"SET_HOSPITAL","value":"h001
   不是显示成空白。`feeCents` 是**分**（整数存储，避免浮点误差）：普通号 2500（¥25）、专家号 4000（¥40）。
 - 号源 id 拼法改为 `r-<医生id>-<日期>-<时刻>`（如 `r-doc-d001-01-20260916-0900`）。**这是破坏性变更**：
   所有按老拼法（`r-<科室id>-…`）找号源的地方——回归用例、场景重置、回滚重放——必须一起改。
-- **一个时刻固定一条号源**（DEC-026 起）：一天 4 格（09:00 / 10:30 / 14:00 / 15:30），
-  上午 1 格专家 + 1 格普通、下午同样。DEC-022 到 DEC-025 期间是「上午同一时刻两条」，
+- **一个时刻固定一条号源**（DEC-038 起）：一天 4 格（09:00 / 10:30 / 14:00 / 15:30），
+  上午 1 格专家 + 1 格普通、下午同样。DEC-034 到 DEC-037 期间是「上午同一时刻两条」，
   现在已经不是——**排班形状变了，但「一个时刻可能有多条」的防御不能撤**：客户端仍要按
   `doctorId` / `slotType` 区分，别写死「一个时刻就一条」。
   每科室每周只放 3 个工作日的号，周末不放；放号日是**确定性纯函数**算出来的（同一科室 + 日期，
-  任何一次启动都得到同一份）。「下午没有专家号」这条旧约束已由 DEC-026 废止（14:00 现在就是专家格）。
+  任何一次启动都得到同一份）。「下午没有专家号」这条旧约束已由 DEC-038 废止（14:00 现在就是专家格）。
 - 加医生维度**之前**建的预约与号源：预约行上这四个字段为 `null`，前端如实显示「医生信息未记录」，
   **不替它编一位医生**；没有预约在用的旧号源在启动时被整批重建为带医生的新号源，有预约挂着的那几条保留
   （删了那条预约会变成读不出来的孤儿）。
 - 阶段 2（选医生的两条路径：`QUERY_DOCTORS` 意图、`SET_DOCTOR` 动作、按号别筛选与推荐、家属代约里的医生选择）
   **本次未做**。
+
+## 工具契约与通用澄清（2026-09-13）
+
+**对外 HTTP 契约没有变化**：没有新增 / 删除 / 改名任何端点，`AgentTurnResponse` 的字段一个没动。这一节记的是「模型看到的工具说明」与「`toolTraces` 里会出现的新工具名」，以及澄清轮的用户可见行为。
+
+### 工具参数声明变强类型了
+
+每个工具的参数声明现在是「名字 + 类型 + 是否必填 + 枚举取值 + 一句人话说明」，另有字段组合约束：
+
+```json
+{
+  "name": "interaction.requestConfirmation",
+  "description": "…",
+  "risk": "CONFIRMATION_ONLY",
+  "arguments": [
+    { "name": "scope", "type": "enum", "required": true, "values": ["ALL", "DATE_RANGE", "SINGLE_FILTER", "AMBIGUOUS"] },
+    { "name": "direction", "type": "enum", "required": false, "values": ["BEFORE", "AFTER"] },
+    { "name": "date", "type": "date", "required": false }
+  ],
+  "constraints": [
+    { "kind": "REQUIRES_ALL", "field": "scope", "fieldValues": ["DATE_RANGE"], "fields": ["date", "direction"] }
+  ]
+}
+```
+
+- 判罚**只有一处**（`ToolContract`），五种：`UNKNOWN_TOOL`、`MISSING_ARGUMENT`、`INVALID_FORMAT`、`INVALID_ENUM`、`CONSTRAINT_VIOLATED`。前一种算「失败」，后四种算「缺少信息」——**「没查到」和「你没说清」是两套话术、两套动作**，不再落进同一个 `null`。
+- 通过校验后参数会被规范化：**只保留声明过的字段**（模型多塞的一律丢弃）、**空字符串算「没给」**、枚举统一转大写；日期与时段先按严格 ISO 解析，不成再收 `2026-9-6` / `9:30` 这类宽松写法，收下之后统一成一种。
+- `interaction.requestConfirmation` **刻意不声明 `appointmentId`**：模型看不到、也填不了「取消哪一条」，目标由 Java 按候选匹配决定。
+
+### `interaction.askClarification`：模型提问、候选来自数据库
+
+模型在「范围说不清」时提这个工具，参数是 `question`（可选，模型自己写的自然问句）与 `candidateTool`（必填，枚举，目前只有 `appointment.queryMine`）。返回给老人的是：
+
+```json
+{ "reply": "您想取消的是哪一条复诊预约？\n• 2026年9月10日 09:00 市第一医院（模拟）心内科\n• …",
+  "quickReplies": [ { "label": "取消这条：2026年9月10日 09:00", "action": "SELECT_APPOINTMENT_TO_CANCEL", "value": "clarify-a" }, … ] }
+```
+
+- **候选是数据库里查出来的真行**，最多 4 条，不是模型编的。按钮上的文字与口播的话逐字一致（这一轮的回复不交给润色模型），文字语音点选三条路都能走。
+- **澄清不是确认，不生成执行授权**：这一轮**不发 `confirmationId`、不建卡、不进 `AWAITING_CONFIRMATION`**。澄清完老人直接说「确认」，凭据仍然是空的，那句话只能被判成「确认已失效」——一句澄清问不出一次取消。
+- 模型写的 `question` 要过结构门（≤80 字、不含数字、不含完成态字样、得是个问句），过不了就用 Java 固定的那一句。
+- 库里没有可取消的已确认预约时：回复「我没有查到可以取消的已确认预约，所以没有执行任何取消操作。」，**一个按钮都不摆**。
+- 模型这一轮给了合法工具调用时，Java 不再用原句里的「都取消」这类关键词覆盖它的意图。
+
+### `toolTraces` 里的新工具名
+
+`ToolTrace` 仍然是原来的四个字段，但 `toolName` 会多出一个取值 `interaction.askClarification`。前端 `tool-trace-describe.ts` 已补三条中文说明：`interaction.requestConfirmation`（取消预约 · 生成确认卡，备注按 `scope` 渲染范围）、`interaction.respondConfirmation`（取消预约 · 处理确认卡，`decision=DENY` 时说明「老人选择保留」）、`interaction.askClarification`（按结果区分「没有查到」与「已列出 N 条真实候选」）。未知工具名按未知处理，不白屏。

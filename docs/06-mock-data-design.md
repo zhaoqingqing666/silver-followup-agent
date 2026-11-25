@@ -1,8 +1,12 @@
 # 模拟数据库设计
 
-> 文档版本：v0.2　更新日期：2026年9月11日
+> 文档版本：v0.3　更新日期：2026年9月13日
 
 本文描述比赛演示所用的**模拟数据**：它不连接真实医院、地图或短信平台，所有医院、科室、号源、路线、联系人和照护关系都是造出来的样例数据，仅用于跑通「银龄复诊事项协同助手」的完整流程并支撑录屏验收。数据定义在 `backend/src/main/resources/schema.sql`（建表）与 `backend/src/main/resources/data.sql`（种子数据）。
+
+需要逐表核对字段和开发数据库当前的全部记录时，查看 [H2 数据库全表与数据快照](14-database-table-data.md)；该快照同时包含启动时滚动生成的数据和运行过程中产生的业务数据。
+
+> v0.3 新增第十二节，说明四类骨架工具（预约查询 / 日程管理 / 出行规划 / 家属通知）**具体怎么实现**：数据怎么读、工具怎么被调用、并发与幂等怎么保证。前十一节讲「有哪些数据」，第十二节讲「工具怎么用这些数据」。
 
 ## 一、运行环境
 
@@ -10,7 +14,7 @@ H2 地址：`jdbc:h2:file:./data/silver-agent`；用户名 `sa`；密码留空�
 
 ## 二、表清单（按用途分组）
 
-**基础目录类**：`users`、`user_preferences`、`hospitals`、`departments`、`clinic_locations`、`appointment_slots`、`user_schedules`、`family_contacts`、`material_templates`、`care_guide_articles`、`travel_routes`。
+**基础目录类**：`users`、`user_preferences`、`hospitals`、`departments`、`clinics`、`appointment_slots`、`user_schedules`、`family_contacts`、`material_templates`、`care_guide_articles`、`travel_routes`。
 
 **身份与协同关系类（v0.2 新增）**：`care_relations`。表达「哪位照护者协同哪位就诊人」，一对多；`role` 列为 `FAMILY` 或 `VOLUNTEER`，`relationship` 是称谓（如「女儿」「社区志愿者」）。后端据它判定会话身份（`AgentRole`：ELDER / FAMILY / VOLUNTEER）并校验代他人办理的权限。
 
@@ -44,31 +48,33 @@ H2 地址：`jdbc:h2:file:./data/silver-agent`；用户名 `sa`；密码留空�
 ## 四、医院、科室与诊室位置
 
 - `hospitals`：`h001` 市第一医院（模拟，健康路1号）、`h002` 市人民医院（模拟，人民路88号），均为三级甲等，带头图经纬度和主入口名。
-- `departments`：`d001`~`d012`，**两家医院各 6 个科室、科室名集合完全相同**：心内科 / 神经内科 / 内分泌科 / 骨科 / 呼吸内科 / 消化内科。h001（市第一医院）持 `d001` / `d002` / `d005` / `d007` / `d008` / `d009`，h002（市人民医院）持 `d003` / `d004` / `d006` / `d010` / `d011` / `d012`。2026-09-14（DEC-026）之前只有 6 个科室、且两院科室名互补；`d001`~`d006` 的 id 与语义**一个都没动**，只追加 `d007`~`d012`，所以 `DemoSeed` 的常量与既有回归不受影响——代价是 id 顺序不再连续。
-- `clinic_locations`：`loc-d001`~`loc-d012`，与上面科室一一对应，记录门诊楼、入口、楼层、诊室、报到点、地标和无障碍路线，供「找不到诊室」的指引演示。
+- `departments`：`d001`~`d012`，**两家医院各 6 个科室、科室名集合完全相同**：心内科 / 神经内科 / 内分泌科 / 骨科 / 呼吸内科 / 消化内科。h001（市第一医院）持 `d001` / `d002` / `d005` / `d007` / `d008` / `d009`，h002（市人民医院）持 `d003` / `d004` / `d006` / `d010` / `d011` / `d012`。2026-09-14（DEC-038）之前只有 6 个科室、且两院科室名互补；`d001`~`d006` 的 id 与语义**一个都没动**，只追加 `d007`~`d012`，所以 `DemoSeed` 的常量与既有回归不受影响——代价是 id 顺序不再连续。
+- `clinics`：`loc-d001`~`loc-d012`（原表名 `clinic_locations`，2026-09-16 更名），与上面科室一一对应，记录门诊楼、入口、楼层、诊室、报到点、地标和无障碍路线，供「找不到诊室」的指引演示。
 
 ## 五、号源与既有日程（滚动生成，冲突是设计好的）
 
 号源与日程都**不写死日期**，否则演示期一过，「时间冲突」就再也造不出来。两者都在启动时按当天的日期生成：
 
 - `doctors`：`doc-<科室id>-<序号>`，12 个科室共 **48** 名医生（**每科室 4 人**：01 主任医师 / 02 主治医师 / 03 主治医师 / 04 副主任医师）。`slot_type` **手工指定**号别（主任医师 / 副主任医师 = `EXPERT`，主治医师 = `NORMAL`），职称只用于展示、不参与任何匹配。**出诊日不再落在表上**——排班是生成器的纯函数（见下），这张表只回答「这人是谁、放什么号别、挂号费多少」。每科室 4 位医生正好一人一格坐满：**2 位专家 + 2 位普通**。新增医生的姓氏一律避开同科室已有的姓——`matchDoctorId` 的规则是「全名精确，或姓氏唯一才认」，同科室两个姓会触发反问。`data.sql` 少一位 `RollingAppointmentSlotInitializer.doctorOf()` 直接抛错，不会静默少排一班。
-- `appointment_slots`：由 `RollingAppointmentSlotInitializer` 按「今天起一个月内」生成，id 形如 `r-doc-d001-01-20260916-0900`（`r-医生id-日期-时刻`）。排班口径（DEC-026）：**每个科室每周固定放 3 个工作日的号**（同一家医院内各科室错开、周末一律不放），放号日**一天 4 格、每格 1 位医生**——09:00 / 14:00 是**专家格**，10:30 / 15:30 是**普通格**，于是上午、下午都各有一格专家号和一格普通号。新增两列 `capacity` / `booked`（DEC-026）：一条号源不再是「一个号」，而是「一位医生在一个时刻里的一班」，`capacity` 是这一班放几个名额（**专家号 3 / 普通号 4**），`booked` 是已占几个，`available` **降级为派生位**（`available = booked < capacity`）。初始化是幂等的，重复启动只会补齐缺的格子；末尾还有一次 `reconcileCapacities()` 按实际预约数回填 `booked`、按号别修正 `capacity`、重算 `available`。每周每科室产出 **2 条专家 + 2 条普通**（按**名额**是 6 : 8）；全院一个月 ≈ 624 条号源、≈ 2184 个名额。
+- `appointment_slots`：由 `RollingAppointmentSlotInitializer` 按「今天起一个月内」生成，id 形如 `r-doc-d001-01-20260916-0900`（`r-医生id-日期-时刻`）。排班口径（DEC-038）：**每个科室每周固定放 3 个工作日的号**（同一家医院内各科室错开、周末一律不放），放号日**一天 4 格、每格 1 位医生**——09:00 / 14:00 是**专家格**，10:30 / 15:30 是**普通格**，于是上午、下午都各有一格专家号和一格普通号。新增两列 `capacity` / `booked`（DEC-038）：一条号源不再是「一个号」，而是「一位医生在一个时刻里的一班」，`capacity` 是这一班放几个名额（**专家号 3 / 普通号 4**），`booked` 是已占几个，`available` **降级为派生位**（`available = booked < capacity`）。初始化是幂等的，重复启动只会补齐缺的格子；末尾还有一次 `reconcileCapacities()` 按实际预约数回填 `booked`、按号别修正 `capacity`、重算 `available`。每周每科室产出 **2 条专家 + 2 条普通**（按**名额**是 6 : 8）；全院一个月 ≈ 624 条号源、≈ 2184 个名额。
 - 排班是**算出来的、不是抽出来的**：`openWeekdays` / `expertAt` / `normalAt` / `doctorAt` / `doctorsAt` 都是纯函数，同一个「科室 + 日期」在任何一次启动、任何一台机器上都得到同一份，不用 `Math.random()`。演示要能提前彩排、回归要按号源 id 断言，靠的就是这一点——`DoctorSlotModelTests` 把「重跑一次 `seed()` 号源集合一点不变」钉成了回归。
-- 「同一时刻只有一条号源」这个前提**兜了一圈又回来了**：DEC-022 曾让它失效（上午 09:00 天然两条），DEC-026 改成「每格 1 位医生」之后**重新成立**。但界面上仍然必须带「医生 + 号别」——一天 4 格里坐的是 4 位不同医生，只给一个时刻分不出是谁。助手列号与家属代约都要把医生名字和号别一并带出来。
-- 「**普通号名额总量 &gt; 专家号名额总量**」仍然是供给侧硬约束（演示口径「专家号经常约满、普通号相对好挂」），但**口径与实现都变了**（DEC-026）：比的是**名额**不是条数——按条数是 2 : 2 相等，按名额才是 6 : 8。名额定在 `capacity` 上（专家 3 / 普通 4），所以这条约束**与「下午排不排专家号」已经无关**。由 `DoctorSlotModelTests.everyDepartmentHasMoreNormalCapacityThanExpertCapacity` 钉住。
-- ⚠️ **「下午没有专家号」这个演示场景已经不成立**（DEC-026 废止了 DEC-023 决定二 / DEC-024 决定三）：14:00 现在**就是**专家格。要演 R1 的时段级降级，只能**手工把那一格约满**（`booked=capacity`）——`DoctorIntentTests.soldOutMorningStillOffersTheNearestExpertWithinSevenDays` 走的正是这条路。上一轮新增的 `MockAppointmentTool.requireAfternoonIsNotExpert()` 与整份 `AfternoonExpertGuardTests`（4 例）已一并删除。
-- 放号日有两处是**留给演示场景的**，不能随手改：**d001（市第一医院·心内科）的放号日固定含周三**——冲突演示把「下周三体检 + 当天 10:30 心内科号源」钉在那天；**同时必须含周五**——「下周六无号 → 往后三天的附近日期」这条降级路径才取得到号。两点都写在 `RollingAppointmentSlotInitializer.openWeekdays` 的注释里，并由 `DemoSeedDataTests` 与 `MockAppointmentAlternativesTests` 兜住。另外，「各科室放号日互不相同」的口径是**同一家医院内**（每院 6 科、从 `{周一..周五}` 的 C(5,3)=10 种组合里挑 6 种；跨院允许撞同一天）——全院 12 科装不下「全院两两不同」，那是数学上不可能的（DEC-026）。
-- 排班口径换过**三次**（① 「每位医生错开出诊日」→「每科室每周固定 3 天 + 上午/下午半天制」；② 03 号从「副主任医师 / 专家号」改成「主治医师 / 普通号」、下午从「部分专家」改为「全部普通」；③ DEC-026 改成「一天 4 格、每格 1 位医生、号别按格固定」，并**废止**了 ②里的「下午不排专家号」），所以启动时会把**没有预约在用的 `r-%` 号源整批清掉重建**；**有预约挂着的保留**——删了那条预约的 `slot_id` 就指向不存在的行，而预约列表是 JOIN 号源出来的，页面上会直接看不到它、连取消都取消不了。留下来的那几条没有医生信息，前端如实显示「医生信息未记录」；它们会停在建表默认的 `capacity=1`，由 `reconcileCapacities()` 兜回来。
+- 「同一时刻只有一条号源」这个前提**兜了一圈又回来了**：DEC-034 曾让它失效（上午 09:00 天然两条），DEC-038 改成「每格 1 位医生」之后**重新成立**。但界面上仍然必须带「医生 + 号别」——一天 4 格里坐的是 4 位不同医生，只给一个时刻分不出是谁。助手列号与家属代约都要把医生名字和号别一并带出来。
+- 「**普通号名额总量 &gt; 专家号名额总量**」仍然是供给侧硬约束（演示口径「专家号经常约满、普通号相对好挂」），但**口径与实现都变了**（DEC-038）：比的是**名额**不是条数——按条数是 2 : 2 相等，按名额才是 6 : 8。名额定在 `capacity` 上（专家 3 / 普通 4），所以这条约束**与「下午排不排专家号」已经无关**。由 `DoctorSlotModelTests.everyDepartmentHasMoreNormalCapacityThanExpertCapacity` 钉住。
+- ⚠️ **「下午没有专家号」这个演示场景已经不成立**（DEC-038 废止了 DEC-035 决定二 / DEC-036 决定三）：14:00 现在**就是**专家格。要演 R1 的时段级降级，只能**手工把那一格约满**（`booked=capacity`）——`DoctorIntentTests.soldOutMorningStillOffersTheNearestExpertWithinSevenDays` 走的正是这条路。上一轮新增的 `MockAppointmentTool.requireAfternoonIsNotExpert()` 与整份 `AfternoonExpertGuardTests`（4 例）已一并删除。
+- 放号日有两处是**留给演示场景的**，不能随手改：**d001（市第一医院·心内科）的放号日固定含周三**——冲突演示把「下周三体检 + 当天 10:30 心内科号源」钉在那天；**同时必须含周五**——「下周六无号 → 往后三天的附近日期」这条降级路径才取得到号。两点都写在 `RollingAppointmentSlotInitializer.openWeekdays` 的注释里，并由 `DemoSeedDataTests` 与 `MockAppointmentAlternativesTests` 兜住。另外，「各科室放号日互不相同」的口径是**同一家医院内**（每院 6 科、从 `{周一..周五}` 的 C(5,3)=10 种组合里挑 6 种；跨院允许撞同一天）——全院 12 科装不下「全院两两不同」，那是数学上不可能的（DEC-038）。
+- 排班口径换过**三次**（① 「每位医生错开出诊日」→「每科室每周固定 3 天 + 上午/下午半天制」；② 03 号从「副主任医师 / 专家号」改成「主治医师 / 普通号」、下午从「部分专家」改为「全部普通」；③ DEC-038 改成「一天 4 格、每格 1 位医生、号别按格固定」，并**废止**了 ②里的「下午不排专家号」），所以启动时会把**没有预约在用的 `r-%` 号源整批清掉重建**；**有预约挂着的保留**——删了那条预约的 `slot_id` 就指向不存在的行，而预约列表是 JOIN 号源出来的，页面上会直接看不到它、连取消都取消不了。留下来的那几条没有医生信息，前端如实显示「医生信息未记录」；它们会停在建表默认的 `capacity=1`，由 `reconcileCapacities()` 兜回来。
+
+- 号源只存 `hospital` 和 `department` 两个编号列（分别外键指向 `hospitals` / `departments`），医生另用 `doctor_id` 外键指向 `doctors`；医院名、科室名、医生名都不在这张表里冗余，改一次名不会留下对不上的旧副本，展示用的中文名由查询 JOIN 取回。**不再新增 `department_id`**——`department` 列已经存的是科室编号。
 - `user_schedules`：由 `RollingUserScheduleInitializer` 给 `user-001` 排在**下周三 / 下周六**：`schedule-001` 社区体检（下周三 10:00–11:00）、`schedule-002` 和家人吃饭（下周六 12:00–13:30）。
 
 下周三 10:00 的体检**故意与当天 10:30 的心内科号源重叠**，用于稳定复现「时间冲突」场景；同一天 09:00 / 14:00 / 15:30 的号源不与体检重叠，是「正常办理」的对照组。这里的「下周三」与口语解析同一口径（`RuleFactExtractor` 取「本周一 + 1 周 + 2 天」），所以演示话术「我下周三想去市第一医院心内科复诊」落到的正是体检那天。`backend/src/test/java/com/team/silveragent/DemoSeedDataTests.java` 把这几条前提钉成了回归用例——哪条不再成立，先在那里失败。
 
-`family_contacts` 只造了一条：`family-001` 属于 `user-001`，小丽，女儿，电话按脱敏形式展示（不落明文完整号码）。
+`family_contacts` 只造了一条：`family-001` 的 `"USER"` 为 `user-001`，`contact` 为 `user-f001`，两列均关联 `users.id`。姓名、手机号从联系人用户读取，称谓从 `care_relations` 读取；手机号保存在 `users.phone`，对外仅展示脱敏号码。
 
 ## 六、材料模板与照护指南
 
-- `material_templates`：`m001`~`m008`，含 5 条通用材料（身份证、医保卡、上次病历、既往检查报告、药物清单）和心内科 / 内分泌科各一条专科材料，带必填标记与排序。
-- `care_guide_articles`：4 篇指南，`guide-process` 流程、`guide-arrival` 到院步骤、`guide-help` 求助渠道、`guide-change` 改期取消，用于「怎么办、找谁问」类问答。
+- `material_templates`：5 条通用材料（身份证、医保卡、上次病历、既往检查报告、药物清单，`department_id` 为 `NULL`），加上按科室编号分别种的专科材料（心内科 `d001`/`d006`、内分泌科 `d003`/`d005`），共 11 行。`department_id` 外键指向 `departments.id`，不再按中文科室名匹配。
+- `care_guide_articles`：4 篇指南，`guide-process` 流程、`guide-arrival` 到院步骤、`guide-help` 求助渠道、`guide-change` 改期取消，用于「怎么办、找谁问」类问答；`hospital_id` / `department_id` 为可空外键，`NULL` 表示不限。
 
 ## 七、出行路线
 
@@ -95,7 +101,223 @@ H2 地址：`jdbc:h2:file:./data/silver-agent`；用户名 `sa`；密码留空�
 - 场景一键重置：`POST /api/demo/scenarios/{scenarioId}`（编号 `normal` / `no-slot` / `conflict` / `boundary`）。它清掉上一场演示留下的可变数据（预约、提醒、家属通知、工具记录、会话与附件、识图结论、健康记录、备忘、长期记忆、照护通知），放开被占用的号源，按「今天」重排号源与日程，然后开一段全新的会话，并返回**照着念就能复现的步骤**（步骤里的日期每次现算，不抄一份会过期的文稿）。目录数据（医院、科室、材料模板、出行路线、家属联系人）一条不动。
 - 这是**破坏性**接口，只用于录屏与评审查验：它会删除数据，不该出现在正常业务流程里，演示开场前调一次即可。展开说明见 [05-api-contracts.md](05-api-contracts.md) 的「演示场景重置」一节。
 - 四组场景依赖的种子数据已全部改为滚动生成（见第五节），**任何一天都能复现**，不再依赖「演示那几天」或固定时钟：冲突看的是「下周三」的体检，无号看的是周末的空档。
+- **演示话术避开「步行」**：`travel_routes` 只配了「家属开车 / 打车 / 公交」三种交通方式，而口语解析认得「步行」这个词。说「我走过去」会命中未配置路线而走异常分支（回复仍是可继续的，但演示不连贯）。细节见 12.2 第③小节。
 - 目标数据关联与执行结果设计见 [Design.md](../Design.md)。
 
 > 已实现：上表结构与种子数据、`care_relations` 权限校验、备忘 / 健康记录的读写接口与存储、演示场景一键重置。
 > 后续规划：工具故障注入与固定时钟，用于录屏时复现异常链路。
+
+## 十二、模拟工具的实现方式
+
+前面十一节讲的是**有哪些数据**，本节讲**工具怎么用这些数据**。核心一句话：不是「返回假的硬编码结果」，而是**用真数据库跑真 SQL**——所有工具都是 Spring Bean + `JdbcTemplate`，读写上一节那些 H2 表，参数与结果全部落 `tool_call_logs`。
+
+### 12.1 三类数据的填充方式
+
+数据分三层填充，这个划分决定了「哪些能随便改、哪些一改就坏」：
+
+| 层 | 位置 | 内容 | 特点 |
+| --- | --- | --- | --- |
+| **结构** | `schema.sql` | 全部建表与加列 | `CREATE TABLE IF NOT EXISTS` + `ALTER TABLE ADD COLUMN IF NOT EXISTS`，幂等，便于旧库升级 |
+| **静态目录** | `data.sql` | 医院、科室、诊室位置、路线、材料模板、家属、指南文章 | `MERGE ... KEY(id)` 或 `INSERT ... WHERE NOT EXISTS`，**只补齐不清空** |
+| **滚动数据** | 两个 `ApplicationRunner` | 号源、既有日程 | **不写死在 SQL 里**，启动时按「今天」现场生成（见第五节） |
+
+第三层是这套设计里最要紧的一处：号源与日程如果写死日期，演示期一过，「时间冲突」就再也造不出来——冲突检查只看预约当天，一条落在过去的日程永远不会命中。改由 `RollingAppointmentSlotInitializer` 与 `RollingUserScheduleInitializer` 现算之后，四个场景**任何一天都能复现**。
+
+### 12.2 四类工具的实现
+
+`domain/tool/` 下是接口，`infrastructure/mock/` 下是实现。四类骨架工具的对应关系如下。
+
+#### ① 预约查询 —— `MockAppointmentTool`
+
+```java
+List<Slot> queryAvailableSlots(conversationId, hospitalId, department, LocalDate date)
+```
+
+三个参数正好对应「指定医院、科室和日期」，SQL 落在 `appointment_slots`：
+
+```sql
+WHERE hospital_id=? AND department=? AND appointment_date=? AND available=TRUE
+  AND (appointment_date > CURRENT_DATE
+       OR (appointment_date = CURRENT_DATE AND appointment_time > CURRENT_TIME))
+```
+
+最后那个 `OR` 分支过滤掉**当天的已过时段**——不然上午十点打开助手，还会看到九点的号。
+
+三个查询方法的差别只在日期窗口：
+
+| 方法 | 窗口 | 用途 |
+| --- | --- | --- |
+| `queryAvailableSlots` | 单日 | 选日期后的实时查询 |
+| `queryUpcomingSlots` | 调用方指定区间 | 未来若干天的号源概览 |
+| `queryAlternatives` | `date+1 ~ date+3` | 指定日期无号时的附近候选 |
+
+`queryAlternatives` **只往后看三天**，代码注释写明了原因：往前找会捞出已经过去的时段，把当天其它时段算进「附近日期」还会跟上一句「这一天暂无号源」自相矛盾；当天之内换时段由另一条路（`SELECT_PERIOD`）负责，两条路不重叠。
+
+#### ② 日程管理 —— `MockScheduleTool`
+
+两个方向，命题说的「查询已有日程」与「创建提醒」都在：
+
+```java
+List<Conflict> findConflicts(conversationId, userId, start, end)   // 查已有日程
+String createReminder(conversationId, userId, title, remindAt)     // 创建提醒
+```
+
+冲突检查用**区间相交**判据，不是「同一天就报错」：
+
+```sql
+WHERE user_id=? AND start_at < ? AND end_at > ?
+```
+
+调用方传入的是 `start` 与 `start + 60 分钟`（预约时长）。这条判据解释了场景三那个对照组：09:00 的号到 10:00 结束，正好不碰 10:00 开始的体检；10:30 的号才与体检重叠。
+
+**两类提醒都真的创建**（在 `FollowupAgentService#confirm` 里，即用户点过确认之后）：
+
+| 提醒 | 触发时刻 |
+| --- | --- |
+| 复诊材料准备提醒 | 复诊**前一天** |
+| 复诊出发提醒 | 建议出发时间**前 10 分钟** |
+
+#### ③ 出行规划 —— `MockTravelTool`
+
+```java
+TravelPlan plan(conversationId, userId, hospital, appointmentAt, transport)
+```
+
+按「模拟地址 + 预约时间 + 交通方式 → 建议出发时间」实现：
+
+1. 起点取 `users.home_address`；医院先按清洗后的名称查到 `hospitals.id` 与 `hospitals.address`
+2. 按 `origin + hospital_id + transport` 查 `travel_routes`，得到 `duration_minutes`（终点不再用地址字符串关联）
+3. `departure = appointmentAt.minusMinutes(duration + 20)`
+
+那个 **+20 分钟是刻意预留的取号时间**，返回文案会明说「预计 X 分钟，并预留 20 分钟取号时间」。
+
+> **演示注意（重要）**：`travel_routes` 只配了三种交通方式——家属开车 / 打车 / 公交（见第七节）。而 `RuleFactExtractor.transport()` 的口语识别**认得「步行」这个词**（`List.of("家属开车","打车","公交","步行")`）。老人一说「我走过去」，`MockTravelTool.duration()` 会返回 `null` 并抛 `IllegalStateException("没有配置该交通方式的模拟路线")`——回复仍可继续（走 `toolError` 兜底），但演示不连贯。**演示时请用「家属开车」「打车」「公交」。**
+>
+> 另外起点是精确匹配 `users.home_address`，所以只有 `user-001` / `user-002`（住址均为「幸福小区（模拟）」）能查到路线；`user-f001` / `user-v001` 的住址为 `NULL`，会先抛「没有配置用户出发地址」。
+
+#### ④ 家属通知 —— `MockFamilyNotificationTool`
+
+```java
+Contact findPrimaryContact(conversationId, userId)   // 查主联系人，不产生任何写操作
+String notify(conversationId, contactId, message)    // 发送通知
+```
+
+「发送通知」就是往 `family_notifications` 插一行、`status='SENT'`——**没有任何短信、邮件或即时通信网关**。
+
+通知正文由 `FollowupAgentService#notificationMessage` 确定性拼装，**命题要求的两个信息都在**：
+
+```java
+"复诊安排：" + hospital + " " + department + "，" + date + " " + time
+    + (needCompanion ? "，需要陪同。" : "，不需要陪同。")
+```
+
+两个实现细节：
+
+- **电话在 Java 层脱敏**（`maskPhone`），进 `Contact` 之前就变成 `138****1234`，调用方拿不到明文完整号码。
+- `family_contacts` 只有一条（`family-001` 小丽，属 `user-001`），所以只有 `user-001` 能被通知到家属。
+
+### 12.3 工具怎么被调用：两层守门
+
+工具不是让模型随便调的。链路是「模型提出 → 后端校验 → Java 执行」：
+
+```text
+① 模型输出 PlannerDecision
+   actionType ∈ {ANSWER, ASK_USER, CALL_READ_TOOL, CALL_READ_TOOLS,
+                 CALL_CONFIRMATION_TOOL, PROPOSE_WORKFLOW_ACTION}
+        ↓
+② AgentRuntime#modelProposal 逐个校验
+   ToolRegistry#find(name)  →  ToolPolicy#evaluate(role, tool)
+        ↓
+③ 校验通过才产生 Route，由 FollowupAgentService 真正执行
+```
+
+`ToolPolicy` 的判定有四种结果：`DENY_UNKNOWN_TOOL`（工具不存在）/ `DENY_SIDE_EFFECT`（有副作用）/ `DENY_ROLE`（角色不符）/ `ALLOW`。
+
+**两种 risk 的区别是这套设计的核心**：
+
+| | `READ_ONLY` | `CONFIRMATION_ONLY` |
+| --- | --- | --- |
+| 注册入口 | `ToolRegistry#register` | `ToolRegistry#registerInteraction` |
+| 校验方法 | `ToolPolicy#evaluate` | `ToolPolicy#evaluateConfirmation` |
+| 能做什么 | 校验通过后**可直接自动执行** | **绝不自动执行**，只进入 Java 确认状态机 |
+| 调用动作 | `CALL_READ_TOOL` / `CALL_READ_TOOLS` | `CALL_CONFIRMATION_TOOL` |
+
+`ToolPolicy` 的类注释点破了为什么要设第二道：按角色过滤工具清单**只影响模型「看得见」什么，不构成安全边界**——模型仍可能吐出一个它看不见的工具名。所以执行前要按当前会话的操作者身份再判一次，两道都得有。
+
+`AgentRuntime` 对「模型编了一个执行不了的工具」也做受控处理：绝不执行，也不再静默降成一段没有卡片的回答。intent 能归到既有流程就走那条流程，归不到则由 `Route.REFUSE_UNSUPPORTED_TOOL` 明确回绝（不走 `DIRECT_ANSWER`，那条路会 `pauseActiveTask`，把正在办理的流程停掉）。
+
+#### `callTool`：一层薄壳
+
+所有业务调用点都经过这个方法：
+
+```java
+private <T> T callTool(ConversationState state, String name,
+                       Map<String, ?> parameters, Supplier<T> operation) {
+    try { return operation.get(); }
+    catch (RuntimeException error) {
+        traces.record(state.id, name, parameters,
+                Map.of("error", String.valueOf(error.getMessage())), false);
+        throw error;   // 记完再抛，不吞异常
+    }
+}
+```
+
+它只做一件事：**保证任何工具异常都必有一条失败 trace**。异常转成人话是 `toolError` 的事（把 stage 切到 `TOOL_ERROR` / `PARTIAL` 并给出可继续的回复）。
+
+#### `ToolTraceStore`：全项目唯一的下沉点
+
+```java
+jdbc.update("INSERT INTO tool_call_logs(...)");
+progress.toolResult(conversationId, toolName, requestJson, responseJson, success);
+```
+
+它的注释说明了这个位置的价值：所有工具调用都经过它落 `tool_call_logs`，**所以实时进度也只在这一个地方打点**——不必去三十多个调用点各改一遍，也不会漏。
+
+这是「工具有没有真被调用」最硬的证据链：评委在前端「办理过程」里看到每一步的工具名、参数和结果，来源就是这张表。
+
+### 12.4 数据一致性：并发与幂等
+
+#### 号源占用用条件更新，不是「先查后改」
+
+```java
+int changed = jdbc.update(
+    "UPDATE appointment_slots SET available=FALSE WHERE id=? AND available=TRUE", slotId);
+if (changed != 1) throw new IllegalStateException("该号源刚刚已不可用，请重新选择");
+```
+
+**用更新影响行数判断是否抢到**。两个并发请求抢同一个号源，行锁保证只有一个能把 `TRUE` 改成 `FALSE`，另一个 `changed=0` 得到明确失败。这是标准的 CAS 语义；若写成「先 `SELECT` 看 available，再 `UPDATE`」，就会有 TOCTOU 竞态。
+
+所有写方法都标 `@Transactional`，保证「置号源 + 插预约」原子完成，中途异常整体回滚，号源不会漏放。
+
+#### 幂等：两种范式
+
+**业务键查重**（`MockAppointmentTool#submit`）：
+
+```java
+SELECT id FROM appointments WHERE conversation_id=? AND user_id=? AND status='CONFIRMED';
+if (!existing.isEmpty()) return existing.get(0);   // 已有就返回老 id，不二次占号
+```
+
+同一会话同一用户重复提交 → 不会插入第二行。这与上层提交前的重复检查（`appointment.checkDuplicate`）配合，构成「一个会话一次成功预约」。
+
+**确定性 UUID**（`MockFamilyNotificationTool#notify`、`MockScheduleTool#createReminder`）：
+
+```java
+String id = "NT-" + UUID.nameUUIDFromBytes((conversationId + contactId + message).getBytes(UTF_8));
+if (查得到) return id;   // 同内容重复发送 → 去重
+```
+
+同样的会话 + 同样的联系人 + 同样的文案 → 永远算出同一个 id，先查重再插入。`createReminder` 用同一范式（`"RM-" + conversationId + title + remindAt`）。
+
+`cancel` 与 `cancelAll` 同样用条件更新防重复取消与越权取消；`cancelAll` 先对整批做归属与状态预校验，任一条失效则**整批不动**。`reschedule` 先抢占新号源，失败则抛「新号源不可用，原预约保留」，**失败不影响原预约**。
+
+### 12.5 关于 `Mock*` 与 `H2*` 两种命名
+
+`infrastructure/mock/` 包里两类前缀并存：`MockAppointmentTool`、`MockTravelTool`、`MockFamilyNotificationTool` 等，与 `H2MyAppointmentTool`、`H2CareGuideTool`、`H2RouteGuideTool`、`H2FacilityGuideTool`、`H2MaterialPreparationTool`。
+
+**这是历史遗留命名，没有技术差异。** 两类都是 `@Component` + 构造注入 `JdbcTemplate` + 手写 SQL，实现范式一致，差别只是各自查的表不同——较早写的目录/办理查询类倾向 `H2*`（强调「这是查 H2 库」），较晚写的写操作/工具类倾向 `Mock*`（强调「这是模拟工具」）。**没有任何代码按前缀做条件判断**：`@Component` 不带 value，全项目无 `@Qualifier`，一律按接口类型注入。
+
+理解「模拟实现」的语义边界应当看**包名 `infrastructure/mock/`**，而不是类名前缀。
+
+补充一点：`CareCatalogRepository`（`application/care/`）是医院与科室目录的仓储层，被 `MockHospitalCatalogTool` / `MockDepartmentCatalogTool` 消费，也供 `AgentOrchestrator` 判断句子里是否点名了医院或科室。它对模型不可见，是 mock 包目录类工具背后的「数据访问 + 展示脱敏」层——`familyMembers()` / `maskPhone()` 负责脱敏，`clean()` 负责去掉名称里的「（模拟）」后缀。
+

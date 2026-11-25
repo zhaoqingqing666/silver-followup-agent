@@ -244,7 +244,203 @@
 - 理由三：切包的行为变更风险接近零（只改 `package` 与 `import`，diff 里没有别的行），可以独立验收、独立回滚。切类要动状态流转，风险是另一个量级；而且切类的边界到底怎么划，取决于前端需要什么形状的接口，而前端那波大改还没定。先切包、后切类，等于先用几乎零代价把「找文件」的问题解决掉。
 - 代价：`FollowupAgentService` 仍是 4883 行、占这一层 9408 行的 52%；根包仍然混着编排、门禁、状态、进度四类东西。**分包没有解决这个问题**，只是把周围的邻居归了位——不要把它当成「结构问题已解决」。真要动它，等前端接口定形后按业务切。
 - 代价二：子包之间目前只剩一条真实依赖（`HealthReportService` → `MemoParser` 的演示时区时钟）。那个时钟本来就该独立出来，因为它被塞在 `MemoParser` 里，健康报告才「依赖」备忘。这属于切类范畴，本次不动，只记在这里。
-## DEC-019 「查看办理过程」全程收起，实时状态写进标题
+- 后续（2026-09-13）：这条依赖已由 `DEC-019` 消掉，那个演示时区时钟独立成了 `application/time/BusinessClock`。
+
+## DEC-019 业务钟面与审计钟面分开，历史时间戳不动
+
+- 日期：2026-09-13。
+- 背景：统一业务时间时发现，同一个进程里的「现在」有两套来源：SQL 的 `CURRENT_DATE`（数据库连接的默认时区）与 Java 的 `LocalDate.now()`（进程默认时区）；而库里还有一批按 JVM 默认时区写下的历史时间戳。一刀切成业务时区会把历史数据也改掉。
+- 决定一：**分两个钟面。**业务钟面＝预约日期与时段截止、「今天/明天」、提醒钟面、照护代约、周报的周一八点、号源与日程播种，一律走注入的 `BusinessClock`（时区取 `business.time.zone`，默认 `Asia/Shanghai`）。审计钟面＝各类 `created_at` / `notified_at` 落库，保持 `LocalDateTime.now()`（JVM 默认时区）——**旧行就是按这个口径写的，改了等于把历史数据凭空变老八小时。**两钟面需要比较时经 `BusinessClock.toAuditClock` 换算，目前只有 `HealthReportService.weeklySentThisWeek` 一处。
+- 决定二：**跨到 SQL 的判断不再用 `CURRENT_DATE`/`CURRENT_TIME`**，把业务时钟的今天/现在作为绑定参数传进去（三处号源查询 + `CareCatalogRepository.availableDates`）。同一句 SQL 里的「今天」与 Java 里的「今天」从此只有一个来源。
+- 决定三：**时区从配置来，不在代码里写死**（`business.time.zone`，环境变量 `BUSINESS_TIME_ZONE`）。配了不存在的时区就在启动时失败，而不是回退到默认值——静默回退会让人以为改动生效了。`BusinessClock` 构造器收一个 `Clock`，测试可以钉死时间：这批判断全是相对「现在」的，不用固定时钟就没法稳定回归（上海凌晨那八小时尤其）。
+- 决定四：**不给模型算日期。**提示词每轮给出真实的日期、星期、时刻、时区，相对日期（明天、下周三）由模型自己按照这个基准推算；Java 只做两件事——把日期算实的地方（`RuleFactExtractor`、`askDate` 的候选日期）也用同一个时钟，以及校验合法性。算出来已经过去的日期**不顺延年份**，由 Java 请老人重说（模型侧被要求复述后确认）。替老人把「3月5日」定到明年，就是把一次询问换成一次八个月后的错约。
+- 代价一：`MemoParser` 这个 600 行静态解析器里那种「过去年份顺延」的逻辑这次没动，它是规则链路的既有行为，要单独评估。**取「现在」这一处已改**（评审修复）：解析器新增接收业务时间锚点的重载，`FollowupAgentService` 的 9 处生产调用传 `clock.now()`/`clock.today()`；旧的无参重载保留给单元测试，内部按 `BusinessClock.DEFAULT_ZONE` 兜底。
+- 代价二：`RollingUserScheduleInitializer` 的**无参**静态日期方法（`checkupDate()` 等）固定跟着 `BusinessClock.DEFAULT_ZONE`，不随 `business.time.zone` 覆盖走——静态方法没有注入点。生产调用方 `DemoScenarioService` 已改走注入的 `BusinessClock.today()`（评审修复），这几个无参方法现在只剩不启动 Spring 的单元测试在用。
+- 决定五（评审补充）：**「时段已经过去」的边界与号源查询严格互补**，等于此刻也算过去（`!isAfter(now)` 对 `appointment_time > now`）；且这道门只约束创建/改期，不拦取消——取消针对的是库里已有的预约，草稿里残留的 `selectedSlot` 过期与否与它无关。门禁条件要从「本轮要做什么」（`pendingAction`）推，不能从状态里碰巧还留着的值推。
+- 影响：`FollowupAgentService`、`MockAppointmentTool`、`CareCatalogRepository`、`CareBookingService`、`CareService`、`HealthReportService`、两个播种器、`RuleFactExtractor`、`AgentSystemPrompt` 的构造器各加了一个时钟依赖；`AgentContext` 刻意不加字段（4 参 / 5 参构造原样保留），提示词的时刻与 Java 校验的时刻因此同源。
+
+## DEC-020 工具参数声明成强类型，判罚只在一处，判罚结果说清是哪种情形
+
+- 日期：2026-09-13。
+- 背景：此前工具的「参数合法性」是散的——`ToolRegistry` 只声明参数**名字**，至于哪个必填、取值范围是什么、哪几个参数要一起给，全写在各处 `dispatch` 分支的 if 里。同一个规则写两遍就会漂，漏写一处就是一个能被模型踩出来的洞；而且模型看到的说明里也没有这些信息，它只能猜。
+- 决定一：**参数的「形状」由声明决定，不由解析代码决定。**每个工具的参数声明升级成 `ToolArgument(name, type, required, values, description)`，取值类型有 `string / date / time / enum / boolean` 五种；再加 `ToolConstraint` 描述「哪几个字段要一起给」（`REQUIRES_ALL`）或「这几个里至少给一个」（`AT_LEAST_ONE`）。类型、必填、枚举取值、字段组合，全在 `ToolRegistry` 里一处声明，模型看到的工具说明就是这份声明的直接投影。
+- 决定二：**判罚集中在一处。**新增包级私有的 `ToolContract`，`check(tool, call)` 是所有工具调用的唯一判罚入口，五种判罚各有自己的 `Code`：`UNKNOWN_TOOL`、`MISSING_ARGUMENT`、`INVALID_FORMAT`、`INVALID_ENUM`、`CONSTRAINT_VIOLATED`。判罚通过后由 `normalize(...)` 产出规范化的实参：**只保留声明过的字段**（模型多塞的字段一律丢弃，不进任何下游）、丢掉空串（空字符串算「没给」而不是「给了个空值」）、枚举统一转大写。日期与时段先按严格 ISO 解析，不成再退回 `yyyy-M-d` / `H:mm` 这类宽松写法——老人说得到的写法要收下，收下之后统一成一种。
+- 决定三：**判罚结果要能分开说。**`ToolOutcome.Kind` 定为七种：`SUCCESS`、`NO_RESULT`、`MISSING_INFO`、`NEEDS_CLARIFICATION`、`NEEDS_CONFIRMATION`、`STATE_CHANGED`、`FAILURE`。`ToolOutcome.Step` 把这个 kind 带出执行栈。加这一层不是为了好看：**「没查到」和「你没说清」要给老人两套完全不同的话，还要做两套不同的事**——前者如实说没有、不摆按钮，后者问一句、把真实候选摆出来。以前这两件事都落进同一个 `null` 里，只能靠调用点各自猜。
+- 决定四：**判罚的种类映射到七种情形时要收敛，不能扩散。**`UNKNOWN_TOOL` 归 `FAILURE`（模型说了个不存在的工具，这是错的），其余四种归 `MISSING_INFO`（模型说得不完整或不合法，请它补或请老人补）。这条映射写在 `ToolContract.Rejection.kind()` 里，改一处就全改。
+- 决定五：**不动 `AgentRuntime` 的构造器，也不放宽它的封装。**`ToolContract`（`application` 包）在 `agent.planning` 包的 `PlannerToolCall` 与 `AgentRuntime` 之间，`AgentRuntime` 通过两个包级私有的方法 `rejection(...)` / `acceptedArguments(...)` 转交，那个给测试用的 6 参构造器逐字未动。**新能力不靠加参数、加 public 来接入**。
+- 代价一：`PlannerTool` 的入参从 `List<String>` 变成 `List<ToolArgument>`，于是只能保留一个收 `List<String>` 的 4 参兼容构造器供旧测试使用（泛型擦除下两个 4 参构造器无法共存）。这个兼容构造器是这阶段唯一一处弱校验入口，已在注释里写明只服务旧测试——详见 PITFALLS 同日条目。
+- 代价二：参数一旦声明进 `ToolArgument`，就**进了模型看得到的说明**。`interaction.requestConfirmation` 因此**刻意不声明 `appointmentId`**：它不是模型该填的东西，声明出来等于邀请模型去指定取消哪一条、绕开 Java 的候选匹配。少声明一个字段，就是少一条模型能插手的路。
+- 影响：`ToolRegistry` 的每一个工具都补齐了类型/必填/枚举/组合约束并新增 `interaction.askClarification`；`AgentRuntime` 的只读工具循环与确认工具分支都在执行前过 `ToolContract.check`；`AgentSystemPrompt` 新增「工具参数是怎么声明的」与「工具结果的七种情形」两节，把判据交给模型。新增 `ToolContractTests` 17 项覆盖五种判罚、空串、未声明字段、宽松日期时段写法、以及模型看到的说明里确实带 `"type":"enum"` / `"required":true` / `REQUIRES_ALL` 且**不含 `appointmentId`**。
+
+## DEC-021 澄清是第三条通道，不是确认的另一种写法
+
+- 日期：2026-09-13。
+- 背景：需要一种「这事我判断不了，先问老人一句，并把真实候选摆出来让他点」的能力。最省事的做法是复用确认卡那套（同一张卡、同一个 `confirmationId`、同一个「确认办理」按钮）——模型问个问题，老人点了就等于确认。这个做法必须否掉。
+- 决定一：**风险通道分成三条，各自独立判定。**`ToolPolicy` 现在是 `evaluate`（`READ_ONLY`）、`evaluateConfirmation`（`CONFIRMATION_ONLY`）、`evaluateClarification`（`CLARIFICATION_ONLY`）三个入口；`interaction.askClarification` 的风险等级是 `CLARIFICATION_ONLY`，只有 `evaluateClarification` 认它。**澄清走不到发凭据那条路上**——不是「走了但被拦住」，是压根没有那条分支。
+- 决定二：**澄清轮不发 `confirmationId`、不建卡、不进 `AWAITING_CONFIRMATION`。**`ClarificationInteractionTool` 只做一件事：把**数据库里查出来的真实候选**（不是模型编的、不是提示词里带的）摆成至多 4 条 `SELECT_APPOINTMENT_TO_CANCEL` 快捷按钮，配一句不超过 80 字的自然提问。库里没有可取消的已确认预约时，它给的是 `NO_RESULT`（「我没有查到可以取消的已确认预约」）**并且一个按钮都不摆**——摆一张空问题比不摆更让人慌。
+- 决定三：**模型可以写问题，但写什么要过结构门。**模型给的 `question` 要满足：≤80 字、不含数字（防止它把候选里的日期时间编进话里说错）、不含「已完成 / 已取消」这类完成态字样、且看起来确实是个问句。**过不了就用 Java 固定的那一句**，并如实记下 `questionFromModel=false`。这不是不信任模型，是这层本来就不该有第二个事实来源——候选是 Java 查的，话也就由 Java 兜底；模型留在环里是因为它的措辞更自然，而不是因为它是权威。
+- 决定四：**澄清不能生成执行授权，这一点要在链路上可见。**模型问完一轮之后，老人就算直接说「确认」，凭据也还是空的，那句话只能被判成「确认已失效」。已落一条 `@SpringBootTest`（`aConfirmRightAfterAClarificationCancelsNothing`）钉住这个后果：澄清完再说「确认」，回复含「失效」、`confirmation` 仍为空、库里两条预约一条没动。
+- 决定五：**澄清轮的回复不交给润色模型。**走 `respondWithoutModel(...)`，`speechText == reply`。按钮上的文字和口播的话必须逐字一致——老人听的是「您想取消的是哪一条」，看到的按钮就得是那两条真实预约；让一个模型去改写这段，改出来的日期与按钮上的不一致时，他会以为自己点错了。
+- 决定六：**这次只接预约取消一条链路。**备忘与健康记录这次不动（要求 8），`candidateTool` 的枚举里目前只有 `appointment.queryMine` 一个取值。要接第二条链路，得先在 `ToolRegistry.registerClarification(...)` 里把 `candidateTool` 的枚举扩上，而不是让模型自由填一个只读工具名——枚举是一个允许名单。
+- 代价：前端多一个工具标签（`interaction.askClarification` 与另两条 `interaction.*` 一起在 `tool-trace-describe.ts` 里有中文说明），澄清轮的 `stage` 保持原样（**已知未解决**：这一轮不改 stage，冷会话下可能停在上一件事的 stage 上；前端只在 `turn?.task?.active` 为真时才显示那个阶段标签，目前不影响功能）。
+- 影响：新增 `ClarificationInteractionTool`、`ToolOutcome`、`AgentOrchestrator.Route.ASK_CLARIFICATION`（注释写明「不发凭据、不建卡」）；`FollowupAgentService` 的取消支线重写为 `beginCancellationStep` + `clarifyCancellationTargets`，把「库里没得取消」「范围说不清」「说得清」三种情形分别接出去。新增 `ClarificationFlowTests` 6 项。
+
+## DEC-022 确认凭据只有一个出处，执行器不重做归属校验
+
+- 日期：2026-09-13。
+- 背景：确认凭据（`confirmationId`）是全部写操作的唯一钥匙，但它此前是**散着维护**的——四处签发各写一遍 `state.confirmationId = UUID...`、十一处出口各写一遍 `= null`、确认入口用三个 `equals` 分别判「是不是备忘 / 是不是代约取消 / 是不是取消预约」。散着写不是风格问题，是**「什么时候该作废」会有好几种口径**，而其中最危险的一种是「凭据作废了、那条待确认的登记还在」——下一轮拿到同一个会话的人以为手上还举着一件待办。执行那一段同样散在 `confirm()` 里：把整批交给那条事务、清理 `pendingAppointment*`、收拾会话手里的 `appointmentId`、决定停在「已取消」还是回到被打断的那一步。
+- 决定一：**凭据的签发、校验、消费、废止、出站对账，全部只发生在 `ConfirmationService` 一处。**`confirmationId` 仍然写在 `ConversationState` 上、仍然进快照——不是把它挪到别处，而是**只让一个类碰它**。`issue` 只签发，`retire`（退卡，同时退出等待确认）与 `clear`（只丢凭据、阶段不动）分开：四张卡里有两张会把任务标成等待确认、两张不会，这个差别属于各自的业务语义，留给调用方。
+- 决定二：**一份凭据的"授权范围"由三样东西组成，全部写进 `ConversationState` 并随快照持久化：凭据本身、动作类型、完整的目标集合。**三样同生共死——一起签、一起清。检查方式是"三样能不能一起读出来"，任何一处缺失都当这份凭据不存在。这里刻意**不设内存索引**：一开始的写法是在服务里放一张「会话 → 目标集合」的内存表当缓存，那是第二份真值，而且丢一次就会退化成"按会话状态重新推一遍"——推出来的集合和当初给老人看的那张卡是不是同一批，就成了一个需要证明的问题。目标集合进了快照之后，这份索引没有任何东西可补，于是删掉：**同一件事只有一份数据**。
+- 决定三：**动作类型在签发时由调用方给死，绝不在确认时按 `pendingAction` 现算，认不出来一律 fail closed。**四处签发各自都知道自己在建哪张卡（取消预约 / 开新预约 / 代约取消 / 备忘），就在调用点写死传进去。不这样做会留下一个真实的错配：卡是取消卡，签发之后中间某一步把 `pendingAction` 写成了别的值，确认时再拿这个可变字段重算类型，**同一把钥匙就会去执行另一件事**——老人点头的是取消，执行的是开单。从快照还原时认不出的类型名同样不认（`Kind.stored` 返回 `null`），**绝不退成 `BOOKING`**：`BOOKING` 恰好是全类里唯一会真去开一条新预约的类型，一个写坏或回滚出来的陌生类型名会静默变成一次开单。
+- 决定四：**"重启后批量目标缩成一条"不是可以保留的行为，改成完整恢复；还原不出完整目标集合的旧快照整份作废、请老人重新确认。**（这一条是评审否掉第一版做法之后的结论，见本条目末尾的「评审修订」。）旧快照里只有 `confirmationId`，没有另外两样，还原不出"当初授权了什么"——那就作废它，**绝不按剩下的一部分目标凑合执行**。卡片上写着三条、实际取消一条，比"什么都没发生"严重得多：老人会以为那个号已经退了，而他根本看不出少了哪两条。代价是旧快照里那张卡一律作废（哪怕是开新预约那种本来就没有目标的卡，因为看不出它是"本来没有目标"还是"目标丢了"）——宁可让他再说一遍，也不要按一个我们推出来的范围写库。
+- 决定五：**执行器不重做归属校验，也不自己保证批量原子性。**取消族的那条 SQL 自带 `user_id` 与 `status='CONFIRMED'`，并且先整批查一遍再在**同一个事务**里逐条取消（`MockAppointmentTool.cancelAll`，`@Transactional`）。在 `CancellationExecutor` 里再查一遍只会多出第二套**没有事务**的口径；两套不一致时以哪套为准都说不清，而先查后删之间正好就是别人改状态的那个窗口。所以执行器把目标**原样**交给 `cancelAll`（只去重、不筛选——多一套口径就多一个把卡片上没写的那几条也取消掉的机会），它管的是「**什么时候跑**」，不是「这行是不是他的」。代他人办理的取消（`executeCaregiverBooking`）不走这里。
+- 决定六：**`respondConfirmation` 的参数校验统一到 `ToolContract`，而且查完只回绝、不回退。**三条通道里只有它没有下游可依赖：它直接翻成「确认」或「拒绝」，再往下就是执行。若照抄澄清那条的「校验不过就按 intent 回退」，会踩到一个具体的坑——intent 是 `CONFIRM_ACTION` 时 `modelRoute` 会把它接成 `CONFIRM_PENDING`，等于**一次参数写错的调用换来一次真的执行**。诚实地说：这一条**没有翻转任何用户可见的路由**（旧的手写 `toUpperCase` + 两个 `if` 判断同样会拒掉缺失和非法取值），它买到的是「判罚只有一个出处」「decision 一定是那两个枚举值之一」「去掉一份重复的比较」，以及**把这个坑写进测试**（`aConfirmationResponseWithAnUnknownDecisionIsRefusedInsteadOfExecuting` 断言 `REFUSE_UNSUPPORTED_TOOL` 且 `isNotEqualTo(CONFIRM_PENDING)`）。
+- 决定七：**`AgentRuntime.Outcome.acceptedToolCall()` 改名为 `hasContractCheckedToolCall()`。**理由：它表达的是「这一轮有一个**过了契约校验**的工具调用，可以照它的意思办」，不只是「有东西」。「非空 ⇒ 已校验」是**产品路径**给的性质，不是这个 record 自己保证的——只有 `modelProposal` 会往 `proposedTools` 里放东西，而它放之前必须过 `ToolContract`。名字对不上含义，下一个人就会把它当成一个普通的非空判断用。
+- 决定八：**补发只在整份授权逐项相同时才复用原 `confirmationId`；类型或目标集合任何一处不同，一律换一把新的，旧的连同它的类型与范围一起作废。**（评审第二轮的收尾要求。）原先的判据只是"手上有没有一份能读出来的凭据"，那会漏掉最坏的一种组合：**屏幕上是一张新卡，钥匙却是上一件事的**。老人对着「确认办理」点头，执行出来的是上一轮那件取消——而屏幕上没有任何东西提示他这一点。所以复用的条件是 `kind` 相同 **且** 目标集合逐条相同（都取规范形态后比较，见下）。另外：`issue` 与 `ensureIssued` 的 `kind`、`targetIds` **都不接受 `null`**，空目标必须由调用方显式传 `List.of()`。这条不是洁癖——`null` 在这套字段里的含义已经定死是"旧快照缺字段 / 不可信"（决定四），签发侧再把它悄悄转成空列表，就等于用一个只有这里才会做的转换，盖住调用方少写的那件事；而这两者存进快照之后**读起来一模一样**，重启一回就再也说不清当初是"本来就没有目标"还是"目标丢了"。宁可让调用点在编码时就炸。
+- 目标集合的**规范形态是"去重、保留顺序"**（`[a, a, b]` 与 `[a, b]` 指同一批要取消的预约）。比较与存取都过这一道，是为了让"同一批目标"只有一种写法：写法上的一点差别就换钥匙，只会让老人屏幕上那个按钮平白失效一次。**刻意不排序**——接口上「先取消哪条」是调用方给的信息，不是可以顺手抹掉的东西。
+- 评审修订（2026-09-13）：本条目第一版把「重启之后批量取消卡缩成一条」当成**既有降级**保留下来，还写了一条单测把这个降级钉住。**这个判断是错的，已改。**错在两处：一是"它以前就这样"不等于"它可以留着"——那条降级没有任何产品上的理由，只是目标集合当初没进快照的副作用，把它写成测试等于把副作用升格成规格；二是后果被低估了，卡片上写着两条、实际只取消一条时，老人看到的界面和"取消成功"完全一样，他会以为那个号已经退了。现在：目标集合进快照（决定二）、旧快照还原不出就整份作废（决定四），那条钉降级的单测已删除，换成「完整恢复」与「旧快照安全失效」两条——前者走真实的库（存 `state_json` 再读回来），后者把一张真卡的快照删掉授权范围来构造成旧格式，断言库里两条预约一条都没被取消。
+- 代价一：`FollowupAgentService` 的构造器从 36 参变 38 参。已核实没有任何测试直接 `new FollowupAgentService(...)`，只影响 Spring 注入。
+- 代价二：**行数没降，几乎没降。**抽走的是一件事的判罚与执行，不是分支的编排；换回来的是调用点上更长的说明。这一步整理的是**边界**，不是体积——不要拿它当「`FollowupAgentService` 已经拆完了」。
+- 代价三：**四类待确认动作里只有一类搬了家。**`PendingOperation.Kind` 有 `BOOKING / CANCEL_APPOINTMENTS / CANCEL_MANAGED / MEMO` 四个取值，但只有 `CANCEL_APPOINTMENTS` 真的走 `CancellationExecutor`；`MEMO`、`CANCEL_MANAGED` 和 `BOOKING` 仍在 `confirm()` 里各自回到原来的私有方法（`confirmMemo` / `confirmManagedCancel` / 预约漏斗）。`Kind` 是分派的唯一依据，但**别把这个类读成「它现在管所有写动作」**。按业务逐个抽执行器是后续工作（4B），`15-agent-flexibility-and-elder-ui-plan.md` 第 9 节第 4 项已按此更新。
+  - **后续（2026-09-13，4B 已完成）**：上面这条「只有一类搬了家」是 4A 当时的现状，作为历史背景原样保留；**现状以这一条为准**。`BOOKING`、`MEMO`、`CANCEL_MANAGED`，以及本人的预约取消（`CANCEL_APPOINTMENTS`）与照护端的取消（`CANCEL_APPOINTMENTS_CAREGIVER`），现在**全部**由 `ConfirmationDispatcher` 按**签发时冻结的 `PendingOperation.Kind`** 分派到各自的执行器——`BookingExecutor` / `MemoExecutor` / `ManagedCancelExecutor` / `CancellationExecutor`，代他人办理的开单与取消另走 `CaregiverBookingExecutor`，六个取值各有归口，没有任何一个会落到 `BOOKING` 那条路上。**确认入口不再根据 `pendingAction`、`caregiving()` 或任何可变会话字段重新推断执行路径**：走到哪一家完全由签发那一刻写死的类型决定。那句「别把这个类读成它现在管所有写动作」的警示随之换了对象——现在要防的是**新增动作类型时忘了给它归口**，而不是现状缺失。最终落地决定见 **DEC-023**（执行器迁移与 `ConfirmationSupport` 为何是包级私有抽象类）与 **DEC-024**（`Kind` 由四拆六、目标在签发时冻进凭据、签发与执行两侧成对的条数护栏、备忘草稿随凭据一起进快照）。
+- 代价四：**`ConversationState` 多了两个字段，快照格式变了。**读方向上对旧快照是兼容的（缺字段即 `null`，而 `null` 正是"这份凭据不可信"的标记，不抛异常）；**写方向上不兼容**：新快照里多两个字段，旧版本的服务读到之后不认识——不过我们的读路径是 Jackson 反序列化到 record，未知字段默认忽略，所以回滚一版也不会炸，只会回到旧行为（读不出授权范围 → 凭据作废 → 请老人重新确认）。代价就是回滚一次会作废手上所有待确认的卡。
+- 影响：新增 `application/ConfirmationService`（304 行，含嵌套的 `PendingOperation` / `Decision`）与 `application/CancellationExecutor`（94 行），两者都是包级私有的根包类（`ConversationState` 的字段是包级私有，理由同 DEC-018）。`ConversationState` 新增 `confirmationKind` 与 `confirmationTargetIds`，`ConversationStore.Snapshot` 同步扩两个分量（**只加字段、不加回填**：旧快照读出来就是 `null`）。`FollowupAgentService` 删掉 `pendingCancellationIds`（按状态推取消目标的第二份口径）与 `retireCancellationConfirmationForRevision`（范围修订时作废旧凭据），四处签发与十一处清空改为调 `ConfirmationService`，`finish`/`finishWithoutModel` 两个出口的开头各加一次 `confirmations.reconcile(...)`。对外接口、`AgentTurnResponse` 字段、`confirmationId` 的取值与生命周期一律未变（`docs/05-api-contracts.md` 与 `INTERFACE_CHANGES.md` 无需改动）。新增 `ConfirmationServiceTests` 28 项、`CancellationExecutorTests` 8 项、`ConversationRecoveryTests` 2 项（走真实库的完整恢复与旧快照失效），`CancelScopeTests` 与 `AgentRuntimeRoutingTests` 各补端到端回归；后端全量 438 项，0 失败 0 错误（决定八那一轮按评审要求只重跑确认卡相关的五个类 61 项）。
+- 反向复现（第二轮）：把 `ensureIssued` 退回「只要读得出凭据就复用」，`ConfirmationServiceTests` 立刻红 3 项（不同类型不复用、不同目标集合不复用、只有完全相同才复用）。第一轮那两条复现见 PROGRESS 同日条目。
+
+## DEC-023 确认之后的三类执行各自成家，分派只认签发时的 Kind
+
+- 日期：2026-09-13。
+- 背景：4A 把**凭据**收进了 `ConfirmationService`，但 `confirm()` 里剩下的三类业务执行（BOOKING / MEMO / CANCEL_MANAGED）还是各自散在原地：备忘卡确认调 `confirmMemo`、代约取消卡确认调 `confirmManagedCancel`、预约卡确认走预约漏斗，而且**这三条分支各自都在读可变的会话字段**判断自己该不该跑。凭据已经被冻结了，执行却还在现算，等于把 4A 修好的那件事在出口处又放开一次。
+- 决定一：**`confirm()` 只做统一确认流程，不碰任何业务细节。**它负责：校验当前会话与 `confirmationId`、从 `ConfirmationService` 取出签发时冻结的 `PendingOperation`、处理拒绝、确认时单次消费凭据、按 `PendingOperation.Kind` 分派、汇总执行结果并完成会话出站对账。它**不再根据 `pendingAction`、`appointmentId` 或其他可变会话字段重新推断授权类型和目标范围**；执行依据只能来自签发时持久化的 `PendingOperation`。至此 `pendingAction` 只剩「给界面看」的用途。
+- 决定二：**四个 `Kind` 各有执行器，由 `ConfirmationDispatcher` 统一持有。**`BookingExecutor`（开新预约 + 拒绝）、`MemoExecutor`（备忘的确认/拒绝/直写）、`ManagedCancelExecutor`（代约取消 + 通知安排者）、`CaregiverBookingExecutor`（代他人办理的开单与取消），加上 4A 已有的 `CancellationExecutor`。加一层分派器不是为了好看，是两件具体的事：`FollowupAgentService` 的构造器已经 38 参，每抽一个执行器就再加一个参数，加下去会失控；而分派次序本身是有语义的（备忘与代约取消连「拒绝」一起接管，因为它们被拒时也要收自己的草稿；预约那条的过期时段检查必须排在写库之前），这个次序需要有且只有一个地方写。
+- 决定三：**不建「大而全执行器」，每个执行器只处理一种业务写操作。**四个执行器的行数分别是 129 / 81 / 76 / 115 行，谁都不足以承担「所有写操作的公共部分」。公共的确认协议（凭据的签发/校验/消费/废止/分派）在 `ConfirmationService` 与 `ConfirmationDispatcher`，业务写操作各回各家——把两者合成一个大类，就是把 4A 刚分开的两件事重新粘起来。
+- 决定四：**执行器不复制数据库安全校验。**归属、当前状态、事务原子性继续由现有业务工具负责（`MockAppointmentTool.cancelAll` 是 `@Transactional`，SQL 自带 `user_id` 与 `status='CONFIRMED'`）；执行器组织的是「**什么时候跑**」与会话收尾。这一条是 DEC-022 决定五的直接延伸，此处不再另立第二套查询口径——两套口径不一致时以哪套为准都说不清，而先查后写之间正好就是别人改状态的那个窗口。
+- 决定五：**执行器要用到的那二十几个会话收尾动作，走一个包级私有的抽象类 `ConfirmationSupport`。**
+  - **为什么是抽象类不是接口**：接口的方法隐式 public，而 `FollowupAgentService` 本身是 public——实现一个接口就等于把这些方法**顺便**变成对外 API。DEC-018 的原则是「新能力不靠加参数、加 public 来接入」，为了让拆出去的类能回调进来而放宽封装，是把结构整理的代价转嫁给封装。抽象类的抽象方法可以声明成包级私有，`FollowupAgentService extends` 之后逐个 `@Override` 成同样的可见性，接口一个字都不出现在对外面上。
+  - **为什么按参数传、不在构造器里注入**：如果 `ConfirmationSupport` 是注入进执行器的 bean，依赖链就是 `FollowupAgentService → Dispatcher → Executor → Support`，而 Support 的实现正是 `FollowupAgentService` 自己——Spring 直接报循环依赖。改成 `dispatcher.dispatch(state, operation, approved, this)` 把它当**方法参数**带过去，依赖成了一条直线，「谁在执行这一刻代表会话」也变得显式。
+  - 端口方法名刻意与 `FollowupAgentService` 内部的私有助手名字错开（`draftComplete` ↔ `ready`、`arrangedPlan` ↔ `upcomingArranged`、`resumeInterruptedReplies` ↔ `resumeReplies`）：同名同参会在 `@Override` 处与内部那个方法**解析到自己**，变成无限递归。其中 `resumeInterruptedReplies` 就是为了避开这个才改的名。
+- 决定六：**照护端那一支按 `Kind` 分派，不再按 `pendingAction` 分派。**核实过两者在这一支上等价：`pendingAction = "CANCEL"` 这个值**全代码库从未被赋值**（死条件），而 `"CANCEL_EXISTING"` 只由 `prepareExistingCancellation` 设置、它紧接着就签发 `Kind.CANCEL_APPOINTMENTS`。所以「按 `Kind` 走」是行为保持，不是新规矩。死条件本身**没有顺手删**（那会改变这条链路读起来的样子），只在类的 Javadoc 里写明它为什么可以忽略。
+- 决定七：**分类执行仍然不重做「什么时候该作废凭据」。**凭据在 `ConfirmationService.consume` 里当场作废，走到分派这一步就意味着不会再有第二次；执行到一半失败也是**已经用掉了**——再点一次不能凭空重来一件新事。这条在端到端里钉住（写库失败后凭据失效、库里一条不留）。
+- 代价一：**顺带证实了两条既有缺陷，按 4B 要求 9 只记录不修。**①备忘确认卡活不过会话重启——`ConversationStore.Snapshot` 不带 `pendingMemo*` 那六个字段（`git diff` 确认本轮只往快照加了 4A 的两个字段），所以重启后点备忘卡会得到「这条备忘内容已失效」。这是既有行为，4B 没有改变它；发现它是因为第一版写了一条「重启后仍能落备忘」的测试。②代他人办理的 `Kind.CANCEL_APPOINTMENTS` 不读冻结的目标集合，一律走 `CareBookingService.cancelUpcoming`——不越权（照护服务自己会重查归属与状态），但卡片上写的范围与真正取消的那一份原则上可能不一致。两条都写进了 PROGRESS 的「未解决」。
+- 代价二：**行数只降了一点。**`FollowupAgentService` 5327 → 5173 行；`application/` 从 37 个类 11244 行变成 **43 个类 11720 行**（根包 27 个类 8871 行，`FollowupAgentService` 占比 47% → 44%）。抽走的是三类执行的编排，换回来的是分派层与端口声明。**这一步降的是耦合，不是体积**——与 4A 一样，别拿它当「已经拆完了」。
+- **后续（同日修复轮已改）**：本条决定里的「四个 `Kind`」已按评审拆成**六个**（本人自办与代他人办理各成一类），决定五里的 `arrangedPlan` 端口已删，两条「只记录不修」的缺陷（①备忘卡活不过重启、②照护端取消不读冻结目标）已修。见 **DEC-024**。
+- 影响：新增 `application/ConfirmationSupport`（108 行）、`ConfirmationDispatcher`（121 行）、`BookingExecutor`（129 行）、`MemoExecutor`（81 行）、`ManagedCancelExecutor`（76 行）、`CaregiverBookingExecutor`（115 行），全部包级私有、落在根包（理由同 DEC-018）。`FollowupAgentService` 变成 `extends ConfirmationSupport`，删掉 `executeCaregiverBooking` / `confirmManagedCancel` / `confirmMemo` / `arrangerRescheduleMessage` / 自己的私有 `q`（改用继承来的 `static ConfirmationSupport.q`），15 个私有方法放宽到包级私有并加 `@Override`；构造器把 `CancellationExecutor` 换成 `ConfirmationDispatcher`，**仍是 38 参**。对外接口、`AgentTurnResponse` 字段、`confirmationId` 的取值与生命周期一律未变（`docs/05-api-contracts.md` 与 `INTERFACE_CHANGES.md` 无需改动）。新增 `ConfirmationDispatcherTests` 10 项、`ConfirmationDispatchFlowTests` 6 项、`ManagedCancelExecutorTests` 4 项；后端全量 462 项，0 失败 0 错误（专项先跑 160 项全绿）。
+
+## DEC-024 卡上写哪一条，执行就只能动那一条；授权三样之外还要带上执行时用的草稿
+
+- 日期：2026-09-13。
+- 背景：4B 首轮评审未通过。否掉的是同一类缝的三处写法——**授权（凭据＋类型＋目标集合）已经冻住了，执行时却各自按可变的会话状态或"再查一遍当前对象"重新决定动谁**。按 DEC-023 的说法分派只认 `Kind`，但 `Kind` 只有四个取值，本人自办与代他人办理合在一起，于是分派里仍然要看 `state.caregiving()`；`CANCEL_MANAGED` 签发时传空目标、执行时现找"当前那份代约安排"；照护端取消干脆忽略冻结的目标集合、调 `cancelUpcoming()`；备忘卡的正文与提醒时间不在授权三样里，也从来没进过快照。四件事的共同后果只有一个：**老人对着卡片上写的 A 点了头，执行的是 B**。另外 `confirm()` 没有 catch，备忘写库的异常会一路穿过 Controller 变成 HTTP 500。
+- 决定一：**`Kind` 从四个拆成六个，路由判据里不再出现 `caregiving()`。**`BOOKING` / `BOOKING_CAREGIVER` / `CANCEL_APPOINTMENTS` / `CANCEL_APPOINTMENTS_CAREGIVER` / `CANCEL_MANAGED` / `MEMO`。本人自办与替他人代办是**两类动作**，不是"一类动作加一个执行时再看一眼的开关"——那一眼用的字段（`caregiving()`）恰好是可变的。选拆分而不是"把执行上下文另存一份随凭据持久化"，是因为前者让判据仍然只有一个（看一眼 switch 就能确认没有别的输入），后者要在授权三样之外再维护第四个字段。两条测试把两个方向都钉住：会话说是本人、类型说是代办 → 走代办；会话说是代办、类型说是本人 → 走本人。
+- 决定二：**目标条数在签发与执行两侧成对校验，不许静默取第一条。**签发侧 `ConfirmationService.requireTargetCount`：`CANCEL_MANAGED` 与 `CANCEL_APPOINTMENTS_CAREGIVER` 必须**恰好一条**（这两条业务都只处理单条——`cancelUpcoming` 与"当前那张预约"都是单条语义；照护端要从一键代办升级成批量，改的应是业务而不是这道护栏），`CANCEL_APPOINTMENTS` 至少一条，不针对已有对象的类型必须为空。执行侧 `PendingOperation.singleTarget()` 在不为一条时返回 `null`，执行器立刻收场、一个写操作都不做。**只写一侧，另一侧换个入口就能绕过去**，所以两侧同一条规矩。校验排在"复用已有凭据"之前——不然一份不合法的请求会被手上正好内容相同的旧凭据静默满足。
+- 决定三：**要取消的对象在签发时冻进凭据，执行时不再重找。**`confirmManagedCancelCard` 把查到的 `plan.appointmentId()` 写进 `targetIds`；`ManagedCancelExecutor` 只认 `operation.singleTarget()`。按 id 的查询**只用于取展示与通知字段**（谁安排的、约在哪天），归属、是否还存在、是否还能取消全部由 `appointmentTool.cancel` 那条 SQL（`id + user_id + status='CONFIRMED'`）判——**不另开第二套口径**。原目标失效（已取消、或已不属于这位就诊人）就什么都不取消，返回"原预约保留"，绝不找一条"当前的"顶替。
+- 决定四：**照护端按明确 id 取消，新增事务入口 `CareBookingService.cancelAppointment(caregiverId, elderUserId, appointmentId)`。**它内部照旧校验照护关系（`requireBound`）、预约归属与当前状态，并保留原有的协同通知（含"通知原安排者"）。**`cancelUpcoming` 保留**：`CareBookingController` 那个"取消当前预约"的入口还在用它，那条链路的语义本来就是"取当前那一条"，与确认卡无关。把两者合并会重新制造"卡上写 A、取消 B"。
+- 决定五：**授权三样之外，这一类动作执行时还要用的草稿也随凭据一起存、一起回。**`ConversationStore.Snapshot` 增加 `pendingMemoText / pendingMemoAt / pendingMemoRepeat / pendingMemoDay / memoReturnStage / memoNeedsApproval`，与 `confirmationId / confirmationKind / confirmationTargetIds` 同进同出。`ConfirmationService` 里加 `payloadIntact`：读回一份凭据时，这类动作执行时需要的草稿必须也在，缺了就当凭据不可信——**旧快照正好缺这一段，照着它执行只能拿一个 `null` 正文去写库，或者按会话里别的什么凑一段出来，两条路都是"写进去一条他从来没在卡上看到过的备忘"**。失效时凭据当场作废、请他重说一遍。签发侧同样要求草稿已在（少了就是调用点的编程错误，直接炸）。
+- 决定六：**备忘写库的异常收在执行器里，走统一 `toolError`。**确认那条路的调用点是 `confirm()`，它没有 catch：异常漏出去就是一个 HTTP 500——老人看到白屏或"服务器开小差了"，而这一轮到底办没办成谁也说不清。收口之后失败账是清楚的：凭据在 `consume` 里**已经消费掉**（走到执行就意味着授权用过了，失败不会把它还回来），草稿已被 `leaveConfirmation` 清干净，所以库里不会多出第二条，页面上也不会再留一张实际已经作废的确认卡。
+- 决定七：**修复轮不改用户可见行为。**预约确认仍重新检查号源与时段、提醒/材料/出发建议/家属通知不变、备忘的确认与拒绝不变、本人取消仍是整批原子、`confirmationId` 仍只能消费一次、旧凭据与类型不可信的恢复状态继续 fail closed。改的是"这次动的是谁"的依据来源。
+- 踩坑一条值得单独记：**`requireTargetCount` 第一版把 `CANCEL_MANAGED` 判进了"必须为空"那一支**——因为它用 `!cancelsAppointments()` 兜底，而 `CANCEL_MANAGED` 既不属于 `cancelsAppointments()` 也不是"无目标"。表现是每一张代约取消卡都报 `TOOL_ERROR`。发现它**不是靠单元测试**（那些用例给的目标集合恰好是空的，正好落在旧契约上），而是靠端到端把整条链路走通。所以护栏要按"这一类要不要求目标"穷举三分，不能拿另一个布尔谓词的反面兜底。
+- 影响：`ConfirmationService` 304 → 417 行（六个 `Kind`、`requireTargetCount`、`payloadIntact`），`ManagedCancelExecutor` 重写（76 → 98 行），`CaregiverBookingExecutor` 137 行（取消改走按 id 的入口），`MemoExecutor` 96 行（写异常收口），`ConfirmationDispatcher` 142 行（按六个 `Kind` 分派），`ConfirmationSupport` 105 行（删掉 `arrangedPlan` 端口），`ConversationStore.Snapshot` 加六个字段（**不做回填**：旧快照读出来是 `null`，正是要它被判成不可信），`CareBookingService` 372 行（新增 `cancelAppointment`），`FollowupAgentService` 5185 行（四个签发点）。对外接口、`AgentTurnResponse` 字段、`confirmationId` 的取值与生命周期一律未变（`docs/05-api-contracts.md` 与 `INTERFACE_CHANGES.md` 无需改动）。测试：新增 `MemoConfirmationRecoveryTests` 2 项（走真实库的快照恢复与旧快照失效）、`MemoToolFailureTests` 2 项（走 HTTP 的失败收场），`ConfirmationDispatchFlowTests` 6 → 11 项、`ManagedCancelExecutorTests` 4 → 7 项、`ConfirmationDispatcherTests` 10 → 11 项、`ConfirmationServiceTests` 28 → 30 项；上述八类再加 `CancelScopeTests` 6 项，专项 79 项全绿，后端全量 **477 项，0 失败 0 错误**。
+
+## DEC-025 只读查询的参数是「这次查什么」，不是「老人改了草稿」
+
+- 日期：2026-09-13（5B，2026-09-14 补提示词收口与文档，同日按审查意见把实现简化成一条结构性规则，并修掉「`arguments` 为空时仍掉回旧状态流程」这个残留漏洞）。
+- 背景：老人手头正在办一笔 9月19日的预约，问一句「帮我查一下下周三心内科有没有号」。模型的查询参数是对的，但**待办理的那笔预约的日期被改成了 9月16日**。老人只是问了一句，草稿就动了。根因是一条从 `arguments` 到 `facts` 的兜底路径——`LlmConversationPlanner.facts()` 在模型把参数写在 `arguments` 而非 `facts` 节点时把参数当事实抽出来。这层兼容是为办理/确认类动作写的（那类动作的参数确实就是老人刚说的条件），对只读查询完全相反。
+- 决定一：**显式参数决定本次查询条件，参数省略时才沿用会话里已有且明确的条件。**不采用「草稿非空就忽略工具参数」的兜底。显式参数非法、医院/科室不唯一或条件不足时，停下澄清或说明，**不得退回旧条件查询后装作回答了本次问题**。单工具与多工具路径共用同一套参数解析（`resolveSlotQuery` / `querySlotsFor` / `nearbySlotsFor`，按工具名取 `arguments`），不各写一份。
+- 决定二：**查询条件与办理草稿分开。**查另一日期或另一家医院不得自动修改待办理预约或仍有效的确认卡。条件与草稿冲突时走「只读回答」（`answerReadOnly`）：不推进阶段、不写候选、不碰确认卡、不写库。
+- 决定三：**模型发起的号源查询（`appointment.querySlots` / `appointment.queryNearbySlots`），这一轮永远不写草稿，且与它给没给参数无关。**分界只看 `outcome.modelDriven()`：模型发起的调用一律走 `resolveSlotQuery` —— 缺的项本来就从草稿里取，够用就 `answerSlotQueryReadOnly`，不够就追问；`arguments` 为空时**也走这条路**，不再掉回 `showAvailableSlots` / `queryNearbySlots` 那条会改状态的旧路。只有 `modelDriven()==false` 的按钮/规则流程才继续走原流程。这条是结构性的，不再问「查询条件与草稿冲不冲突」：`LlmConversationPlanner` 对 `CALL_READ_TOOL` / `CALL_READ_TOOLS` 不拿 `arguments` 补 facts；工具循环每轮进业务流程前统一过一遍 `withoutDraftWrites(...)`（医院/科室/日期/时间/陪同/通知清空，致谢与情绪照旧），第 0 轮的 facts 也照此处理。因此草稿只由两处改动——模型明确提出业务动作（`PROPOSE_WORKFLOW_ACTION`）的那一轮，以及完全不经过模型的既有按钮/规则流程。
+- 决定四：**续跑轮不是「老人又说了什么」，是「模型看着真实工具结果作答」。**收口统一走 `finishToolLoopDecision`：只交付上一轮那份真实查询结果、模型这句回答、或一句兜底说明，**不写草稿、不重新进业务流**，**不看 intent / route 标签**——实测同一句复述的标签在 `QUERY_AVAILABLE_SLOTS` / `CREATE_FOLLOWUP` / `CURRENT_FLOW` / `CHANGE_DATE` 之间摇摆，按标签判的写法在真模型下不成立。不做「本轮是否交付过只读结果」的跨轮记录，没有 ThreadLocal 也就没有跨轮状态。用户明确要求改期（下一轮 `CHANGE_DATE` + facts 里带新日期）走的仍是正常业务流程，旧确认卡照原规则作废。
+- 决定五：**一次查询不能替老人表态。**`appointment.queryNearbySlots` 不再自动置 `state.acceptAlternative = true`；「可以换附近日期」这条意愿只能由老人的话或按钮表达。
+- 决定六：**提示词侧同时收口（2026-09-14）。**`AgentSystemPrompt` 明确：只读查询条件写对应工具的 `arguments`；`facts` 只表示用户明确要求写入或修改办理草稿的业务事实；用户只是询问别处医院/科室/日期/号源时不要同时写进 `facts`；查询结果不得被描述成已经预约、已经改期或已经取消。**JSON 规划格式、字段与工具清单一律不变，不新增工具。**
+- 范围边界：**本轮完成 `appointment.querySlots` 与 `appointment.queryNearbySlots` 的模型调用只查不改，不代表所有 READ_ONLY 工具都已收口。**其余工具的「查询条件 vs 会话状态」尚未按同一口径逐个核对——`hospital.search` 仍可能更新会话里的解析状态（`withoutDraftWrites` 只挡住「这一轮的 facts 落到草稿上」，不等于该工具本身不碰状态）。本轮不动健康记录、家属报告、通用澄清、预约历史排序、循环轮数与确认执行架构，不合并工具。
+- 影响：`LlmConversationPlanner` 新增 `readTool(actionType)` 并把它接进 `facts(...)` 的调用；`FollowupAgentService`（保留号源查询条件解析 `resolveSlotQuery` / `answerSlotQueryReadOnly`，入口分界收成 `outcome.modelDriven()` 一处，循环里一个 `withoutDraftWrites`，收口一个 `finishToolLoopDecision`；删掉了 5B 初版的 `SlotQuery.conflictsWith`、`applyExplicitQueryConditions`、`queriedConditions` + `draftFacts`、`restatesTheQueryJustDelivered` 与 `readOnlyAnswerDelivered` ThreadLocal）；`AgentSystemPrompt` 增加一节约束。测试：`SlotQueryArgumentTests` 17 项、`AgentSystemPromptQueryFactsTests` 4 项；本轮专项 `SlotQueryArgumentTests` + `VoiceFirstP1Tests` + `AgentRuntimeRoutingTests` 共 41 项全绿，邻近的 `LlmConversationPlannerTests` / `VoiceFirstP0Tests` / `DemoScenarioTests` / `ClarificationFlowTests` / `MultimodalImageTurnTests` 共 51 项亦全绿；后端全量在本轮改动前为 497 项全绿，**本轮未重跑全量**（按要求只跑专项）。对外接口与 `AgentTurnResponse` 字段零改动。踩坑见 `records/PITFALLS.md` 同日三条。
+
+## DEC-026 画像与预约历史的读取：身份由 Java 注入，四类信息分开，读取一律只读
+
+- 日期：2026-09-14（第八阶段 8A）。
+- 背景：模型要能在「您上次预约的是市第一医院心内科，这次还考虑这家医院吗？」这句话之前**真的查过库**，而不是凭上下文猜。已有的 `appointment.queryMine` 只看 `status='CONFIRMED'`，服务于「要取消哪一条、去哪一家、怎么走」的对象选取，而且模型调用它会走既有业务流程（读 facts、可能记住被打断的任务）。**把「历史事实」硬塞进 queryMine 会改到取消与澄清链路的模型行为上**，所以另开两条。
+- 决定一：**新增 `appointment.history` 与 `profile.memorySummary` 两条只读工具，不加 intent 映射。**`appointment.history` 可按 `hospital` / `department` / `status` / `from` / `to` 过滤，`status` 只认 `CONFIRMED` / `CANCELLED`；`profile.memorySummary` 无参数，返回明确偏好与预约沉淀两摞。不加 intent 是**故意的**：参数写坏的调用在按 intent 回退时不会落到它们上（`rejectedByIntent` → `REFUSE_UNSUPPORTED_TOOL`），宁可回绝，也不装作答了。
+- 决定二：**`limit` 不做成工具参数。**一次摆几条由 Java 定（`ProfileQueryService.HISTORY_LIMIT = 5`，统计倾向另设 `TENDENCY_SCAN_LIMIT = 200`、`TENDENCY_MIN_COUNT = 2`）。返回条数上限交给模型，等于把「会不会把上下文灌爆」交给模型判断；字段白名单同理——模型能决定的只是**筛选条件**。
+- 决定三：**身份和被服务用户由 Java 从当前会话注入，模型不得提供或更换 `userId`。**`requireReadable(actorUserId, actorRole, subjectUserId)`：代办（`actorRole.isCaregiver() && subject != actor`）必须 `CareService.bound(actor, subject)` 为真；本人只能读本人。**越权与「这个人不存在」返回逐字相同的 `REFUSED`**——两句不一样，拒绝语本身就成了「库里有没有他」的探针。拒绝时一条 SQL 都不执行、一条留痕都不落。模型不连数据库、不执行 SQL、不遍历表。
+- 决定四：**四类信息分开返回，不混成一个「用户偏好」。**（1）当轮要求 = 草稿里已有的条件，Java 单独一段并标明「优先级最高」；（2）明确偏好 = `MemoryStore` 中 `SOURCE_USER_STATED`；（3）最近预约事实 = 带 `FactStatus` 四值（`CONFIRMED_UPCOMING` / `CONFIRMED_PAST` / `CANCELLED` / `UNKNOWN`）；（4）统计倾向 = 扫已确认预约聚合出的医院/科室/时段，`confirmedTotal >= 2` 才出，且每条都明说是「历史统计，不是老人明确说过的偏好」。优先级：当轮要求 > 明确偏好 > 统计倾向。
+- 决定五：**只能说「预约过」。**Java 侧只产出纯事实标签（`已预约，还没到日子` / `已预约，日子已经过了` / `已取消` / `状态未知`），**刻意不产出「去过 / 看过 / 就诊过 / 到院」**，措辞红线写在 `AgentSystemPrompt`。一条记录不能说「您经常去这家医院」；预约成功不等于已经到院。项目目前没有可靠的实际到院事实来源，`CONFIRMED` 只证明预约成立。
+- 决定六：**读取是结构性的只读。**两条都走 `answerReadOnly`：不推进阶段、不动 `alternatives` / `selectedSlot`、不改草稿、确认卡原样带回。查询结果不回写草稿；用户下一轮明确说「这次还选它」时，才走正常业务动作（`PROPOSE_WORKFLOW_ACTION`）改草稿。沿用 5B 建立的结构性规则，不新增按「查询条件与草稿冲不冲突」判断的分支。
+- 决定七：**不在 Java 侧新增中文同义词表。**「上次那家」「还是原来的」这类自然语言由主模型理解并输出结构化工具调用或业务动作，Java 只负责身份、权限、SQL、时间范围、条数上限、字段白名单、状态与来源标注。
+- 范围边界：**本轮只做只读**——不做偏好保存/修改/忘记，不做完整推荐排序，不自动选医院/科室/号源；不动健康记录、健康备忘、家属报告、确认服务与执行器、前端页面。
+- 修复轮（2026-09-14，审查后）：上面「只做只读、不动写入侧」这条边界**不足以**支撑「一次预约不能自动成为长期习惯」——旧写入措辞与主模型默认画像入口都还在违反它。三处修正见下，不改上面任何一条决定。
+  - **决定八：主模型默认上下文不再注入未经来源分类的长期记忆。**`knownFacts(state)` 里删掉 `memoryNote(state)`（它原来是 `memories.digest(userId)`，把全部 `active` 记忆不分来源、不带时间拼进每一轮提示词）。默认上下文里一个字的记忆都没有，画像统一走 `profile.memorySummary` 按需查。`MemoryStore.digest` 保留，但降级成「不是主模型的画像入口」——它是不分来源的字符串拼接，模型拿到之后分不出哪条是老人说的、哪条是系统归纳的，这个能力本身就是问题。⚠️ 初版把这条旁路记成「潜在风险、目前还不会产生实际问题」，理由是分类不会打架；**判断错了**——`rememberBookingPreferences` 只有一次预约时就写「常去的医院是……」，旁路当轮就在生效，与 `SOURCE_USER_STATED` 有没有写入路径无关。详见 `PITFALLS.md` 同日条目。
+  - **决定九：从已确认预约沉淀下来的记忆，措辞必须是中性历史事实。**「常去的医院是 X」「习惯上午复诊」改成「最近一次确认预约的医院是 X」「最近一次确认预约的科室是 Y」「最近一次确认预约的时段是上午／下午」；`kind` 统一成新增的 `MemoryStore.KIND_HISTORY`（原来给时段标的 `PREFERENCE` 会给一条系统归纳的记录贴上「这是偏好」的标签）。要谈「常去／习惯」，只能由统计真的数够次数之后说出来。
+  - **决定十：明确偏好按历史表达展示，不按当前事实展示。**`profileMemoryText` 不再写「这些是老人自己说过要让记着的，可以直接当作他的偏好」，改为「这些是老人曾明确表达的偏好，附带更新时间；如果时间较久或与当轮要求不一致，需要询问现在是否仍适用」。**本轮不发明「多少天自动过期」的阈值**——项目里没有任何可靠的时效依据，编一个数字只会制造一条看起来精确的假规则。软删除（`active=FALSE`）记录继续不返回；`active` 但时间较久的记录不能被说成现在仍然确定有效，也不能覆盖当轮明确要求（当轮那一段仍标着「优先级最高」）。
+  - **决定十一：范围反了的日期查询不当成空结果。**`appointment.history` 的 `from` 晚于 `to` 时——不执行历史 SQL、不落留痕，明确说「开始日期 X 晚于结束日期 Y，这两个日期是反的……请重新说一下要查哪一段时间」，**绝不回答成「没有查到记录」**（那会让老人以为自己那段真的没有预约，实际上他那段根本没被查过）；不动草稿、阶段或确认卡（走 `answerReadOnly`）。
+- 影响：新增 `application/profile/ProfileQueryService.java`（含 `HistoryQuery.rangeReversed()`）；`application/ToolRegistry.java` 注册两条工具；`application/AgentOrchestrator.java` 新增两个 `Route`（都只读、不走写链路）；`application/FollowupAgentService.java` 新增两个 handler 与文案装配（只走 `answerReadOnly`）；`application/longterm/MemoryStore.java` 新增 `SOURCE_USER_STATED` / `SOURCE_CONFIRMED_BOOKING` / `KIND_HISTORY` 三个常量（`SOURCE_USER_STATED` **当前没有写入路径**，读取侧先认它是为了将来那条唯一写入口接上就能用）并改写类注释与 `digest` 的说明；`agent/planning/AgentSystemPrompt.java` 新增一节措辞与优先级约束。**对外 HTTP 接口与 `AgentTurnResponse` 字段零改动**，`docs/05-api-contracts.md` 与 `INTERFACE_CHANGES.md` 无需改动（工具清单不进 HTTP 契约）。测试：新增 `ProfileReadTests` 23 项（含修复轮新增 4 项），后端全量 **522 项 0 失败 0 错误**。真实模型四个场景见 `records/PROGRESS.md`，修复轮见同处与 `records/PITFALLS.md` 同日条目。
+
+## DEC-027 推荐是「模型读真实证据给建议」，Java 只保证它一个字都没写
+
+- 日期：2026-09-14（第八阶段 8B-1）。
+- 背景：老人说一句「根据我以前的情况推荐一下」，期望拿到的是两三个**有出处的**选择。8A 已经把「读真实数据」这一半建好了（`appointment.history` / `profile.memorySummary` 两条只读工具 + 既有目录/号源/冲突/路线工具），本轮要的是让模型能把这些证据**组合成建议**。这中间有两处真实的缝：**模型的只读调用落到了办理用的那条业务路径上**。`schedule.checkConflict` 走 `checkSchedule(state)`，会推进阶段、写 `conflicts` / `alternatives`、置 `scheduleChecked`，还可能经 `checkDuplicate` 生成确认卡；`travel.routePlan` 只能解析**已有**的确认预约，并且会发 `UiDirective.travel(...)`。这两件事都不是「查询」该有的副作用，而且在只读工具循环里**会被 `finalizeToolEvidence` 真的落盘**。
+- 决定一：**沿用 5B 的分界判据，不发明第二套。**模型发起的调用走只读出口（`checkConflictReadOnly` / `routeEstimateReadOnly`），按钮与规则流程逐字保持原样。判据仍是 `outcome.modelDriven()`——**「谁发起的」是权限，不是「带了什么参数」**（这是 PITFALLS 2026-09-14 那条的结论，本轮不再重复踩）。
+- 决定二：**不新增工具、不新增路由。**推荐需要的证据七类，全部由既有只读工具提供；有依赖的调用串行、无依赖可并行，继续用既有的有界循环（3 轮上限 + 签名去重）。**刻意不做「万能推荐工具」**：把「查目录、算冲突、比路线、拼理由」收成一条 Java 工具，等于把「这一次该查什么」从模型手里收回 Java，与整个架构的分工相反。
+- 决定三：**为此专门给 `travel.routePlan` 加了候选参数，而不是新开一条「候选路线估算」工具。**两种问法的语义差别是「有没有一条真实预约可打开」，不是「要不要用另一套数据」，所以是一条工具的两种参数形态。**（审查收尾时升级为结构化的 `mode`，见 DEC-028；「靠带了哪些参数来分」这个初始写法已被判定不成立。）**`schedule.checkConflict` 同理：`date` / `time` 决定这一次查哪一个时间，不给才回草稿取。
+- 决定四：**推荐轮里 Java 保证的是「什么都没写」，不是「推荐得对不对」。**可断言的部分收窄成四条：模型发起的轮次一个草稿字段都不写（含 `stage`）、不建也不替换确认卡、不发导航指令、`appointments` 不新增行；候选清单一律 `limit(3)`；没有真实工具结果就不产出事实（路线查不到就说查不到，**不按距离或经验编一个用时**——推荐理由里的「大概半小时」一旦不是工具给的，老人据此选的时间就建立在假数据上）；冲突必须**点名**说有冲突，不把冲突时段混进候选里当普通时段。
+- 决定五：**顺手修掉 `recommendHospitals` 的一个既有缺陷，并且让模型发起的那一轮彻底不写草稿。**原写法无论科室有没有变都 `state.departmentId = null`——同一个科室再推荐一次，就会把院内指引（`hospital.locationGuide` 依赖 `hospitalId + departmentId`）的目录 ID 抹掉。现在只在**科室真的换了**时才走既有的重置口径（`resetAfterDate` + 写科室 + 清 `departmentId`，因为日期、时段、候选号源都是照着旧科室定的）；而 `modelDriven` 为真时**整段跳过**，一个字都不写。理由是规则要可验证：只要还留着一条「说是推荐、其实顺手把科室定了」的写路径，`doesNotWriteTheDraft` 这类断言就永远只能靠「恰好模型没传科室」来成立。
+- 决定六：**优先级由 Java 摆在证据里，排序交给模型。**`currentDraftNote` 把草稿已定的条件单独成段并标明「优先级最高，历史与统计都不能覆盖它」；`appointmentHistoryText` 把事实与统计分开并说明统计「是多次记录形成的，不是老人明确说过的偏好」；`profileMemoryText` 把「曾明确表达的偏好（带更新时间）」与「系统归纳的历史事实」分开。五级优先级里**「当前明确排除」这一级后来由 Java 落实**（DEC-028），其余四级仍写在提示词里交给模型排序。
+- 决定七：**不新增 Java 中文同义词表。**「还是原来的」「哪个好」「就这个」「都不喜欢」由主模型理解并输出结构化工具调用或业务动作；Java 只管身份、权限、工具参数契约、医院/科室/号源的真实性、业务时间、日程冲突、返回条数与轮数上限、证据出处，以及「查询不改草稿与卡片」。
+- 代价一：**（已在 DEC-028 里修掉，保留原记录）**「当前明确排除」原本只在提示词层：老人说「别推荐市第一医院」之后，`recommendHospitals` 仍会把目录里所有在办该科室的医院列出来，靠模型自己据上下文避开。审查判定这个缺口不能只靠提示词，已改为结构化参数 + Java 过滤。同类里**仍然**只在提示词层的是「不按症状选科」「不评价医疗效果」：Java 侧没有可以断言的载体，`RecommendationTests` 里那条是**提示词层断言**，测试类注释里已写明。
+- 代价二：**模拟标识只存在于 Java 的限定语里。**`CareCatalogRepository` 会剥掉目录里医院名与地址的「（模拟）」（`stripSimulated`），所以「目前的模拟医院资料如下」这句话是医院那一侧唯一保留的模拟标识（路线那侧是「（模拟路线，供参考）」）。别把「目录里的名字带（模拟）」当成理所当然。
+- 代价三：**条数上限只在 Java 自己能拼的那几条路上生效**（`hospital.list` / `department.list` / `recommendHospitals` 的 `limit(3)`）；模型自己组织措辞给出的 2—3 条由提示词兜。测试断言的是前者。
+- 影响：`application/FollowupAgentService.java`（新增 `travelGuideFor` / `hasRouteCandidateArguments` / `routeEstimateReadOnly` / `simulatedSuffix` / `checkSchedule(state, outcome)` / `checkConflictReadOnly` / `draftTime` 与常量 `CONFLICT_DISPLAY_LIMIT`；`dispatchOutcome` 两处 case 改为带 `outcome` 的入口；`recommendHospitals` 增加 `modelDriven` 形参并收窄草稿写入）；`application/ToolRegistry.java`（`schedule.checkConflict` 描述改写、`travel.routePlan` 增加三个可选参数）；`agent/planning/AgentSystemPrompt.java`（新增「推荐：先查真实数据，再给两三个选择」一节）。**对外 HTTP 接口与 `AgentTurnResponse` 字段零改动**，`docs/05-api-contracts.md` 与 `INTERFACE_CHANGES.md` 无需改动（工具清单不进 HTTP 契约）。测试：新增 `RecommendationTests` 26 项，后端全量 **548 项 0 失败 0 错误**（本轮改动前 522 项）。**本轮未跑真实模型**：8B-1 真实模型语义尚未验证，自动测试不能证明模型一定会选择正确工具，留待用户手动测试及最终验收。踩坑见 `PITFALLS.md` 同日两条。**其中的双模式契约、排除落地与整点边界已在同日审查收尾里修订，见 DEC-028。**
+
+## DEC-028 8B-1 审查收尾：分界靠结构化字段，排除靠 Java 过滤，边界只有一个口径
+
+- 日期：2026-09-14（第八阶段 8B-1，同日审查收尾，**未提交**）。
+- 背景：8B-1 的第一版有三处经不起追问，另有一处文档表述含混。三处都不是「再补一点」，而是**判据本身选错了**。
+- 决定一：**`travel.routePlan` 的分界改由结构化 `mode` 给出，不再靠「带了哪些参数」猜。**第一版把两种语义的区分压进「参数形状」：给了 `appointmentId` 就是看预约，给了候选条件就是估算。这不成立——**两种模式都可能带交通方式**，参数集合本就是重叠的，重叠处只能靠「谁优先」这种临时规则去分，而临时规则正是模型无法从工具描述里学准的东西。现在加 `mode`（`APPOINTMENT` / `CANDIDATE`，走 `ToolArgument.enumeration` 的既有归一化）：
+  - `APPOINTMENT` **必须**给 `appointmentId`，由 Java 拿它去 `TravelGuideService.forAppointment` 的 SQL（`WHERE a.user_id=? AND a.id=?`）校验**归属**；越权与不存在回同一句话，**不说它在不在**；校验通过再保持既有的地图导航行为（发 `UiDirective.travel(...)`、写 `travelPlan`）。
+  - `CANDIDATE` 用 `hospital` / `date` / `time` / `transport`（缺的回退到草稿），只回估算——**不发 `UiDirective`、不写草稿**。
+  - 不给 `mode` 时**只在参数唯一明确时**推断（只给 `appointmentId` → APPOINTMENT；只给候选条件 → CANDIDATE；一个都不给 → 既有导航流程原样，兼容旧调用）；**混着给或 `mode` 与参数对不上，一律澄清**，不猜。
+- 决定二：**「当前明确排除」由 Java 过滤，且不新增任何中文关键词或同义词表。**排除目标由主模型结构化给出（规划 JSON 的 `facts.excludedHospitals`），Java 用既有的 `CatalogEntityResolver` 与**真实医院目录**比对，在**拼推荐文字与快捷按钮之前**过滤。这正是 8A 定下的分工在「排除」上的落地：模型负责「懂那句话在说什么」，Java 负责「目录里到底有没有这家、该不该出现在按钮里」。
+  - **命中即过滤**，精确命中静默排除；唯一近似（「市一」）排除并把理解结果**说出来**，让他有机会当场纠正；对不上目录或对上多家则**这一轮不给推荐**，说清是哪一步没认准。
+  - 全被排除时说「没有别家了」并请他换条件，**绝不把被排除的医院悄悄放回来**；排除只在当轮生效——不落草稿、不写长期偏好，下一轮改口就能重新推荐。
+- 决定三：**多个排除目标走规划 JSON 的数组，不走工具参数的 `Map<String,String>`。**取舍记录：工具参数那层是 `Map<String,String>`，要表达多个目标只能靠分隔符切分，而医院名本身就可能带顿号、逗号、括号（「市第一医院（门诊部）」）——**切错就等于 Java 替模型猜它排除了谁**，这与「不能猜」直接冲突。规划 JSON 的 `facts` 节点本来就是 `JsonNode`，直接读数组是假设最少的表达（单个字符串也接受），所以选它，而不是给 `arguments` 发明一套转义约定。**明确不做**：不做中文分词、不做同义词表、不按「、」拆字符串。
+- 决定四：**整点边界只认一个口径。**`checkConflictReadOnly` 原写 `start.isBefore(clock.now())`，于是**正好等于此刻**的整点被判成「还没到」，答复「不冲突」；而号源查询（`appointment_time > 当前时间`）与确认闸门（`slotAlreadyPassed`，`!时间.isAfter(now)`）都把它算作已过去。同一个整点，一边说还能约、另一边说过去了，老人就会拿到一个**永远确认不成的时段**。改成 `!start.isAfter(clock.now())`，与另两处对齐。
+- 代价一：**`ExtractedFacts` 加了第 17 个组件 `List<String> excludedHospitals`。**保留 16 参兼容构造（默认空列表），compact 构造里 `null → List.copyOf`，既有的 9 处构造点因此零改动；`withoutDraftWrites` 重建事实时**原样带着**它——排除目标是「这一轮查什么」，不是草稿字段，不该在清除草稿写入时被抹掉。
+- 代价二：**排除的解析仍依赖模型给对名字。**Java 只保证「给了什么就严格按目录办、认不准就说认不准」，不能让模型一定把老人那句话里的目标写对。这条残留风险写在 `PROGRESS.md` 的未解决风险里。
+- 代价三：**（已在 DEC-029 里修掉，保留原记录）**`recommendHospitals` 只在模型「第一跳」就要求推荐时才被 Java 触达：只读工具循环里 `PROPOSE_WORKFLOW_ACTION` 续接会终止循环并只交付模型的措辞（`finishToolLoopDecision`），不会再进 Java 的推荐装配——所以「先查历史、再给建议」那种走法拿到的是模型自己组织的文字，**没有 Java 的过滤与按钮**。审查判定这个缺口不能留，已改为把推荐路由的收口交给 Java 重装，见 DEC-029。
+- 影响：`application/FollowupAgentService.java`（`travelGuideFor` 改为按 `mode` 分派；新增 `routeModeAmbiguity` / `routeForAppointment` / `hasRouteCandidateArguments(Map)`；`routeEstimateReadOnly` 签名由 `(state, outcome)` 改为 `(state, arguments)`；`recommendHospitals` 增加排除过滤与 `modelDriven` 收窄；新增 `ExclusionFilter` 记录 / `withExclusionsRemoved` / `exclusionUnclearReply` / `noCandidateLeftAfterExclusion`；`checkConflictReadOnly` 边界改 `!start.isAfter`；`withoutDraftWrites` 透传排除目标）；`application/ToolRegistry.java`（`travel.routePlan` 增加 `mode` 并把两种模式分别写清，**不再写「不打开地图」这种一概而论的话**）；`agent/ExtractedFacts.java`（第 17 组件 + 兼容构造 + 类注释记录取舍）；`agent/planning/LlmConversationPlanner.java`（`names(node,name)` 读数组，上限 `MAX_EXCLUDED_TARGETS = 5`）；`agent/planning/AgentSystemPrompt.java`（`travel.routePlan` 的两种用法分别写清、新增第 12 条讲排除目标怎么给）。**对外 HTTP 接口与 `AgentTurnResponse` 字段零改动**，`docs/05-api-contracts.md` 与 `INTERFACE_CHANGES.md` 无需改动。测试：`RecommendationTests` 26 → **38 项**、新增 `CheckConflictBoundaryTests` **2 项**，后端全量 **562 项 0 失败 0 错误**（本轮前 548 项）。**真实模型仍未跑**：8B-1 真实模型语义尚未验证，自动测试不能证明模型一定会选择正确工具，留待用户手动测试及最终验收。踩坑见 `PITFALLS.md` 同日四条。
+
+## DEC-029 8B-1 第二轮审查收尾：排除穿过工具循环，推荐收口由 Java 重装，transport 归位
+
+- 日期：2026-09-14（第八阶段 8B-1，同日第二轮审查收尾，**未提交**）。
+- 背景：DEC-028 把「当前明确排除」做成了 Java 过滤，但只在「模型第一跳就要求推荐」那条路上生效。审查指出真正的走法是先查历史/画像、下一轮才推荐——那一轮 `finishToolLoopDecision` 直接交付模型的 `replyDraft`，首轮的排除集合没带过来，最终推荐也没经过 Java 校验。
+- 决定一：**排除是「本次用户消息的轮内约束」，跟着整个只读循环走。**新增 `TurnReadConstraint`（科室 + 排除目标），进循环时从首轮 facts 建起，每轮 `continueAfterTools` 之后并入新的 facts：**排除目标取并集、只增不减**（中途忘掉一个等于把它放回候选），科室取第一次说定的那个。
+  - **它只是一个局部变量**：不落 `ConversationState`、不写 `MemoryStore`、不进 `state_json`，方法返回就没了。老人下一条消息不再提排除，就是新的一轮、新的空约束——既不会被记住，也不会被上一轮的话挡住。
+- 决定二：**推荐路由的收口一律由 Java 从真实候选重装，模型这一轮的 `replyDraft` 不作为给老人看的那句话。**`finishToolLoopDecision` 在 `decision.route() == RECOMMEND_HOSPITAL` 时改走 `recommendHospitals(state, constraint.facts(), true)`：查本轮真实医院目录、应用排除、生成文字与快捷按钮。理由是这个缺口**没法用「校验模型的推荐」来补**：模型那句话是自由措辞，Java 不解析中文，认不出里面点了哪几家医院，「推荐了被排除/未知的医院」根本识别不出来。把定稿权收回到 Java 手上，是这个架构里唯一可验证的做法——也正好是「模型组织语言、Java 定事实」分工在推荐上的自然延伸（回答阶段仍由模型润色 Java 的草稿）。照旧不写草稿、不建卡、不消费确认卡。
+- 决定三：**`transport` 只属于 CANDIDATE，APPOINTMENT 明确忽略它。**第一版的说明写「两种模式都可能带 transport」，而 `hasRouteCandidateArguments` 却把 transport 当候选专属，于是 `mode=APPOINTMENT + appointmentId + transport` 被误判成混用。现在两条口径统一到「transport 是候选比较用的参数」：APPOINTMENT 走的是这条预约和用户资料里已经存着的交通方式（`travelGuides.forAppointment` 自己取），**不接受这次传的 transport 覆盖**；多带它不算混用、也不报错，忽略即可。混用检测只看 `appointmentId` 与 `hospital`/`date`/`time` 三项（新增 `hasRouteCandidateLocation`）。工具描述、提示词、Java 注释、测试四处写明。
+- 决定四：**`routeModeAmbiguity` 拆成三句话，按错误类型给。**三种情形原来共用一句「请告诉我具体的日期和时间」——缺的是「哪一条预约」时，这句话把老人指错了方向。现在 APPOINTMENT 缺 `appointmentId` 问「请从您的预约里选一条」；CANDIDATE 一个条件都没有问「要去的医院或者时间」；`appointmentId` 与候选位置条件混用（或 CANDIDATE 却给了 `appointmentId`）请他说清是看已有预约的路线还是估算候选的路线。都不摆候选：这一轮问的是路线，Java 手上没有「正确的那一次预约」，摆几条等于把猜错的责任推给他。
+- 代价一：**（已在 DEC-030 里修掉，保留原记录）****回答阶段那一层仍然只靠「只改措辞」的默契。**`LlmAnswerGenerator` 会拿 Java 的权威草稿去润色，理论上能塞进一个名字。这一层对**直接进推荐**的老路同样成立、本轮不改；要真正堵住得让回答层也做结构化校验，那是另一件事。**如实记为残留缺口**，不因为「测试全绿」就说它不存在。
+- 代价二：**`TurnReadConstraint` 里的科室是「第一次说定的那个」。**模型如果在续跑轮改口说另一个科室，Java 仍按首轮那个算候选。本轮不做覆盖规则：改科室本来就是新的一轮用户消息，硬要在同一轮里改更容易出错。
+- 影响：`application/FollowupAgentService.java`（`runModelToolLoop` 带 `TurnReadConstraint`；新增 `TurnReadConstraint` 记录与 `merge`/`facts`；`finishToolLoopDecision` 增加约束形参并在 `RECOMMEND_HOSPITAL` 上重装；`travelGuideFor` 改用 `hasRouteCandidateLocation` 判混用；`routeModeAmbiguity` 拆成 `routeModeMissingAppointment` / `routeModeMissingConditions` / `routeModeMixedArguments`；新增 `hasRouteCandidateLocation`）；`application/ToolRegistry.java`（`travel.routePlan` 描述写明 transport 只属于 CANDIDATE、APPOINTMENT 不接受覆盖）；`agent/planning/AgentSystemPrompt.java`（同一条口径，并告诉模型推荐路由上给老人看的清单由 Java 重装）。**对外 HTTP 接口与 `AgentTurnResponse` 字段零改动。**测试：`RecommendationTests` 38 → **45 项**（其中把 `anExcludedHospitalNeverComesBackThroughTheHistoricalPreference` 换成了真跑 `appointment.history` 的循环用例），邻近回归 141 项 0 失败，后端全量 **569 项 0 失败 0 错误**（本轮前 562 项，见 `PROGRESS.md` 同日条目）。**真实模型仍未跑**：8B-1 真实模型语义尚未验证，自动测试不能证明模型一定会选择正确工具，留待用户手动测试及最终验收。踩坑见 `PITFALLS.md` 同日两条。
+
+## DEC-030 8B-1 定稿：推荐由模型在一次调用里结构化产出 + 同响应话语，Java 只验证、不再润色
+
+- 日期：2026-09-14（第八阶段 8B-1，同日第三轮，**未提交**）。
+- 背景：DEC-029 把推荐收口改成「Java 从真实候选重装、模型那轮 `replyDraft` 不作数」。它堵住了「排除被绕过」，但代价是模型说的话一个字都不算数——Java 拼的推荐只能按目录字段做固定陈述，说不了「您上次预约的就是这家、这次要不要继续」这类需要组织语言的话。而为了让这段话像人话，后面还挂着一层 `LlmAnswerGenerator` 润色，**那一层没人校验**，理论上可以改掉名单而 Java 认不出来（DEC-029「代价一」如实记下的残留缺口）。用户要求改掉这个架构。
+- 决定一：**模型在最后一次调用里同时产出结构化 `recommendations` 与最终话语 `answering`；Java 验证通过就把同一响应里的 `answering` 原样交给老人，不再调用 `LlmAnswerGenerator`。**`recommendations` 每项 `hospitalId` / `reason` / `evidenceRefs`。**Java 不排序、不替补、不重写理由**——按钮顺序就是模型给的顺序。这同时兑现了「模型组织语言、Java 定事实」的分工，也把 DEC-029 那条残留缺口关掉：润色层被整条移出推荐路由。
+- 决定二：**验证的对象是结构化字段，不是模型的中文措辞。**Java 只判断「推荐对象来自本轮真实候选、没被排除、科室在、条数≤3且不重复、引用的证据本轮真查过且是关于这一家的」。**理由与证据的语义对应仍靠模型自觉**——中文自由措辞无法解析，Java 验证不了「这句话确实由这条证据支持」，如实记为残留风险。
+- 决定三：**证据取自数据库里的真实工具记录，不取 Java 自己攒的列表。**`traces.since(state.id, evidenceMarker)`，`evidenceMarker` 在进循环时取。只有 `response_json` 能回答「这次查到没有」：只读工具在循环里的 `outcomeKind` 几乎恒为 `SUCCESS`，拿它当「有证据」等于没查。判据是三层——本轮真调过 ∧ `success=true` 且响应非空 ∧（医院级证据）那次调用的参数或结果带着这家医院。「查了但没查到」不算证据；`{"total":0,...}` 这种非空对象靠工具自报的条数识别。
+  - **ordering 是硬约束**：`since()` 必须在 `prepareCandidates()` **之前**调用。候选是 Java 自己查目录算出来的，那次查询也落追踪；反过来写的话，模型只要引一句 `hospital.list`，Java 自己刚查的那一趟就成了它的「证据」。已写进代码注释。
+  - 映射表（`TRACE_TOOL_NAMES`）与医院级工具集合（`HOSPITAL_SCOPED_TOOLS`）都是**工具名集合，不是中文词表**——「不新增中文同义词表」这条约束继续成立。
+- 决定四：**校验不过不给 `answering`，最多修正一次。**按用户确认的取舍：模型一条工具都没查就给推荐也走同一套结构化校验，那唯一一次修正会明确要求它先查真实数据；修正会消耗一轮（它可能先去点只读工具）。再失败返回一句中性安全提示，不出现任何医院名、不复述模型那句。**排除认不准 / 排除后没有候选**是 Java 的终结句，不交给模型再改一遍。
+- 决定五：**额外做一次「`answering` 对真实目录名的包含检查」。**出现被排除的、或不在本次已校验名单里的**真实医院名**，整句不展示。字符串全部取自数据库目录（`CatalogEntityResolver.canonicalName` 只做「去（模拟）、去空白、去间隔号、转小写」的规范化），**不是新增中文词表**。
+- 决定六：**模型驱动这条路上 Java 自己写的终结句一律走 `respondWithoutModel`**（推荐交付、近似排除的理解说明、没有候选、安全提示）——它们是安全措辞，不能交给润色层改写。**规则路径（`modelDriven=false`，老人自己点「推荐」）保持原样走 `respond`**，行为一字不变。近似排除时 Java 仍在他看到的那句话前面加一句理解说明，再接 `answering`（用户确认的取舍）。
+- 决定七：**`recommendations` 在解析层不按 3 截断（硬上限 8）。**超过 3 是**校验层**判 `TOO_MANY` 退回给模型自己删——Java 替它砍前三条等于替它做取舍。别名只在解析层收一次（`answering = first(answering, replyDraft)`），模型若仍写进 `replyDraft` 当等义回退，**同一次输出、不新增调用**；其余路由照旧读 `replyDraft`，行为不变。
+- 代价一：**包含检查只用全名。**模型把被排除的医院写成「市一」这类简称时，目录包含检查命中不了。
+- 代价二：**`reason` 与 `evidenceRefs` 的语义对应仍靠模型自觉**（同决定二）。
+- 代价三：**科室取首轮那个**（`TurnReadConstraint` 既有口径）。续跑轮改口说别的科室，仍按首轮算候选。
+- 代价四：**真实模型语义未验证。**自动测试证明的是 Java 侧闸门与提示词里写了规则，证明不了模型一定会按新契约输出。
+- 影响：`agent/planning/HospitalRecommendation.java`（新增）；`agent/planning/PlannerDecision.java`、`agent/planning/LlmConversationPlanner.java`、`application/AgentRuntime.java`（各追加 `recommendations` / `answering` 两个组件 + 兼容构造）；`infrastructure/mock/ToolTraceStore.java`（新增 `latestId` / `since`，`ToolTrace` 结构不动）；`application/CatalogEntityResolver.java`（`canonicalName` 静态化，不新增词表）；`application/FollowupAgentService.java`（入口条件加 `isStructuredRecommendation`；循环收口加推荐分支与 `recommendationRepairs`；新增校验与交付一节：`checkRecommendations` / `deliverRecommendation` / `recommendationUnavailable` / `evidenceProblem` / `traceHasResult` / `traceMentions` / `hospitalNamedIn` / `prepareCandidates` / `RecommendationPlan` / `ExclusionFilter`；`finishToolLoopDecision` 删掉 `RECOMMEND_HOSPITAL` 那一支；`recommendHospitals` 改为规则路径专用）；`agent/planning/AgentSystemPrompt.java`（新契约一节 + 第 12 条末句改写）。**对外 HTTP 接口与 `AgentTurnResponse` 字段零改动**，前端、`docs/05-api-contracts.md`、`INTERFACE_CHANGES.md` 无需改动。测试：`RecommendationTests` 45 → **56 项**，后端全量 **580 项 0 失败**（改前 569）。两条双向验证见 `PROGRESS.md` 同日第三轮条目，踩坑见 `PITFALLS.md` 同日三条。**8B-1 真实模型语义尚未验证，自动测试不能证明模型一定会选择正确工具，留待用户手动测试及最终验收。**
+
+> 合并说明：本线（余柔欣分支）的决策原编号 DEC-019～DEC-033 与主线同时段的 DEC-019～DEC-030 撞号，合并时统一顺延为 DEC-031～DEC-045；本文件与其它文档中的引用已同步。
+
+## DEC-031 「查看办理过程」全程收起，实时状态写进标题
 
 - 日期：2026-09-12。
 - 背景：「查看办理过程」原先办理中强制展开、办完自动收起。展开时它是消息流里最高的一块——实时步骤条加上参数、结果两块等宽代码块——把下面的计划卡、确认卡整体推下去。老人正要点「确认办理」，按钮先被顶走一次，点完又缩回来，位置动两次。
@@ -254,7 +450,7 @@
 - 标题那行的取舍：最后一步还在跑时说那一步；跑完了就回到思考类事件的最新一句（「正在整理回答…」比已经查完的那一步更贴近此刻）。结果小结（note）一律不上标题——结果没回来时那句是照着空结果算的假话，与 `ToolStep` 同一条规矩。
 - 代价：演示时评委看不到自动长出来的步骤条，要现场点一下标题。验收清单第十一条、`user-manual.md`、`02-pages-and-interactions.md`、`03`、`11`、`设计思路报告.md`、`报名解决方案.md` 中「办理中逐条长出 / 办理结束自动收起」的表述已同步改写。
 
-## DEC-020 事项页保留两条取消入口，页内确认不借道模型
+## DEC-032 事项页保留两条取消入口，页内确认不借道模型
 
 - 日期：2026-09-13。
 - 背景：事项页原先只有一条取消入口——点 **「取消这次复诊」** 把话交给助手，由助手出确认卡。后来给每张已预约卡片加了垃圾桶按钮，就地二次确认后直连 `POST /api/users/{userId}/appointments/{appointmentId}/cancel`，同一页于是出现两条取消入口。这需要先回答「要不要合并成一条」：DEC-002 与 DEC-012 把取消列在 `confirmationId` 门禁里，而页内确认并没有生成 `confirmationId`。
@@ -269,7 +465,7 @@
 - 连带：`appointment-api.ts` 新增 `cancelAppointment()`；取消成功后由事项页广播 `silver-agent-appointments-updated`，首页与事项页都挂这个事件，助手确认取消后（`assistant-view.tsx`）也广播同一个事件，所以两边互相同步。`user-manual.md`、`02-pages-and-interactions.md`、`设计思路报告.md`、`报名解决方案.md`、`09-demo-acceptance-checklist.md` 中的相关表述已同步改写。
 - 没做：新接口只服务老人端的页内确认这条；助手那条继续走 `AppointmentTool.cancel`。两个入口共用同一个业务方法，不存在第二套取消逻辑。
 
-## DEC-021 号源加「医生」一维：号别手工指定、id 带医生、老号源整批重建
+## DEC-033 号源加「医生」一维：号别手工指定、id 带医生、老号源整批重建
 
 - 日期：2026-09-13。
 - 状态：已采用。**阶段 1（数据模型 + 数据库字段 + 前端展示）已实施**；阶段 2（选医交互）待定。
@@ -281,22 +477,22 @@
 - 理由三：滚动生成器只插入、不更新，老号源上 `doctor_id` 恒为 `NULL`。回填（按科室补一个「排序第一名」医生）会造出一批「其实没有这个号」的假号源，与仓库「不虚构任何内容」的约定冲突；号源本来就是滚动生成的演示数据，删了不心疼，也不会留下半新半旧两套。
 - 连带：清理只删**没有预约占用**的旧号源——`doctor_id IS NULL AND 无 appointment 引用` 才删。被预约挂着的旧号源保留（否则会造出孤儿预约），前端对这类老记录如实显示「医生信息未记录」，不替它编一位医生。
 - 决定四（挂号费）：`appointment_slots` 新增 `fee_cents`，**以分为单位用整数存储**（普通号 2500 = ¥25，专家号 4000 = ¥40），演示要讲「专家号更贵」这件事。整数存储避免浮点误差。
-- 决定五（号源总量控制）：生成维度从「医院 → 科室 → 工作日 → 时段」改成「医院 → 科室 → **该科室每位医生** → 出诊日 → 4 时段」。每位医生的**出诊星期按序号错开**（01 号 → 周一/周三，02 号 → 周二/周四，03 号 → 周五），因此**同一科室的同一天最多只有一位医生出诊**。〔**该条已被 `DEC-022` 撤销**：排班改成「每科室固定 3 个放号日 + 上午/下午半天制」，同一时刻允许多条号源。下面「理由五」中依赖「一个时刻一条号源」的取舍随之作废，保留原文只为留下演进痕迹。〕
+- 决定五（号源总量控制）：生成维度从「医院 → 科室 → 工作日 → 时段」改成「医院 → 科室 → **该科室每位医生** → 出诊日 → 4 时段」。每位医生的**出诊星期按序号错开**（01 号 → 周一/周三，02 号 → 周二/周四，03 号 → 周五），因此**同一科室的同一天最多只有一位医生出诊**。〔**该条已被 `DEC-034` 撤销**：排班改成「每科室固定 3 个放号日 + 上午/下午半天制」，同一时刻允许多条号源。下面「理由五」中依赖「一个时刻一条号源」的取舍随之作废，保留原文只为留下演进痕迹。〕
 - 理由五：如果每位医生都排满周一到周五，同一科室同一天会出现 N 条同一时刻的号源，助手「共查到 N 个可预约时段」和家属代约的候选按钮都会被搞成一堆重复项（现有代码全按「一个时刻一条号源」写的）。错开之后既满足「不是每个医生每天都出诊」，又把总量压在几百条（不翻到上千）。每个科室只放 2–3 名医生，同样是为了控量。
 - 周末仍然一律不排号源，保留「当天暂无号源」的演示场景。
 - 快照：`appointments` 存 `doctor_name / doctor_title / slot_type / fee_cents` 四个快照列，不在读取时回连号源——号源是滚动重建的（周末号源会删、过去日期会过期），预约记录必须自己说得清「当时约的是谁、什么号、多少钱」。这与 `reminder_status / family_status / materials` 写死在预约行上的做法一致。
 - 前端：展示口径收在一处纯函数 `doctorLine()`（`frontend/lib/appointment-display.ts`），输出「医生 · 职称 · 号别 · 挂号费」；`slotType` 遇未知值**原样显示**（不显示空白），无医生信息显示「医生信息未记录」。
 - 阶段边界：本次**只做数据模型、数据库字段与前端展示，不改任何交互**（不新增选医生的路由、动作或界面）。阶段 2 才接「助手推荐医生 / 老人直呼姓名」两条路径，落地前先验收阶段 1 的数据模型没选错。
-- 影响：`slotId` 拼法是跨模块约定变更，已在此登记；`INTERFACE_CHANGES.md`、`05-api-contracts.md`、`06-mock-data-design.md`、`13-demo-scenarios-workflow.md` 同步改写。新增 `DoctorSlotModelTests` 把上述约定钉成回归（排班口径重做后扩到 14 例，见 `DEC-022`）。
+- 影响：`slotId` 拼法是跨模块约定变更，已在此登记；`INTERFACE_CHANGES.md`、`05-api-contracts.md`、`06-mock-data-design.md`、`13-demo-scenarios-workflow.md` 同步改写。新增 `DoctorSlotModelTests` 把上述约定钉成回归（排班口径重做后扩到 14 例，见 `DEC-034`）。
 
-## DEC-022 排班重做为「每科室固定 3 个放号日 + 上午/下午半天制」，撤销 DEC-021 决定五
+## DEC-034 排班重做为「每科室固定 3 个放号日 + 上午/下午半天制」，撤销 DEC-033 决定五
 
 - 日期：2026-09-13。
 - 状态：已采用，**数据层已实施**（生成器 / 表 / 种子 / 回归用例）；助手侧的选医交互（阶段 2）仍待定。
-- 背景：DEC-021 决定五为了让「同一时刻只有一条号源」继续成立，把每位医生的出诊星期按序号错开，做到**同一科室同一天只有一位医生在诊**。但新的需求是「选好科室和日期后，列出这天有哪几位医生可约」——一天只有一位医生等于没有可选性；而且「老人指定某天要专家号、当天恰好没有」这条规则缺少一个真实存在的日子来演示。于是排班口径整体重做。
+- 背景：DEC-033 决定五为了让「同一时刻只有一条号源」继续成立，把每位医生的出诊星期按序号错开，做到**同一科室同一天只有一位医生在诊**。但新的需求是「选好科室和日期后，列出这天有哪几位医生可约」——一天只有一位医生等于没有可选性；而且「老人指定某天要专家号、当天恰好没有」这条规则缺少一个真实存在的日子来演示。于是排班口径整体重做。
 - 决定一（排班形状）：**每个科室每周固定放 3 个工作日的号**；放号日的**上午排 1 位专家 + 1 位普通**（09:00 / 10:30 各一条），**下午排 1~2 位**（14:00 / 15:30）。周末一律不放，「指定日期没有号源」的演示场景保留。
 - 决定二（为什么是半天制）：上午固定「1 专家 + 1 普通」，保证老人**总能在上午二选一**；下午刻意安排**一天只排普通号**，专门用来演示「指定要专家号、当天没有专家号，改推最近 7 天内的专家号」。
-- 决定三（**撤销**决定五）：DEC-021 决定五「每位医生出诊星期错开、同科室同一天只有一位医生」**作废**，由本决定取代。连带地，「**同一时刻只有一条号源**」这个旧不变量**不再成立**——上午 09:00 天然两条，界面与助手改由「医生 + 号别」区分。原先依赖该不变量的回归用例（`DoctorSlotModelTests` 里那条「同日同时刻只有一条」）已改写为三条：**上午恰好 1 专家 + 1 普通**、**下午同一时刻 ≤ 2 条**、**同一位医生同一时刻不重复**。
+- 决定三（**撤销**决定五）：DEC-033 决定五「每位医生出诊星期错开、同科室同一天只有一位医生」**作废**，由本决定取代。连带地，「**同一时刻只有一条号源**」这个旧不变量**不再成立**——上午 09:00 天然两条，界面与助手改由「医生 + 号别」区分。原先依赖该不变量的回归用例（`DoctorSlotModelTests` 里那条「同日同时刻只有一条」）已改写为三条：**上午恰好 1 专家 + 1 普通**、**下午同一时刻 ≤ 2 条**、**同一位医生同一时刻不重复**。
 - 决定四（确定性——硬约束）：排班必须**算出来、不随机**。`openWeekdays(departmentId)` / `morningDoctors(...)` / `afternoonDoctors(...)` 都是纯函数，同一个「科室 + 日期」在任何一次启动、任何一台机器上都得到同一份。**禁止 `Math.random()`**：演示要能提前彩排，回归要按号源 id 断言。为此各科室的 3 个放号日**固定、不随周次变化**——曾考虑做成「每周重抽」，但那会让「体检日 = 下周三」「改期日 = 下周五」两个日期坐标随机漂移，连带 `DemoSeedDataTests` 的口播断言与 `MockAppointmentAlternativesTests` 的三天窗口一起变红，代价远超收益。
 - 决定五（两处不能随手改的放号日）：**d001（市第一医院·心内科）的放号日必须含周三**——冲突演示把「下周三体检 + 当天 10:30 心内科号源」钉在那天（`DemoSeedDataTests`）；**必须含周五**——「下周六无号 → 往后三天的附近日期」这条降级路径才取得到号（`MockAppointmentAlternativesTests`）。只有周一/周三填不满这个三天窗口。
 - 决定六（医生编制）：**每科室 3 位医生，全院 18 位**——01 主任医师（`EXPERT`）/ 02 主治医师（`NORMAL`）/ 03 副主任医师（`EXPERT`）；**不再设住院医师**（原住院医师统一并入主治医师）。3 个放号日 × 上午/下午 = 10 个「医生·半天」/周/科室，摊到 3 位医生约 **3~4 个半天**。`data.sql` 少一位时 `RollingAppointmentSlotInitializer.doctorOf()` 直接抛错，不静默少排一班（`d004` / `d005` 本次各补了一位副主任医师）。
@@ -306,13 +502,13 @@
 - 影响面：`06-mock-data-design.md`（号源一节整段重写）已同步；`INTERFACE_CHANGES.md`、`PITFALLS.md` 追加本次两条坑（H2 `DAY_OF_WEEK` 是 ISO 起点；同名科室在两院各一份，按科室**名字**分组会把两家并成一组）。
 - 没做：**没有**给助手加任何选医交互，也没有改预约漏斗（仍是「科室 → 日期 → 上午/下午 → 候选」）。本次只动数据层。
 
-## DEC-023 撤销 DEC-022 决定六：03 号医生从「副主任医师/EXPERT」改回「主治医师/NORMAL」
+## DEC-035 撤销 DEC-034 决定六：03 号医生从「副主任医师/EXPERT」改回「主治医师/NORMAL」
 
 - 日期：2026-09-13（同日内再次调整排班口径）。
 - 状态：已采用，**数据层已实施**；助手侧的选医交互（阶段 2）仍待定。
-- 背景：按「号源供给数量占比」原则——**普通号号源总量 ≥ 专家号号源总量、专家号经常约满、普通号相对好挂**——发现 DEC-022 的「1 专家 + 2 普通、下午 [3]/[2]/[1,3]」会让**专家号反而比普通号多**：上午 1:1 锁死 6:6，下午排 1+0+2=3 位专家 vs 0+1+0=1 位普通 → 专家 12、普通 8 = **60% : 40%**，与该原则相反。结构上无法靠调整下午排班来翻盘——只有 1 位普通医生（02 号），上午三天都已经被她占满，下午没有"普通号医生可加排"。**唯一的杠杆是医生编制本身**。
-- 决定一（编制）：**每科室改为「1 位专家 + 2 位普通」**——01 主任医师（`EXPERT`）、02 主治医师（`NORMAL`）、03 主治医师（`NORMAL`）。DEC-022 决定六中的「03 副主任医师/EXPERT」**作废**，由此撤销。
-- 决定二（排班）：上午 `[1, role==1 ? 3 : 2]`（始终 1 位专家 + 1 位普通，02/03 号轮换）；下午全部为普通号——`[2]` / `[3]` / `[2, 3]`。同一时刻最多 2 条号源的不变式不变。**⚠️ 已被 DEC-026 决定三废止**：排班改成「一天 4 格、每格 1 人、号别按格固定（09:00 / 14:00 专家格）」，`morningDoctors` / `afternoonDoctors` 下线。
+- 背景：按「号源供给数量占比」原则——**普通号号源总量 ≥ 专家号号源总量、专家号经常约满、普通号相对好挂**——发现 DEC-034 的「1 专家 + 2 普通、下午 [3]/[2]/[1,3]」会让**专家号反而比普通号多**：上午 1:1 锁死 6:6，下午排 1+0+2=3 位专家 vs 0+1+0=1 位普通 → 专家 12、普通 8 = **60% : 40%**，与该原则相反。结构上无法靠调整下午排班来翻盘——只有 1 位普通医生（02 号），上午三天都已经被她占满，下午没有"普通号医生可加排"。**唯一的杠杆是医生编制本身**。
+- 决定一（编制）：**每科室改为「1 位专家 + 2 位普通」**——01 主任医师（`EXPERT`）、02 主治医师（`NORMAL`）、03 主治医师（`NORMAL`）。DEC-034 决定六中的「03 副主任医师/EXPERT」**作废**，由此撤销。
+- 决定二（排班）：上午 `[1, role==1 ? 3 : 2]`（始终 1 位专家 + 1 位普通，02/03 号轮换）；下午全部为普通号——`[2]` / `[3]` / `[2, 3]`。同一时刻最多 2 条号源的不变式不变。**⚠️ 已被 DEC-038 决定三废止**：排班改成「一天 4 格、每格 1 人、号别按格固定（09:00 / 14:00 专家格）」，`morningDoctors` / `afternoonDoctors` 下线。
 - 决定三（数据落地）：03 号医生名字按科室重排（d001-03 陈凤兰、d002-03 黄志强、d003-03 郑国华、d004-03 沈国安、d005-03 范丽娟、d006-03 高志明）；intro / good_at 同步去「副主任」字样；`slot_type` 由 `EXPERT` 改 `NORMAL`。
 - 决定四（数量与占比）：每周每科室 **6 条专家 + 14 条普通 = 30% : 70%**；全院一个月 ≈ 522 条（不变），其中专家 ≈ 157、普通 ≈ 365。**新增 `everyDepartmentHasMoreNormalSlotsThanExpertSlots` 用例**把这比例钉死——任何把 03 号偷偷改回专家、或下午加上专家号的改动都立刻红。
 - 决定五（演示坐标）：`d001` 下周三（role1）上午 `[1, 3]` 第一位仍是 01 号主任医师（`EXPERT`），**冲突演示 / 体检冲突 / 普通办理等所有 `DemoSeed.*Slot()` 用例的医生指向和号别都成立**，不需要改任何一个演示文本。
@@ -320,7 +516,7 @@
 - 影响面：`06-mock-data-design.md` 排班表重写、`data.sql` 表头注释改写、`RollingAppointmentSlotInitializer` 类 Javadoc 与 `MAX_DOCTORS_PER_DEPARTMENT` 注释同步更新；回归用例 `DoctorSlotModelTests` 由 14 例扩到 15 例（新增 1、新更名 1）。全量回归 **359 例，仅余 1 例已知抖动**（`HealthReportTests.aValueWithoutANumberStillGetsCounted`，根因是 `daysAgo=0` 的窗口边界问题，PITFALLS-2026-09-13 已记）。
 - 没做：**没有**触碰助手的选医交互 / 排序规则 / 口播文案；阶段 2 仍待验收后开工。
 
-## DEC-024 推荐未点名时按医生去重上移为共享纯函数；下午专家号加第二道闸门；照护端号源带医生信息
+## DEC-036 推荐未点名时按医生去重上移为共享纯函数；下午专家号加第二道闸门；照护端号源带医生信息
 
 - 日期：2026-09-14。
 - 状态：已采用，已实施；**数据库结构未改**。
@@ -328,16 +524,16 @@
 - 决定一（推荐去重上移）：把「未点名医生 → 每位医生只留最靠前一条；点名医生 → 展示该医生全部时段」这条规则上移为 `SlotRecommender.bestPerDoctor(List<Slot>)` **纯函数**，`FollowupAgentService.recommendPeriod` 改调它并删除原私有实现。规则本身不变（原本就在那行三元开关里），变的是**出处唯一**：原先这条规则埋在 4883 行的编排类私有方法里，外部拿不到、也无法单独钉住。
 - 决定二（其它时段提示）：单候选回包时，若该医生当天还有别的可约时段，补一句「还有其他时段」——推荐卡片上的时段只是**该医生的最优时段预览**，不是唯一时段。点击进入详情才展开该医生全部时段。
 - 决定三（下午专家号第二道闸门）：`MockAppointmentTool` 新增 `requireAfternoonIsNotExpert(slotId)`，在 `submit` 与 `reschedule` **写入前**拦截「下午 + EXPERT」。第一道闸门仍是排班侧的 `afternoonDoctors` 只排普通号医生；第二道保证即使绕过排班（脚本 / SQL 插入脏数据），业务层也不接受下午专家号。判断只看号源自身的 `slotType` 与时刻，**不看医生职称**；上下午分界复用 `RollingAppointmentSlotInitializer.NOON`（12:00），不另写字面量——因此这条约束与「下午排几格」无关，是「整个下午」的约束。
-- 决定四（照护端号源带医生）：`CareBookingService.DateWindow.SlotOption` 补 `doctorName / doctorTitle / slotType / feeCents`；前端按钮从「09:00」改为「09:00 / 张建国 主任医师 · 专家号 · 挂号费 ¥40」，拼法复用 `frontend/lib/appointment-display.ts` 的 `doctorLine()`。**这是修真实缺陷**：同一上午两位医生各一条 09:00，原来只给 `time`，页面上并排两个一模一样的「09:00」按钮，家属分不清点哪个（DEC-022 决定三之后「同一时刻只有一条号源」已不再成立）。
+- 决定四（照护端号源带医生）：`CareBookingService.DateWindow.SlotOption` 补 `doctorName / doctorTitle / slotType / feeCents`；前端按钮从「09:00」改为「09:00 / 张建国 主任医师 · 专家号 · 挂号费 ¥40」，拼法复用 `frontend/lib/appointment-display.ts` 的 `doctorLine()`。**这是修真实缺陷**：同一上午两位医生各一条 09:00，原来只给 `time`，页面上并排两个一模一样的「09:00」按钮，家属分不清点哪个（DEC-034 决定三之后「同一时刻只有一条号源」已不再成立）。
 - 决定五（排班时段**保持 4 格**）：上午 09:00 / 10:30、下午 14:00 / 15:30 维持现状，**不**改成需求稿里的 3 格（09:00 / 10:30 / 14:30）。理由：三格无任何业务收益；且下午容量减半（2 格 × 1~2 位医生 = 2~4 条 → 1 格 × 1~2 位 = 1~2 条），单日号源总量从 6~8 掉到 5~6，老人约下午号更难。需求侧真正有价值的那条「下午不放专家号」与格数无关，两方案下都成立（即决定三）。
 - 明确不做（本次刻意保留现状，非疏漏）：
   1. **不引入 `stock` / `capacity` 容量字段。** 需求稿假设「同一医生 + 同一天 + 同一时段允许 3 条 slot」在本项目**物理上插不进去**——`slotId` 拼法 `r-<医生id>-<日期>-<时刻>` 已含医生，第二条直接撞主键（`DoctorSlotModelTests.noDoctorHasTwoSlotsAtTheSameMoment` 钉着）。故「stock 聚合」没有对应的数据前提，未实现。
   2. **不改照护端「就诊人名下只保留一个进行中预约」**（`CareBookingService.hasUpcoming()`，`secondBookingWhileUpcomingExistsIsRejected` 钉着）。老人端助手路径本就允许「同一天约不同时段」，两端口径差见「待后续」。
 - 影响面：`SlotRecommender`、`FollowupAgentService`、`MockAppointmentTool`、`CareBookingService`，前端 `types/domain.ts` + `features/care/care-booking-view.tsx`。测试**只新增、未改动任何既有断言**：新文件 `AfternoonExpertGuardTests`（4 例）、`SlotRecommenderTests` 追加 4 例（含「主任医师 + NORMAL 仍是普通号」）、`CareBookingServiceTests` 追加 `windowsCarryTheDoctorSoTheSameMomentCanBeToldApart`（1 例）。
 - 回归：前端 `tsc --noEmit` 0 错误；后端全量 **383 例，仅余 1 例已知抖动**。抖动甄别过程：全量那次挂 `HealthReportTests.sendingWritesOneNotificationToThePrimaryContact:129`（`sent()` 为 false）；单跑该类 4 次得 **2 绿 2 红**，红的那两次换成 `aValueWithoutANumberStillGetsCounted:108`（`text()` 为 null）。同一份代码两次运行间自己翻转、且挂的方法不固定 → 与改动无关。注意本次挂的两个方法**不在** PITFALLS-2026-09-13 原文列举的方法里，但根因同形（造在 `daysAgo=0` 的记录被关在窗口外），「`sent()` 为 false」是同一根因的另一种落点。
-- 待后续（属重构问题，本次不动）：① 照护端「一个进行中预约」与老人端「同一天可约多个时段」的口径差，需产品拍板；② ~~`MockAppointmentTool.submit` 开头那句**会话级幂等**查询（按 `conversation_id + user_id + status=CONFIRMED`）会让「同一段会话里先约 09:00 再约 10:30」时 `checkDuplicate` 放行、`submit` 却返回旧预约 id——确认卡显示新时间，实际没落库~~ **该条已由 DEC-025 修复**（幂等键补上号源这一维）；③ `FollowupAgentService` 仍是 4830+ 行的编排巨类（DEC-018 遗留）。
+- 待后续（属重构问题，本次不动）：① 照护端「一个进行中预约」与老人端「同一天可约多个时段」的口径差，需产品拍板；② ~~`MockAppointmentTool.submit` 开头那句**会话级幂等**查询（按 `conversation_id + user_id + status=CONFIRMED`）会让「同一段会话里先约 09:00 再约 10:30」时 `checkDuplicate` 放行、`submit` 却返回旧预约 id——确认卡显示新时间，实际没落库~~ **该条已由 DEC-037 修复**（幂等键补上号源这一维）；③ `FollowupAgentService` 仍是 4830+ 行的编排巨类（DEC-018 遗留）。
 
-## DEC-025 `submit` 的幂等键补上号源：同一次提交才幂等，同一段会话换个时段必须真的新建
+## DEC-037 `submit` 的幂等键补上号源：同一次提交才幂等，同一段会话换个时段必须真的新建
 
 - 日期：2026-09-14。
 - 状态：已采用，已实施；**数据库结构未改**；**未改动任何产品规则**。
@@ -351,7 +547,7 @@
 - 决定：幂等键改成「**会话 + 就诊人 + 号源**」（`conversation_id + user_id + slot_id + status='CONFIRMED'`）。
   换了号源就必须真的新建一条、返回新 id；只有同一次提交重复落下来才返回已存在的那条。
 - 理由（为什么键里放号源）：**一条号源就是一个号**——`appointment_slots` 只有 `available` 布尔列，
-  没有容量字段，扣减是 `WHERE id=? AND available=TRUE` 的二值翻转（见项目长期记忆与 DEC-024）。
+  没有容量字段，扣减是 `WHERE id=? AND available=TRUE` 的二值翻转（见项目长期记忆与 DEC-036）。
   所以「同一位就诊人 + 同一个号源」只可能是同一次提交，**不会误伤「同一天换个时段再约一次」**——
   那本来就是两条不同的号源。号源 id 里已含医生 + 日期 + 时刻（`RollingAppointmentSlotInitializer.slotId`），
   时间维度因此天然包含在键里。
@@ -361,7 +557,7 @@
 - 明确不做：
   1. **不把「患者 + 日期 + 时段」的冲突判定搬进 `submit`。** 那是
      `FollowupAgentService.checkDuplicate` 的职责，搬进来等于同一条规则两处实现。本次只修幂等，
-     业务冲突规则原样不动（DEC-024「明确不做」第 2 条也依然不动）。
+     业务冲突规则原样不动（DEC-036「明确不做」第 2 条也依然不动）。
   2. **不改照护端 `CareBookingService` 的任何规则**（`hasUpcoming()` / 「名下只保留一个进行中预约」
      原样；`secondBookingWhileUpcomingExistsIsRejected` 未改动）。照护端走 `booking.book(...)`，
      每次一个现生成的 `bookingId` 当 `conversationId`，新键在那边与旧键行为一致（都查不到），
@@ -383,12 +579,12 @@
   `DoctorSlotModelTests` 15/15、`CancelScopeTests` 4/4、`DemoScenarioTests` 5/5。
 - 没做：没有触碰排班、号源生成、照护端代约链路、推荐排序与口播文案；没有改 `schema.sql`。
 
-## DEC-026 科室扩到两院各 6 科；每科室 4 位医生、一天 4 格；号源加名额（capacity / booked）
+## DEC-038 科室扩到两院各 6 科；每科室 4 位医生、一天 4 格；号源加名额（capacity / booked）
 
 - 日期：2026-09-14。
 - 状态：已采用，**数据层已实施**（`schema.sql` / `data.sql` / 生成器 / 号源扣减与释放）。
   **助手交互逻辑未动**——推荐排序、按医生去重、口播文案、候选卡片数量、`SET_PERIOD` 漏斗全部原样。
-  分期方式与 DEC-021 那次一致。
+  分期方式与 DEC-033 那次一致。
 - 背景（需求侧三件事）：
   ① 两家医院都要有 心内科 / 神经内科 / 内分泌科 / 骨科 / 呼吸内科 / 消化内科 六个科室；
   ② 每个科室要有**两位**主任（原来只有一位——只有一位时他 3 个放号日每天都要出诊、一天还坐 2 格，
@@ -428,7 +624,7 @@
   `CareCatalogRepository.availableDates`）都按 `available=TRUE` 过滤，**一行都不用改**。
   `DEFAULT 1` 是刻意的：旧库存量行、以及测试里手工 `INSERT` 的号源都自动等价于旧模型。
   不做成 H2 计算列（计算列不可写，而写入侧要维持它）。`doctors` 表**不加列**：名额是「这一班放几个」
-  的属性，属于号源层，挂着会重犯「挂号费不能挂医生」那条错误（DEC-024 决定三同源）。
+  的属性，属于号源层，挂着会重犯「挂号费不能挂医生」那条错误（DEC-036 决定三同源）。
 - 决定五（名额按号别取 3 / 4）：`EXPERT_CAPACITY = 3`、`NORMAL_CAPACITY = 4`，与 `feeCentsFor` 同源，
   写在生成器里按 `slot_type` 映射，并在 `seed()` 末尾加一次幂等自愈（按实际预约数回填 `booked`、
   按号别修正 `capacity`、重算 `available`）。「普通号 > 专家号」这条供给侧约束**口径从「条数」改成「名额」**：
@@ -437,7 +633,7 @@
   而全院有 **12** 个科室——「全院两两不同」**数学上不可能**。改成「同一家医院内 6 个科室两两不同」
   （10 选 6，绰绰有余），跨医院允许撞同一天。`d001` 仍锁死 `{1,3,5}`（含周三＝体检冲突演示、
   含周五＝`laterDay()` 的三天窗口），这两条不能动。
-- 决定七（**废止**「下午不排专家号」）：DEC-023 决定二/六、DEC-024 决定三建立的
+- 决定七（**废止**「下午不排专家号」）：DEC-035 决定二/六、DEC-036 决定三建立的
   「下午一律不排专家号」被本次需求直接推翻——14:00 现在**就是**专家格。
   连带处置：`MockAppointmentTool.requireAfternoonIsNotExpert()` 及其两处调用（`submit` / `reschedule`）
   **删除**；上一轮新增的 `AfternoonExpertGuardTests`（4 例）**整份删除**。
@@ -452,13 +648,13 @@
   - 场景重置：`DemoScenarioService` 由 `SET available=TRUE` 改成 `SET booked=0, available=TRUE`
     —— 不改这一句就是个真 bug（`booked` 留着，重置后再约就变 2、3……不变式当场破掉）。
 - 明确不做（阶段边界）：
-  1. **不动助手交互**：推荐排序、按医生去重（DEC-024 决定一）、口播文案、候选卡片数量、`SET_PERIOD` 漏斗。
+  1. **不动助手交互**：推荐排序、按医生去重（DEC-036 决定一）、口播文案、候选卡片数量、`SET_PERIOD` 漏斗。
   2. **不改接口字段**：`Slot` / `AppointmentView` / `DateWindow.SlotOption` 都**不加** `capacity` / `remaining`
      ⇒ `INTERFACE_CHANGES.md` 本次不需要登记。名额要露出给前端是阶段 2 的事。
   3. **不改冲突规则**（仍是「患者 + 日期 + 医院 + 科室 + 时段」，在 `checkDuplicate` 里），
      **也不改**照护端 `hasUpcoming()`「名下只保留一个进行中预约」。
-  4. **不建 `doctor_schedules` 排班表**、不把出诊日 / 名额落库到医生行（DEC-022 决定七不变）。
-  5. **不动 `appointments` 表结构**（DEC-025 的幂等键继续够用；`appointments` 对 `slot_id`
+  4. **不建 `doctor_schedules` 排班表**、不把出诊日 / 名额落库到医生行（DEC-034 决定七不变）。
+  5. **不动 `appointments` 表结构**（DEC-037 的幂等键继续够用；`appointments` 对 `slot_id`
      本来就没有唯一约束，所以多条预约指向同一条号源在物理上没问题）。
   6. 不修「`data.sql` 里回填 `clinic_location_id` 的 UPDATE 跑在生成器之前，新号源当次拿不到诊室」
      这条既有行为（要修得动生成器的 INSERT，超出「只改数据层」）。
@@ -501,7 +697,7 @@
   目录里没有或有两条就落空——**补别名不放宽科室校验**。新增 `CatalogEntityResolverTests`（9 例）钉住。
   详见 `PROGRESS.md` 同日条目。
 
-## DEC-027 推荐话术与时段可见性：自动推荐轮说「推荐」、报当天另一半、推荐轮按钮 ≤3
+## DEC-039 推荐话术与时段可见性：自动推荐轮说「推荐」、报当天另一半、推荐轮按钮 ≤3
 
 - 日期：2026-09-14。
 - 状态：已采用，**已实施**（`FollowupAgentService` + `DoctorIntentTests`）。收口
@@ -522,12 +718,12 @@
   - 双候选：`我先推荐王建华副主任医师（专家号），09:00；另一位是陈凤兰主治医师（普通号），10:30。〈另一半提示〉您想约哪位？`
   - 单候选：`我推荐张建国主任医师（专家号），14:00。〈另一半提示〉这个时间可以吗？`
   - **不报排序依据**（「因为您要专家号」）：老人要的是结论，不是算法说明，且依据在 R2 的六条里常常不止一条。
-- 决定三（R8 报的是**当天的另一半**，不是「这个半天有几个」）：DEC-026 之后一天 4 格、每格 1 位医生，
+- 决定三（R8 报的是**当天的另一半**，不是「这个半天有几个」）：DEC-038 之后一天 4 格、每格 1 位医生，
   未点名时半天的候选数（≤2）**恒等于**该半天的号源数——「上午一共有 2 个可约时段」只是把老人已经看到的
   两个又数一遍，**没有信息量**；真正被藏起来的是**另一个半天**。新增 `dayScopeHint()` 报另一半的条数：
   `今天下午还有2个时段。` 条数**按 `state.date` 现数、不写死**（排班哪天改成半天 3 格，这句自动变得有意义）；
   按日期过滤不是多余的——`alternatives` 在「这一天没号、查附近日期」的分支里装的是跨日期号源。
-  本决定**取代 DEC-024 决定二**的「这位医生还有其它可预约时段」：现行排法每位医生每天只有 1 格，
+  本决定**取代 DEC-036 决定二**的「这位医生还有其它可预约时段」：现行排法每位医生每天只有 1 格，
   那句话已不可能触发（`otherSlotHint()` 随之删除）。
   **只在未点名医生时加**：点名之后 `alternatives` 已被 `resolveDoctorWish` 收缩到这位医生名下，
   此刻数「当天还有几个时段」数出来的是**别的医生**的号，与老人刚说出口的诉求正好相反。
@@ -558,9 +754,9 @@
     定日期那一步查出来后缓存的）与 `aRequestedTimeKeepsTheOldWordingAndStillReportsTheOtherHalfDay`
     （「下午3点的号」→ 不说「推荐」，落到最接近的 15:30）。
   - 文档：`PROGRESS.md`、`docs/user-manual.md`（4. 选时间一段的按钮名与话术）、方案文档状态行改为「已实施」。
-- 待后续：沿用 DEC-026 清单的 ① 名额露给前端、② 照护端口径差、③ `FollowupAgentService` 巨类。
+- 待后续：沿用 DEC-038 清单的 ① 名额露给前端、② 照护端口径差、③ `FollowupAgentService` 巨类。
 
-## DEC-028 模型链路与规则链路对齐：日期清单与半天档位由 Java 出、口语时间在模型链路补槽、钟点口径与备忘共用
+## DEC-040 模型链路与规则链路对齐：日期清单与半天档位由 Java 出、口语时间在模型链路补槽、钟点口径与备忘共用
 
 - 日期：2026-09-14。
 - 状态：已采用，**已实施**。收口 `docs/proposals/模型链路与规则链路对齐方案.md` 的 A1 / A2 / A3 / B / C。
@@ -628,12 +824,12 @@
     与 `AgentRuntimeSpokenTimeFallbackTests`（4 例，纯 JUnit + 假规划器，**现有测试里第一条走模型链路的用例**）。
     全量 **415 例 0 失败**（基线 404 + 新增 11）。
   - 文档：`PROGRESS.md`、`docs/user-manual.md`（选日期一段补「也可以直接点日期」）、方案文档状态行改为「已实施」。
-- 待后续：① 3.3 那条兜底话术错位；② 沿用 DEC-026 清单的名额露前端、照护端口径差、巨类重构；
+- 待后续：① 3.3 那条兜底话术错位；② 沿用 DEC-038 清单的名额露前端、照护端口径差、巨类重构；
   ③ 三处过时措辞（`docs/proposals/选医交互方案（阶段2）.md` 状态行、`INTERFACE_CHANGES.md` 与
   `CareBookingServiceTests` 注释里的「上午 09:00 天然两条」、`docs/13` 的「01 号医生的出诊日」）。
   → **③ 已于 2026-09-15 收掉**（并连带 `FollowupAgentService#slotLabel` 的同源注释）；①② 仍挂着。
 
-## DEC-029 医院记忆由 Java 说出、也由 Java 认；科室候选一次摆全 6 个
+## DEC-041 医院记忆由 Java 说出、也由 Java 认；科室候选一次摆全 6 个
 
 - 日期：2026-09-14。
 - 状态：已采用，**已实施**。
@@ -692,7 +888,7 @@
     「没有记忆时一个字不多说」「没有记忆时仍要问名字」「科室候选 6 个且不含我自己说科室」）。
   - 文档：`PROGRESS.md`、`docs/user-manual.md`（快捷回答一段补科室一次摆全）。
 
-## DEC-030 「照旧」也算答了；同一时刻的冲突不再分医院科室
+## DEC-042 「照旧」也算答了；同一时刻的冲突不再分医院科室
 
 - 日期：2026-09-14。
 - 状态：已采用，**已实施**。
@@ -708,7 +904,7 @@
   没有记忆时「和上次一样」照样无处可落，回落成问名字（`sameAsLastTimeWithoutMemoryStillAsksForTheName`）。
 - 决定二（**同一时刻的冲突口径收成「患者 + 日期 + 时刻」**）：`checkDuplicate` 的检索不再带医院和
   科室（`myAppointmentTool.search(id, userId, date, null, null)`），只按日期取回这位老人的全部已确认
-  预约，再按时刻相等过滤。**这是本次唯一的产品规则变更**，它推翻了 DEC-026「明确不做 3」里的
+  预约，再按时刻相等过滤。**这是本次唯一的产品规则变更**，它推翻了 DEC-038「明确不做 3」里的
   「不改冲突规则：仍是患者 + 日期 + 医院 + 科室 + 时段」——那句只是当时划的阶段边界，不是对口径的论证。
   理由：老人只有一个身子，同一时刻不可能同时出现在两个科室；原来带着医院和科室，等于只在
   「同一个科室里重复约」时才拦得住，换个科室（甚至换家医院）同一时刻照样放行。
@@ -723,7 +919,7 @@
   三个，**没有新增「仍保留这个时间」**：同一时刻看两个科室不存在「保留」的合理场景，
   日程冲突那条（`user_schedules`）才有。
 - 明确不做：不加照护端检查（见决定二）；不在 `MockAppointmentTool.submit` 里再判一次冲突
-  （DEC-025 已定「冲突只有 `checkDuplicate` 一处实现」，双写会漂）；不动排班 / 名额 / 号源模型；
+  （DEC-037 已定「冲突只有 `checkDuplicate` 一处实现」，双写会漂）；不动排班 / 名额 / 号源模型；
   不动 `modelSuggestedReplies`。
 - 影响面：
   - 生产：`FollowupAgentService`（新增 `SAME_AS_BEFORE` 与 `confirmsRememberedHospital`；
@@ -739,7 +935,7 @@
     的断言随话术改成 `"已经有一条"`。
   - 文档：`PROGRESS.md`。
 
-## DEC-031 「这个时段约不上」在号源锁定时就说，不再等陪同、出行和通知都问完
+## DEC-043 「这个时段约不上」在号源锁定时就说，不再等陪同、出行和通知都问完
 
 - 日期：2026-09-15。
 - 状态：已采用，**已实施**；前后端接口零变化。
@@ -788,7 +984,7 @@
     （`appointment.checkDuplicate` 直接调 `myAppointmentTool.search`，本来就不记）。两条只读记录各自成立
     ——一条是「选定时查过」，一条是「提交前查过」，审计上反而更完整；而 `SELECT_SLOT` 本来就会触发
     `invalidate`，也没有合适的字段去标记它。
-  - 不在 `MockAppointmentTool.submit` 里再判一次（DEC-025 / DEC-030 已定「冲突只有 `checkDuplicate` 一处实现」）。
+  - 不在 `MockAppointmentTool.submit` 里再判一次（DEC-037 / DEC-042 已定「冲突只有 `checkDuplicate` 一处实现」）。
   - 不动 `modelSuggestedReplies`、不动 `ready()`、不动号源与名额模型、不动照护端。
 - 影响面：
   - 生产：`FollowupAgentService`（`selectSlot` 末尾加预检；新增 `slotBlocked` / `slotConflicts` /
@@ -808,7 +1004,7 @@
     **断言一字未改**。
   - 文档：`PROGRESS.md`。
 
-## DEC-032 业务时区与「今天/现在」收成一份 BusinessClock；「这半天没号」必须说出真实理由
+## DEC-044 业务时区与「今天/现在」收成一份 BusinessClock；「这半天没号」必须说出真实理由
 
 - 背景（演示里真实出过一次，用户当场质疑）：老人问「9月15日」（就是当天），助手答「只有下午有空位，
   具体是 15 点 30 分」；追问「啊上午没有吗」，答的是「**上午已经约满了**」。可数据库里当天上午那两格
@@ -864,14 +1060,14 @@
   「这个时段您已经预约过了」。
 - **数据库结构未改、前后端接口零变化** ⇒ `INTERFACE_CHANGES.md` 无需登记。
 
-## DEC-033 收掉 DEC-026 后遗留的过时措辞（纯文档/注释，零行为变化）
+## DEC-045 收掉 DEC-038 后遗留的过时措辞（纯文档/注释，零行为变化）
 
 - 日期：2026-09-15。
 - 状态：已采用，**已实施**。
-- 背景：DEC-026 把排班改成「一天 4 格、每格 1 位医生」之后，全仓仍有若干处文字沿用了
-  DEC-022 时期的前提（「上午 09:00 天然两条」「01 号医生的出诊日」），与现状不符，
+- 背景：DEC-038 把排班改成「一天 4 格、每格 1 位医生」之后，全仓仍有若干处文字沿用了
+  DEC-034 时期的前提（「上午 09:00 天然两条」「01 号医生的出诊日」），与现状不符，
   会误导后来人——尤其是把「同一时刻有多条号源」当成常态。
-- 决定：把这些**描述现状**的文字按 DEC-026 重述；**历史决策记录不改写**，只在原条目
+- 决定：把这些**描述现状**的文字按 DEC-038 重述；**历史决策记录不改写**，只在原条目
   末尾加一行「已于某日收掉」的指向。
 - 收掉的位置：
   - `backend/.../FollowupAgentService#slotLabel` 注释（生产代码里的同源措辞）；
@@ -883,8 +1079,8 @@
     已知瑕疵行与末尾排班口径段落重述）；
   - `docs/proposals/推荐标记与时段可见性方案.md`、`docs/proposals/模型链路与规则链路对齐方案.md`
     的「待办」条目改为已收掉。
-- **刻意不改**：`DECISIONS.md` DEC-022（`:296`/`:299`/`:331`/`:473`）与 `PROGRESS.md:339`/`:350`
-  是当时的事实记录，改写会让决策史失真；`docs/06-mock-data-design.md:57` 本来就已按 DEC-026
+- **刻意不改**：`DECISIONS.md` DEC-034（`:296`/`:299`/`:331`/`:473`）与 `PROGRESS.md:339`/`:350`
+  是当时的事实记录，改写会让决策史失真；`docs/06-mock-data-design.md:57` 本来就已按 DEC-038
   写成「重新成立」，无需动。
 - 影响：**零代码行为变化**，接口与数据库均未动 ⇒ `INTERFACE_CHANGES.md` 无需新登记。
 - 说明：本文原文列的「三处」在核对时扩到 7 处（多出生产代码注释、两份方案文档的待办条目、

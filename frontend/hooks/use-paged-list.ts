@@ -7,11 +7,19 @@ export interface PagedList<T> {
   rows: T[];
   /** 第一页是否已经回来：用来区分“还在转圈”和“真的没有”。 */
   loaded: boolean;
+  /**
+   * 第一页没读到时的说法，'' 表示没失败。
+   *
+   * <p>各页的空态判断是 `loaded && rows.length === 0`——读取失败时这两个条件也成立，
+   * 于是后端没起的时候，页面会理直气壮地说「还没有健康记录，跟助手说一句…」。
+   * 所以失败得单独有一态，让页面说「读不到」而不是「一条都没有」。
+   */
+  error: string;
   /** 后面还有没有更早的。 */
   hasMore: boolean;
   loading: boolean;
   loadMore: () => void;
-  /** 增删改之后重新拉：拉回“已经翻到的那么多条”，不把列表缩回第一页。 */
+  /** 增删改之后重新拉：拉回“已经翻到的那么多条”，不把列表缩回第一页。失败后也用它重试。 */
   reload: () => void;
 }
 
@@ -28,6 +36,7 @@ export function usePagedList<T>(fetchPage: (offset: number, limit: number) => Pr
                                 pageSize: number): PagedList<T> {
   const [rows, setRows] = useState<T[]>([]);
   const [loaded, setLoaded] = useState(false);
+  const [error, setError] = useState('');
   const [hasMore, setHasMore] = useState(false);
   const [loading, setLoading] = useState(false);
   // 取数函数每次渲染都是新的（调用处写的是箭头函数），放依赖里会让 effect 反复重跑，
@@ -47,9 +56,13 @@ export function usePagedList<T>(fetchPage: (offset: number, limit: number) => Pr
       setRows(previous => (offset === 0 ? batch : [...previous, ...batch]));
       // 拿回来是满的一页，就当作后面还有；下次翻到底会拉回空的，那时再收尾
       setHasMore(batch.length >= pageSize);
+      setError('');   // 重试成功要把上一次的失败说法收掉
     } catch {
       // 拉不到就当作到底了：宁可让老人看到“没有更早的了”，也别让它一直转圈
       setHasMore(false);
+      // 第一页读不到是另一回事：那不是「翻到底了」，是「压根没读到」。
+      // 后面几页读不到不报：列表里已经有东西了，报出来也只是打断；空态判断只看第一页。
+      if (offset === 0) setError('读取失败，请检查网络后重试。');
     } finally {
       busyRef.current = false;
       setLoading(false);
@@ -65,5 +78,5 @@ export function usePagedList<T>(fetchPage: (offset: number, limit: number) => Pr
     void load(0, Math.max(pageSize, rows.length));
   }, [load, pageSize, rows.length]);
 
-  return { rows, loaded, hasMore, loading, loadMore: () => { void load(rows.length, pageSize); }, reload };
+  return { rows, loaded, error, hasMore, loading, loadMore: () => { void load(rows.length, pageSize); }, reload };
 }

@@ -27,13 +27,16 @@ public class H2MyAppointmentTool implements MyAppointmentTool {
         String hospitalLike = blank(hospital) ? null : "%" + hospital.trim() + "%";
         String departmentLike = blank(department) ? null : "%" + department.trim() + "%";
         List<AppointmentSummary> rows = jdbc.query("""
-                SELECT a.id,s.hospital_name,s.department,s.appointment_date,s.appointment_time,
+                SELECT a.id,h.name,d.name,s.appointment_date,s.appointment_time,
                        a.status,a.departure_time,a.transport,a.reminder_status,a.family_status,a.materials
-                FROM appointments a JOIN appointment_slots s ON s.id=a.slot_id
+                FROM appointments a
+                JOIN appointment_slots s ON s.id=a.slot_id
+                JOIN hospitals h ON h.id=s.hospital
+                JOIN departments d ON d.id=s.department
                 WHERE a.user_id=? AND a.status='CONFIRMED'
                   AND (? IS NULL OR s.appointment_date=?)
-                  AND (? IS NULL OR s.hospital_name LIKE ?)
-                  AND (? IS NULL OR s.department LIKE ?)
+                  AND (? IS NULL OR h.name LIKE ?)
+                  AND (? IS NULL OR d.name LIKE ?)
                 ORDER BY s.appointment_date,s.appointment_time
                 """, (rs, row) -> new AppointmentSummary(
                 rs.getString(1), rs.getString(2), rs.getString(3),

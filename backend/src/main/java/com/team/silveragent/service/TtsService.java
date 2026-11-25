@@ -57,15 +57,6 @@ public class TtsService {
     }
 
     /**
-     * 将文本合成为语音。
-     * @param text 要合成的文本（中文为主）
-     * @return 音频 URL，失败返回 null
-     */
-    public String synthesize(String text) {
-        return synthesize(text, null, null);
-    }
-
-    /**
      * 将文本合成为语音，支持覆盖音色和语速。
      * @param text  要合成的文本
      * @param voice 音色名，null 则用默认配置

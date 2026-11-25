@@ -1,9 +1,10 @@
 package com.team.silveragent.application.care;
 
-import com.team.silveragent.application.BusinessClock;
+import com.team.silveragent.application.time.BusinessClock;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
+import java.sql.Time;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
@@ -74,7 +75,7 @@ public class CareCatalogRepository {
     }
 
     /**
-     * 从 from 起仍可预约的日期，去重、最多 limit 个（「查看可预约日期」那排按钮用它）。
+     * 从 {@code from} 起仍可预约的日期，去重、最多 limit 个（「查看可预约日期」那排按钮用它）。
      *
      * <p>「当天已过的时段」在这里一并滤掉，判据与号源查询同一份（{@link BusinessClock}）。
      * 以前这一步交给 H2 的 {@code CURRENT_DATE / CURRENT_TIME}，等于把业务口径挂在容器时区上：
@@ -83,9 +84,10 @@ public class CareCatalogRepository {
     public List<LocalDate> availableDates(String hospitalId, String department, LocalDate from, int limit) {
         if (hospitalId == null || department == null || from == null) return List.of();
         return jdbc.query("""
-                SELECT DISTINCT appointment_date, appointment_time FROM appointment_slots
-                WHERE hospital_id=? AND department=? AND appointment_date>=? AND available=TRUE
-                ORDER BY appointment_date, appointment_time
+                SELECT DISTINCT s.appointment_date, s.appointment_time FROM appointment_slots s
+                JOIN departments d ON d.id=s.department
+                WHERE s.hospital=? AND d.name=? AND s.appointment_date>=? AND s.available=TRUE
+                ORDER BY s.appointment_date, s.appointment_time
                 """, (rs, row) -> LocalDateTime.of(rs.getDate(1).toLocalDate(), rs.getTime(2).toLocalTime()),
                 hospitalId, department, java.sql.Date.valueOf(from))
                 .stream()
@@ -110,7 +112,7 @@ public class CareCatalogRepository {
      * 本方法供用户资料页展示家属，电话在 Java 层脱敏。
      */
     private List<com.team.silveragent.domain.model.ToolModels.Contact> familyMembers(String userId) {
-        return jdbc.query("SELECT id,name,relationship,phone FROM family_contacts WHERE user_id=? ORDER BY id",
+        return jdbc.query("SELECT fc.id,u.name,COALESCE((SELECT MIN(cr.relationship) FROM care_relations cr WHERE cr.caregiver_id=fc.contact AND cr.elder_user_id=fc.\"USER\"),'家属'),u.phone FROM family_contacts fc JOIN users u ON u.id=fc.contact WHERE fc.\"USER\"=? ORDER BY fc.id",
                 (rs, row) -> new com.team.silveragent.domain.model.ToolModels.Contact(rs.getString(1),
                         rs.getString(2), rs.getString(3), maskPhone(rs.getString(4))), userId);
     }
@@ -121,7 +123,7 @@ public class CareCatalogRepository {
     }
 
     public List<com.team.silveragent.domain.model.ToolModels.Contact> contacts(String userId) {
-        return jdbc.query("SELECT id,name,relationship,phone FROM family_contacts WHERE user_id=? ORDER BY id",
+        return jdbc.query("SELECT fc.id,u.name,COALESCE((SELECT MIN(cr.relationship) FROM care_relations cr WHERE cr.caregiver_id=fc.contact AND cr.elder_user_id=fc.\"USER\"),'家属'),u.phone FROM family_contacts fc JOIN users u ON u.id=fc.contact WHERE fc.\"USER\"=? ORDER BY fc.id",
                 (rs, row) -> new com.team.silveragent.domain.model.ToolModels.Contact(rs.getString(1), rs.getString(2), rs.getString(3), "已隐藏"), userId);
     }
 

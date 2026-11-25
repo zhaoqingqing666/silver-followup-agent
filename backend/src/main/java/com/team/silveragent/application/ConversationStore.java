@@ -299,9 +299,29 @@ public class ConversationStore {
             Contact contact, List<String> materials, String pendingAction, String appointmentId,
             String pendingAppointmentId, ConversationState.Stage interruptedStage,
             String interruptedPendingAction, String interruptedPendingAppointmentId,
-            String sideTask, String returnPolicy,
+            String sideTask,
             String pendingEntityType, String pendingEntityId, String pendingEntityName, String pendingEntityRaw,
-            String confirmationId, String originalAppointmentId,
+            String confirmationId, String confirmationKind, List<String> confirmationTargetIds,
+            String originalAppointmentId,
+            // 备忘确认卡要写的那条草稿。它不在授权三样里，但同样是"签发那一刻定下的内容"：
+            // 不进快照的话，重启之后这张卡就只能对着一个 null 正文执行，或者按会话里别的什么凑
+            // 一段出来——两条路都是"写进去一条他从来没在卡上看到过的备忘"。
+            // 缺了这一段（更早版本写下的快照）由 ConfirmationService 判成凭据不可信，整份作废。
+            String pendingMemoText, List<LocalDateTime> pendingMemoAts, String pendingMemoRepeat,
+            List<LocalDate> pendingMemoDays, ConversationState.Stage memoReturnStage, boolean memoNeedsApproval,
+            // 健康记录确认卡要写的那条数值。与备忘草稿同一条理由：卡上写着「血压 100 mmHg · 9月14日
+            // 21:30」，写进库的就必须是这一条、这一刻。不进快照的话，重启之后只剩一个项目名和一个数值
+            // 还留在会话里，时间只能拿确认那一刻顶替——卡上写的时间和记录里的时间就是两回事了。
+            // 缺了这一段（更早版本写下的快照）由 ConfirmationService 的 payloadIntact 判成凭据不可信。
+            String pendingRecordItem, java.math.BigDecimal pendingRecordValueNum,
+            String pendingRecordValueText, String pendingRecordUnit,
+            String pendingRecordRaw, LocalDateTime pendingRecordAt,
+            // 一句话里报的其余几条（“我的体温是36.5，心率80”里，36.5 那条之后的部分）。
+            // 与上面几样同一条理由：卡上列着两行，写进库的就必须是两条。不进快照的话，
+            // 重启之后那张两行的卡只会写下第一行，第二行在他点头之后凭空消失。
+            // 缺了这一段（更早版本写下的快照）由 payloadIntact 判成凭据不可信。
+            List<ConversationState.PendingRecord> pendingRecordRest,
+            String recordReturnAction, ConversationState.Stage recordReturnStage,
             boolean materialReminderDone, boolean departureReminderDone,
             boolean notificationDone, boolean scheduleChecked, boolean conflictKept
     ) {
@@ -316,9 +336,17 @@ public class ConversationStore {
                     state.contact, state.materials, state.pendingAction, state.appointmentId,
                     state.pendingAppointmentId, state.interruptedStage,
                     state.interruptedPendingAction, state.interruptedPendingAppointmentId,
-                    state.sideTask, state.returnPolicy,
+                    state.sideTask,
                     state.pendingEntityType, state.pendingEntityId, state.pendingEntityName, state.pendingEntityRaw,
-                    state.confirmationId, state.originalAppointmentId,
+                    state.confirmationId, state.confirmationKind, state.confirmationTargetIds,
+                    state.originalAppointmentId,
+                    state.pendingMemoText, state.pendingMemoAts, state.pendingMemoRepeat,
+                    state.pendingMemoDays, state.memoReturnStage, state.memoNeedsApproval,
+                    state.pendingRecordItem, state.pendingRecordValueNum,
+                    state.pendingRecordValueText, state.pendingRecordUnit,
+                    state.pendingRecordRaw, state.pendingRecordAt,
+                    state.pendingRecordRest,
+                    state.recordReturnAction, state.recordReturnStage,
                     state.materialReminderDone, state.departureReminderDone,
                     state.notificationDone, state.scheduleChecked, state.conflictKept);
         }
@@ -359,13 +387,38 @@ public class ConversationStore {
             state.interruptedPendingAction = interruptedPendingAction;
             state.interruptedPendingAppointmentId = interruptedPendingAppointmentId;
             state.sideTask = sideTask;
-            state.returnPolicy = returnPolicy;
             state.pendingEntityType = pendingEntityType;
             state.pendingEntityId = pendingEntityId;
             state.pendingEntityName = pendingEntityName;
             state.pendingEntityRaw = pendingEntityRaw;
             state.confirmationId = confirmationId;
+            // 授权范围与目标集合随凭据一起恢复。旧快照没有这两个字段（缺省 null），
+            // 那正是「这份凭据不可信」的标记——由 ConfirmationService 判成无效、要求重新确认，
+            // 而不是在这里猜一个默认值出来。刻意不做任何回填。
+            state.confirmationKind = confirmationKind;
+            state.confirmationTargetIds = confirmationTargetIds;
             state.originalAppointmentId = originalAppointmentId;
+            // 备忘草稿同理：原样恢复、不回填。旧快照读出来是 null，由 ConfirmationService
+            // 的 payloadIntact 判成凭据不可信（绝不拿一个 null 正文去写库）。
+            state.pendingMemoText = pendingMemoText;
+            state.pendingMemoAts = pendingMemoAts;
+            state.pendingMemoRepeat = pendingMemoRepeat;
+            state.pendingMemoDays = pendingMemoDays;
+            state.memoReturnStage = memoReturnStage;
+            state.memoNeedsApproval = memoNeedsApproval;
+            // 健康数值草稿同理：原样恢复、不回填。旧快照读出来没有这几项（null），
+            // 由 payloadIntact 判成凭据不可信，而不是拿确认那一刻的时间替他把这一条补圆。
+            state.pendingRecordItem = pendingRecordItem;
+            state.pendingRecordValueNum = pendingRecordValueNum;
+            state.pendingRecordValueText = pendingRecordValueText;
+            state.pendingRecordUnit = pendingRecordUnit;
+            state.pendingRecordRaw = pendingRecordRaw;
+            state.pendingRecordAt = pendingRecordAt;
+            // 原样恢复、不回填：旧快照读出来是 null，由 payloadIntact 判成凭据不可信。
+            // 这里绝不能把 null 换成空列表——那就成了“卡上只有一行”，而他看到的是两行。
+            state.pendingRecordRest = pendingRecordRest;
+            state.recordReturnAction = recordReturnAction;
+            state.recordReturnStage = recordReturnStage;
             state.materialReminderDone = materialReminderDone;
             state.departureReminderDone = departureReminderDone;
             state.notificationDone = notificationDone;

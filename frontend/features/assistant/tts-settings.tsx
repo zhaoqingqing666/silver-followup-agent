@@ -6,7 +6,6 @@ import { getVoices } from '@/lib/asr-tts-api';
 import {
   DEFAULT_TTS_SPEED, DEFAULT_TTS_VOICE, loadTtsSettings, saveTtsSettings, speakText, stopPlayback,
 } from '@/lib/tts-player';
-import type { VoicePreference } from '@/types/domain';
 
 /** 语速滑条的取值范围与步长：0.5 太慢、2.0 太快，都是实测能听清的边界。 */
 const RATE_MIN = 0.5;
@@ -20,17 +19,21 @@ const clampRate = (value: number) =>
   Math.round(Math.min(RATE_MAX, Math.max(RATE_MIN, value)) * 10) / 10;
 
 /**
- * 助手页的朗读设置：音色与语速。
+ * 「我的」页的朗读设置：音色与语速。
+ *
+ * 只收 speechRate 一个数字，不收整个 VoicePreference：这块面板本来就只关心语速，
+ * 而「自动朗读」开关是同一张卡片里另一行的事（见 profile-view.tsx）。
+ * 偏好本身由 app/page.tsx 持有并保存，助手页、事项页、地图页用的是同一份，不在这里另存一份。
  *
  * 两个设置存在两处，是有意为之：
- * - 语速的权威来源是后端偏好（每条朗读调用都带 voicePreference.speechRate），
+ * - 语速的权威来源是后端偏好（每条朗读调用都带这份 speechRate），
  *   所以拖动滑条要真的写回后端，否则「改完没效果」。
  * - 音色只有本地一份（后端偏好表没有这个字段），只影响云端合成，浏览器自带朗读用不上。
  *
  * 老人只应该看到一个旋钮，不存在「本地改一个、后端改一个」的选择。
  */
-export function TtsSettings({ voicePreference, busy, error, onChange }: {
-  voicePreference: VoicePreference;
+export function TtsSettings({ speechRate, busy, error, onChange }: {
+  speechRate: number;
   /** 保存中：滑条和按钮一起禁用，避免连拖出多个并发请求互相覆盖 */
   busy: boolean;
   error: string;
@@ -46,7 +49,7 @@ export function TtsSettings({ voicePreference, busy, error, onChange }: {
    * 清掉临时值就是「滑条老老实实退回真实值」，不需要额外的补偿逻辑。
    */
   const [draggingRate, setDraggingRate] = useState<number | null>(null);
-  const rate = draggingRate ?? voicePreference.speechRate;
+  const rate = draggingRate ?? speechRate;
 
   useEffect(() => {
     let cancelled = false;
@@ -70,7 +73,7 @@ export function TtsSettings({ voicePreference, busy, error, onChange }: {
     setDraggingRate(null);
     // 本地兜底 + 写回后端偏好，两处一起更新，避免只改一半。
     saveTtsSettings({ speed: rounded });
-    if (rounded !== voicePreference.speechRate) onChange({ speechRate: rounded });
+    if (rounded !== speechRate) onChange({ speechRate: rounded });
   };
 
   const pickVoice = (id: string) => {
@@ -87,18 +90,20 @@ export function TtsSettings({ voicePreference, busy, error, onChange }: {
     pickVoice(voices[0]?.id ?? DEFAULT_TTS_VOICE);
     setDraggingRate(DEFAULT_TTS_SPEED);
     saveTtsSettings({ speed: DEFAULT_TTS_SPEED });
-    if (DEFAULT_TTS_SPEED !== voicePreference.speechRate) onChange({ speechRate: DEFAULT_TTS_SPEED });
+    if (DEFAULT_TTS_SPEED !== speechRate) onChange({ speechRate: DEFAULT_TTS_SPEED });
   };
 
+  // 外观跟「我的」页其他几块卡片一致（rounded-3xl + 行高 min-h-18 + 分隔线），
+  // 折起来时它就是一行带箭头的设置项，展开才摊开滑条。
   return <details open={open} onToggle={event => setOpen((event.currentTarget as HTMLDetailsElement).open)}
-    className="rounded-2xl border border-[#e6bc8c] bg-white px-4 py-3 shadow-sm">
-    <summary className="flex cursor-pointer list-none items-center gap-2 text-base font-bold text-[#6c3d24]">
+    className="overflow-hidden rounded-3xl border bg-card shadow-sm">
+    <summary className="flex min-h-18 cursor-pointer list-none items-center gap-2 px-5 text-base font-bold text-[#6c3d24]">
       <Volume2 className="size-5 text-primary" aria-hidden="true" />朗读设置
       <span className="ml-auto rounded-full bg-[#fff0dc] px-2.5 py-0.5 text-sm font-bold text-primary">{rate.toFixed(1)}×</span>
       <ChevronDown className={`size-4 transition ${open ? 'rotate-180' : ''}`} aria-hidden="true" />
     </summary>
 
-    <div className="mt-3 space-y-4">
+    <div className="space-y-4 border-t px-5 py-4">
       <div>
         <label htmlFor="tts-voice" className="text-sm font-bold text-[#6c3d24]">朗读音色</label>
         {voices.length > 0

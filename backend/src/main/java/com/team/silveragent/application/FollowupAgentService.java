@@ -1,5 +1,6 @@
 package com.team.silveragent.application;
 
+import com.team.silveragent.application.ConversationState.PendingRecord;
 import com.team.silveragent.application.care.CareBookingService;
 import com.team.silveragent.application.care.CareCatalogRepository;
 import com.team.silveragent.application.care.CareService;
@@ -11,14 +12,18 @@ import com.team.silveragent.application.memo.MemoCommandParser;
 import com.team.silveragent.application.memo.MemoParser;
 import com.team.silveragent.application.memo.MemoStore;
 import com.team.silveragent.application.longterm.MemoryStore;
+import com.team.silveragent.application.profile.ProfileQueryService;
+import com.team.silveragent.application.time.BusinessClock;
 import com.team.silveragent.application.travel.TravelGuideService;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.team.silveragent.agent.AgentContext;
 import com.team.silveragent.agent.AgentRole;
 import com.team.silveragent.agent.AnswerGenerator;
 import com.team.silveragent.agent.ExtractedFacts;
 import com.team.silveragent.agent.ReplyContext;
+import com.team.silveragent.agent.planning.HospitalRecommendation;
 import com.team.silveragent.agent.planning.PlannerActionType;
 import com.team.silveragent.agent.planning.PlannerToolCall;
 import com.team.silveragent.domain.model.AgentTurnResponse;
@@ -27,6 +32,7 @@ import com.team.silveragent.domain.model.AgentTurnResponse.PlanCard;
 import com.team.silveragent.domain.model.AgentTurnResponse.QuickReply;
 import com.team.silveragent.domain.model.AgentTurnResponse.ResultCard;
 import com.team.silveragent.domain.model.AgentTurnResponse.TaskProgress;
+import com.team.silveragent.domain.model.AgentTurnResponse.ToolTrace;
 import com.team.silveragent.domain.model.AgentTurnResponse.UiDirective;
 import com.team.silveragent.domain.model.ConversationHistoryResponse;
 import com.team.silveragent.domain.model.ConversationSummary;
@@ -81,14 +87,37 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 @Service
-public class FollowupAgentService {
-    /** 模型对取消对象的结构化选择；valid=false 表示工具参数不完整，绝不回退猜测用户原话。 */
+public class FollowupAgentService extends ConfirmationSupport {
+    /**
+     * 模型对取消对象的结构化选择；valid=false 表示工具参数不完整，绝不回退猜测用户原话。
+     *
+     * <p>{@code rejection} 是那份参数被契约判罚时的第一条判罚，带过来是为了说清「缺的是什么」：
+     * 缺参数（{@code MISSING_INFO}）和不唯一（{@code NEEDS_CLARIFICATION}）都是让老人再选一次，
+     * 但对老人说的话和系统里的下一步不是一回事。
+     */
     private record CancellationSelection(boolean valid, String scope, LocalDate date, String direction,
                                          LocalTime time, String period, String position,
-                                         String hospital, String department) {
+                                         String hospital, String department,
+                                         ToolContract.Rejection rejection) {
         boolean batch() { return "ALL".equals(scope) || "DATE_RANGE".equals(scope); }
     }
+
+    /**
+     * 取消支线走完一步之后：给老人看的那份响应，加上这一步到底是什么结果。
+     *
+     * <p>结果类型不能靠读中文反推——「没有符合条件的预约」「我还不能确定您想取消哪些」
+     * 「请从下面的真实预约里选一条」「确认卡已生成」在文字上都是几句话，在系统里却是四种不同的
+     * 下一步。这里顺手把类型带出来，随工具证据一起回给模型（{@code outcomeKind}）。
+     */
+    private record CancellationStep(ToolOutcome.Kind kind, AgentTurnResponse response, String detail) { }
     private static final int MAX_MODEL_TOOL_ROUNDS = 3;
+    /**
+     * 长期记忆摘要里每一摞最多摆几条。
+     *
+     * <p>比 {@code MemoryStore.digest} 的 8 条松一点，因为这里分了两摞、还带来源和时间；
+     * 但也只是松一点——摘要段的用途是让模型知道「有这么回事」，不是把整张表搬进上下文。
+     */
+    private static final int MEMORY_LIST_LIMIT = 10;
     /** 一轮最多接受几张图：再多会超过并发识别池的批次，也会让这一轮明显变慢。 */
     private static final int MAX_IMAGES_PER_TURN = 3;
     /**
@@ -98,8 +127,9 @@ public class FollowupAgentService {
     private static final int MAX_IMAGE_DATA_URL_CHARS = 4_000_000;
     /** 老人只传图、没写文字时的默认问法。 */
     private static final String DEFAULT_IMAGE_QUESTION = "请帮我看看这些图片里的药品或材料是什么、有什么要注意的。";
-    private static final DateTimeFormatter DATE_LABEL = DateTimeFormatter.ofPattern("yyyy年M月d日");
-    private static final DateTimeFormatter TIME_LABEL = DateTimeFormatter.ofPattern("HH:mm");
+    /** 执行器回读同一份日期/时间格式，不能各写一份（差一个字老人看到的就是两套说法）。 */
+    static final DateTimeFormatter DATE_LABEL = DateTimeFormatter.ofPattern("yyyy年M月d日");
+    static final DateTimeFormatter TIME_LABEL = DateTimeFormatter.ofPattern("HH:mm");
     /** 口播里的日期不带年份（R3：播报从简），「9月16日」比「2026年9月16日」更像人话。 */
     private static final DateTimeFormatter SPEECH_DATE = DateTimeFormatter.ofPattern("M月d日");
     private static final Pattern SPOKEN_DATE = Pattern.compile("(\\d{1,2})月(\\d{1,2})[日号]?");
@@ -146,6 +176,13 @@ public class FollowupAgentService {
      * 更靠后的说“改第7条”一样能办。
      */
     private static final int MEMO_BUTTON_LIMIT = 5;
+    /**
+     * 只读日程查询里最多点名几条冲突。
+     *
+     * <p>推荐一轮只说 2—3 个选择，冲突本身只是这些选择的背景，说多了就盖过了正事；
+     * 而且老人要判断的是「这个时间行不行」，不是「那天排了几件事」。
+     */
+    private static final int CONFLICT_DISPLAY_LIMIT = 3;
     /** 反问“这个数不太对”之后，老人表示“就按这个记”的说法。 */
     private static final String[] RECORD_KEEP_WORDS = {
             "就按这个", "就按它", "按这个记", "照记", "记下来", "记下", "记上",
@@ -157,6 +194,15 @@ public class FollowupAgentService {
     };
     /** 老人表示不记了。注意判定要排在“记”之前，否则“别记下来”会被当成“记下来”。 */
     private static final String[] RECORD_DROP_WORDS = {"不记", "不用记", "别记", "不要记", "算了", "取消", "不存"};
+    /**
+     * 老人说他没有数（“没量过”“记不清”）。
+     *
+     * <p>这不是“不记”：他说了这么一句关于血压的话，只是手上没有数，那就照他的话记下来。
+     * 追第二遍是难为他——他要是量过，第一遍就说出来了。
+     */
+    private static final String[] NO_NUMBER_WORDS = {
+            "没量过", "没量", "没测过", "没测", "没数", "不记得", "记不清", "不知道", "说不好"
+    };
     /** 助手指认备忘用的“第2条 / 第二条”。 */
     private static final Pattern MEMO_ORDINAL = Pattern.compile("第\\s*([0-9]{1,2}|[一二两三四五六七八九十]{1,2})\\s*条");
 
@@ -193,9 +239,19 @@ public class FollowupAgentService {
     private final VlService vlService;
     private final TurnProgress turnProgress;
     private final MemoryStore memories;
+    /** 画像与预约历史的受控只读读取；本类只负责把结果摆成话，权限与 SQL 都在它那边。 */
+    private final ProfileQueryService profileQuery;
     private final ConfirmationInteractionTool confirmationInteraction;
+    private final ClarificationInteractionTool clarificationInteraction;
+    /** 确认凭据与待确认操作登记的唯一出处；本类只负责「什么时候问老人要凭据」。 */
+    private final ConfirmationService confirmations;
     /**
-     * 业务意义上的「今天 / 现在」。所有日期与时段判断都走它，不直接写 {@code clock.today()}：
+     * 确认通过之后的业务执行：按签发时定下的 {@code Kind} 交给对应执行器。
+     * 本类只负责「什么时候问老人要凭据」，具体写库与各自的事务都在执行器与业务工具里。
+     */
+    private final ConfirmationDispatcher dispatcher;
+    /**
+     * 业务意义上的「今天 / 现在」。所有日期与时段判断都走它，不直接写 {@code LocalDate.now()}：
      * 容器镜像默认是 UTC，而 H2 的时钟又不吃 {@code TimeZone.setDefault}（详见 {@link BusinessClock}）。
      */
     private final BusinessClock clock;
@@ -238,7 +294,11 @@ public class FollowupAgentService {
             VlService vlService,
             TurnProgress turnProgress,
             MemoryStore memories,
+            ProfileQueryService profileQuery,
             ConfirmationInteractionTool confirmationInteraction,
+            ClarificationInteractionTool clarificationInteraction,
+            ConfirmationService confirmations,
+            ConfirmationDispatcher dispatcher,
             BusinessClock clock,
             @Value("${demo.user-id:user-001}") String defaultUserId) {
         this.appointmentTool = appointmentTool;
@@ -274,7 +334,11 @@ public class FollowupAgentService {
         this.vlService = vlService;
         this.turnProgress = turnProgress;
         this.memories = memories;
+        this.profileQuery = profileQuery;
         this.confirmationInteraction = confirmationInteraction;
+        this.clarificationInteraction = clarificationInteraction;
+        this.confirmations = confirmations;
+        this.dispatcher = dispatcher;
         this.clock = clock;
         this.defaultUserId = defaultUserId;
     }
@@ -476,6 +540,33 @@ public class FollowupAgentService {
                 return resolved;
             }
         }
+        // 反问“这是斤还是公斤”之后老人的回答（“是斤”“95公斤”）。同样：答的不是单位就返回 null，
+        // 这句话照常走下面的链路，不把老人卡在这一问上。
+        if ("RECORD_UNIT".equals(state.pendingAction)) {
+            AgentTurnResponse resolved = applyRecordUnit(state, value);
+            if (resolved != null) {
+                conversations.addMessage(state.id, "user", value);
+                return resolved;
+            }
+        }
+        // 反问“量出来是多少”之后老人的回答（“135”“没量过”）。同样：说的不是这件事就返回 null，
+        // 这句话照常走下面的链路，不把老人卡在这一问上。
+        if ("RECORD_VALUE".equals(state.pendingAction)) {
+            AgentTurnResponse resolved = applyRecordValue(state, value);
+            if (resolved != null) {
+                conversations.addMessage(state.id, "user", value);
+                return resolved;
+            }
+        }
+        // 反问“这是哪一项”之后老人的回答（点按钮“血压”，或直接说“血压”）。同样：答的不是
+        // 项目就返回 null，这句话照常走下面的链路，不把老人卡在这一问上。
+        if ("RECORD_ITEM".equals(state.pendingAction)) {
+            AgentTurnResponse resolved = applyRecordItem(state, value);
+            if (resolved != null) {
+                conversations.addMessage(state.id, "user", value);
+                return resolved;
+            }
+        }
         AgentContext context = new AgentContext(state.stage.name(), knownFacts(state),
                 clock.today(), conversations.recentMessages(state.id), identityOf(state),
                 conversations.recentVision(state.id));
@@ -495,7 +586,11 @@ public class FollowupAgentService {
         if (safety == SafetyGuard.Decision.MEDICAL_BOUNDARY) return medicalBoundary(state);
         // 模型不可用的回退模式：运行旧的 Java 关键词路由（健康备忘、健康记录、目录查询与推荐）。
         // 与上面的医疗安全预检同属回退链路；模型可用时这些语义统一交给主模型判断。
-        if (!agentRuntime.modelAvailable()) {
+        //
+        // 模型给了话但这句话不能用时（outcome.javaFallback，例如它自称「已经记下了」而一条都没写）
+        // 也走这里：那不是「模型没上线」，是「模型这一轮办不了这件事」。这两者的兜底是同一条链路，
+        // 所以判据放在一起，免得两个分支各写一半、又成了两套口径。
+        if (!agentRuntime.modelAvailable() || outcome.javaFallback()) {
             if ("EMERGENCY".equals(facts.intent()) || containsAny(value, "胸痛", "呼吸困难", "昏迷", "大出血", "喘不上气")) {
                 return emergency(state);
             }
@@ -515,15 +610,23 @@ public class FollowupAgentService {
             // 把健康记录发给家属（“把这个月的血压发给女儿”）：要排在下面“回查实测数值”之前，
             // 那句话里也有“记录”，先让回查认走就永远发不出去了
             HealthReportParser.ReportIntent report = HealthReportParser.detect(value);
-            if (report != null && memoContext(state)) {
+            if (report != null && dailyHealthContext(state)) {
                 return healthReportReply(state, report);
             }
-            // 实测数值（“我的血压是100”“我最近血压多少”）：备忘是“要做的事”，这是“已经量到的数”，分家存
-            HealthRecordParser.RecordIntent record = HealthRecordParser.detect(value);
-            if (record != null && (record.kind() == HealthRecordParser.Kind.QUERY || memoContext(state))) {
-                return healthRecordReply(state, record, value);
+            // 实测数值（“我的血压是100”“我最近血压多少”）：备忘是“要做的事”，这是“已经量到的数”，分家存。
+            // 一句里报了几项就取几条（“我的身高是180 体重是190”是两条，不是一条）
+            List<HealthRecordParser.RecordIntent> records = healthRecordIntents(value);
+            if (!records.isEmpty() && (records.get(0).kind() == HealthRecordParser.Kind.QUERY
+                    || dailyHealthContext(state) || replacesPendingHealthRecord(state, records.get(0)))) {
+                return healthRecordReply(state, records, value);
             }
-            // 医疗越界不在这里再判一次：函数开头的 safetyGuard.precheck 已经按
+            // 认不出项目、但老人在报一个数（“我今天量了，是135”）：问一句这是哪一项，别猜也别丢。
+        // 与上面那一段同一个闸门（dailyHealthContext），所以卡还悬着时它不会抢那张卡的话
+        if (records.isEmpty()) {
+            AgentTurnResponse whichItem = askWhichItem(state, value);
+            if (whichItem != null) return whichItem;
+        }
+        // 医疗越界不在这里再判一次：函数开头的 safetyGuard.precheck 已经按
             // MedicalBoundaryRules 拦掉了，走到这里的一定不是越界句。
             // 这里只保留本分支新加的语义（备忘、健康记录、周报）。
             // 「取消本次办理 / 取消预约 / 已保留预约 / 查医院 / 查科室 / 求推荐」不在这份名单里：
@@ -533,8 +636,6 @@ public class FollowupAgentService {
         }
         AgentOrchestrator.Route route = outcome.route();
         CancellationSelection structuredCancellation = modelCancellationSelection(outcome);
-        boolean structuredConfirmationCall = outcome.modelDriven()
-                && outcome.actionType() == PlannerActionType.CALL_CONFIRMATION_TOOL;
         if (outcome.modelDriven()) prepareModelIntentState(state, outcome.intent());
         if (stopped(state) && !allowedWhenStopped(route)) return stoppedResponse(state);
         // 模型模式下的备忘 / 健康数值 / 发周报：模型只认出“这句话属于这三件事”，
@@ -550,7 +651,10 @@ public class FollowupAgentService {
         // 排在待确认候选之后：刚问出口的那一个永远比长期记忆优先。
         AgentTurnResponse rememberedPick = confirmRememberedHospital(state, value);
         if (rememberedPick != null) return rememberedPick;
-        if ("CANCEL_EXISTING_APPOINTMENT".equals(state.sideTask) && !structuredConfirmationCall) {
+        // 模型这一轮给出的是<b>合法</b>工具调用时，下面的关键词兜底整段不跑：它的意图已经由调用本身
+        // 说清楚了，不能再用原句里的「都取消」「最近」把范围改回来。判断依据是「参数过了契约校验」，
+        // 不是「动作类型长得像确认」——模型调一个只读工具（比如 appointment.queryMine）同样算数。
+        if ("CANCEL_EXISTING_APPOINTMENT".equals(state.sideTask) && !outcome.hasContractCheckedToolCall()) {
             // “都取消 / 9月12日前的都取消”是在承接上一轮预约列表，不应重新掉回意图识别，
             // 也不能被单条候选解析抢先消费；这里只生成整组确认卡，仍不直接写库。
             if (state.stage != ConversationState.Stage.AWAITING_CONFIRMATION
@@ -660,7 +764,7 @@ public class FollowupAgentService {
                 state.taskStatus = ConversationState.TaskStatus.ACTIVE;
             }
         }
-        if (agentRuntime.isModelReadToolOutcome(outcome)) {
+        if (agentRuntime.isModelReadToolOutcome(outcome) || isStructuredRecommendation(outcome)) {
             return runModelToolLoop(state, value, outcome);
         }
         return dispatchOutcome(state, value, outcome);
@@ -868,18 +972,14 @@ public class FollowupAgentService {
             case VALIDATE_DRAFT -> validateDraftForModel(state, facts);
             case QUERY_HOSPITALS -> showHospitals(state, facts.hospital());
             case QUERY_DEPARTMENTS -> showDepartments(state, facts.hospital());
-            case RECOMMEND_HOSPITAL -> recommendHospitals(state, facts.department());
-            case QUERY_AVAILABLE_SLOTS -> {
-                if (facts.date() != null) applyFacts(state, facts);
-                else clearSlotSelection(state, true);
-                yield showAvailableSlots(state);
-            }
-            case QUERY_NEARBY_SLOTS -> queryNearbySlots(state);
+            case RECOMMEND_HOSPITAL -> recommendHospitals(state, facts, outcome.modelDriven());
+            case QUERY_AVAILABLE_SLOTS -> querySlotsFor(state, facts, outcome);
+            case QUERY_NEARBY_SLOTS -> nearbySlotsFor(state, outcome);
             case QUERY_DOCTORS -> showOnDutyDoctors(state, facts);
-            case CHECK_CONFLICT -> checkSchedule(state);
+            case CHECK_CONFLICT -> checkSchedule(state, outcome);
             case CHECK_DUPLICATE -> checkDuplicate(state);
             case ASK_MATERIALS -> showMaterials(state, facts);
-            case QUERY_TRAVEL_GUIDE -> showTravelGuide(state, facts, value, false);
+            case QUERY_TRAVEL_GUIDE -> travelGuideFor(state, facts, value, outcome);
             case QUERY_LOCATION_GUIDE -> showLocationGuide(state, facts, value, true);
             case CHANGE_HOSPITAL -> changeHospital(state, facts, value);
             case CHANGE_DEPARTMENT -> changeDepartment(state, facts, value);
@@ -895,9 +995,12 @@ public class FollowupAgentService {
             case QUERY_DRUG_KNOWLEDGE -> showDrugKnowledge(state, outcome);
             case QUERY_CARE_TIMELINE -> showCareTimeline(state);
             case QUERY_CARE_NOTIFICATIONS -> showCareNotifications(state);
+            case QUERY_APPOINTMENT_HISTORY -> showAppointmentHistory(state, outcome);
+            case QUERY_PROFILE_MEMORY -> showProfileMemory(state);
             case REMIND_ELDER -> remindElder(state, value);
             // 模型点名了一个执行不了的工具，intent 也归不到任何业务链路。绝不复用它的 replyDraft，
             // 也不走 DIRECT_ANSWER（那条路会暂停正在办理的任务）：由 Java 明确回绝，任务状态原地不动。
+            case ASK_CLARIFICATION -> askClarification(state, outcome);
             case REFUSE_UNSUPPORTED_TOOL -> respondWithoutModel(state,
                     "抱歉，这个操作我没办法直接执行。您可以换一种说法，或者让我先帮您查一下已确认的预约。",
                     modelSuggestedReplies(state));
@@ -908,6 +1011,33 @@ public class FollowupAgentService {
     }
 
     /**
+     * 澄清交互的出口：模型问的那句话 + Java 从真实工具取回的候选。
+     *
+     * <p><b>澄清不是确认</b>：这里不建卡、不发 {@code confirmationId}、不改任务状态，只把问题和一个
+     * 能干下去的分支摆出来。凭据是全部写操作的唯一钥匙，澄清碰不到它，所以「模型问了一句」
+     * 变不出任何执行授权——老人下一步仍然要在真实候选里选一条，再由 Java 生成确认卡。
+     */
+    private AgentTurnResponse askClarification(ConversationState state, AgentRuntime.Outcome outcome) {
+        String question = outcome.proposedTools() == null || outcome.proposedTools().isEmpty()
+                ? null : outcome.proposedTools().get(0).arguments().get("question");
+        String candidateTool = outcome.proposedTools() == null || outcome.proposedTools().isEmpty()
+                ? "appointment.queryMine"
+                : outcome.proposedTools().get(0).arguments()
+                        .getOrDefault("candidateTool", "appointment.queryMine");
+        // 候选永远来自真实工具。枚举目前只有一条取值，将来扩别的对象（比如备忘、材料）时在这里加分支，
+        // 加不到的就是空候选，落成「没查到」而不是拿模型的话顶上。
+        List<AppointmentSummary> candidates = switch (candidateTool) {
+            case "appointment.queryMine" -> myAppointmentTool.search(state.id, state.userId, null, null, null);
+            default -> List.of();
+        };
+        // 承接取消支线：老人接下来无论是点按钮还是直接说“9月10日那条”，都还在同一件事上。
+        rememberInterruptedTask(state, "CANCEL_EXISTING_APPOINTMENT");
+        ClarificationInteractionTool.Prompt prompt = clarificationInteraction.askWhichAppointmentToCancel(
+                state.id, candidates, question, "您想取消的是哪一条预约？可以从下面的真实预约里直接选一条。");
+        return respondWithoutModel(state, prompt.reply(), prompt.choices());
+    }
+
+    /**
      * 模型主导的有界只读工具循环。现有异常处理方法仍负责查询真实数据、更新权威草稿并
      * 生成合法按钮；中间结果不会直接发给用户，而是作为结构化证据回到同一个主模型。
      */
@@ -915,11 +1045,38 @@ public class FollowupAgentService {
                                                AgentRuntime.Outcome initial) {
         AgentRuntime.Outcome current = initial;
         AgentTurnResponse latestToolResponse = null;
+        ToolOutcome.Step latestOutcome = null;
         Set<String> executed = new LinkedHashSet<>();
+        // 老人这一轮明确排除的医院、以及他说定的科室，是本轮的读条件，不是草稿字段。
+        // 模型很可能先查历史或画像、下一轮才给推荐，而那一轮未必把排除项再说一遍——
+        // 所以约束由整个循环带着走，不能只看最后那一轮的 facts。
+        TurnReadConstraint constraint = TurnReadConstraint.none().merge(initial.facts());
+        // 本轮证据的分界线：进循环前记下最大追踪 id，校验推荐理由时只认它之后的真实工具调用。
+        // 必须在任何一次目录查询之前取——目录工具自己也会写追踪，取晚了会把 Java 自己的查询
+        // 当成「模型查过的证据」。
+        long evidenceMarker = traces.latestId(state.id);
+        // 结构化推荐校验不过时只给一次修正机会，且这次修正会消耗一轮（它可能先去点只读工具）。
+        int recommendationRepairs = 0;
 
         for (int round = 1; round <= MAX_MODEL_TOOL_ROUNDS; round++) {
             if (!agentRuntime.isModelReadToolOutcome(current)) {
-                return finishToolLoopDecision(state, originalMessage, current, latestToolResponse);
+                if (isStructuredRecommendation(current)) {
+                    RecommendationCheck check = checkRecommendations(state, current, constraint, evidenceMarker);
+                    if (check.ok()) return deliverRecommendation(state, current.answering(), check);
+                    // 认不准的排除、排除之后没有候选：这是 Java 的终结句，不该交给模型再改一遍。
+                    if (check.stopped() != null) return check.stopped();
+                    if (recommendationRepairs++ == 0) {
+                        turnProgress.mark(state.id, TurnProgress.Kind.PLANNING);
+                        current = agentRuntime.continueAfterTools(originalMessage, planContext(state),
+                                state, check.evidence());
+                        constraint = constraint.merge(current.facts());
+                        AgentTurnResponse guarded = guardContinuation(state, originalMessage, current);
+                        if (guarded != null) return guarded;
+                        continue;
+                    }
+                    return recommendationUnavailable(state);
+                }
+                return finishToolLoopDecision(state, current, latestToolResponse);
             }
 
             List<PlannerToolCall> freshCalls = current.proposedTools().stream()
@@ -930,49 +1087,453 @@ public class FollowupAgentService {
                         "我已经完成了这项查询。您可以根据上面的真实结果继续选择。");
             }
 
-            if (hasTaskFacts(current.facts()) && taskInProgress(state)) {
-                applyFacts(state, current.facts());
-                syncPresentationStage(state);
-            }
+            // 模型发起的号源查询（appointment.querySlots / appointment.queryNearbySlots）只查不改：
+            // 参数只决定这次查什么，这一轮的 facts 也不落到草稿上，交给业务流程的是「不写草稿的那一份」。
+            // 草稿只由两处改——模型明确提出业务动作（PROPOSE_WORKFLOW_ACTION）的那一轮，
+            // 以及完全不经过模型的既有办理流程。（其余只读工具尚未逐个按同一口径核对，
+            // 比如 hospital.search 仍可能更新会话里的解析状态，所以这里不宣称所有 READ_ONLY 工具都已收口。）
+            AgentRuntime.Outcome executable = withToolCalls(withoutDraftWrites(current), freshCalls);
             // 参数是模型这一步真实生成的，先原样记下来再执行——
             // 「参数由智能体生成」这件事只有在执行之前才看得见。
             turnProgress.toolProposed(state.id, freshCalls);
-            AgentRuntime.Outcome executable = withToolCalls(current, freshCalls);
             deferFinalization.set(true);
+            AgentToolStep step;
             try {
-                latestToolResponse = dispatchOutcome(state, originalMessage, executable);
+                step = dispatchToolStep(state, originalMessage, executable);
             } finally {
                 deferFinalization.remove();
             }
+            latestToolResponse = step.response();
+            latestOutcome = step.outcome();
 
-            // 确认卡、完成卡和安全暂停都是业务终点，不能为了措辞再让模型改变动作。
+            // 确认卡、澄清问题、完成卡和安全暂停都是业务终点，不能为了措辞再让模型改变动作。
+            // 澄清尤其不能：候选按钮是按 Java 那份回复生成的，让模型换个说法问，文字就和按钮对不上了。
             if (latestToolResponse.confirmation() != null
+                    || latestOutcome.kind() == ToolOutcome.Kind.NEEDS_CLARIFICATION
                     || state.stage == ConversationState.Stage.EMERGENCY_PAUSED
                     || state.stage == ConversationState.Stage.COMPLETED
                     || state.stage == ConversationState.Stage.PARTIAL) {
                 return finalizeToolEvidence(state, latestToolResponse, latestToolResponse.reply());
             }
 
-            String evidence = toolLoopEvidence(round, freshCalls, latestToolResponse);
-            AgentContext nextContext = new AgentContext(state.stage.name(), knownFacts(state),
-                    clock.today(), conversations.recentMessages(state.id), identityOf(state),
-                    conversations.recentVision(state.id));
+            String evidence = toolLoopEvidence(round, freshCalls, latestToolResponse, latestOutcome);
             turnProgress.mark(state.id, TurnProgress.Kind.PLANNING);
-            current = agentRuntime.continueAfterTools(originalMessage, nextContext, state, evidence);
+            current = agentRuntime.continueAfterTools(originalMessage, planContext(state), state, evidence);
+            // 续跑轮里模型可能会补一个新的排除目标，或者第一次说出科室：并进去，只增不减。
+            // 它写错名字的代价由 Java 承担——认不准的那一轮不给推荐，绝不悄悄忽略。
+            constraint = constraint.merge(current.facts());
 
-            SafetyGuard.Decision safety = current.modelDriven()
-                    ? safetyGuard.evaluateModel(originalMessage, current.facts())
-                    : SafetyGuard.Decision.NONE;
-            if (safety == SafetyGuard.Decision.EMERGENCY) return emergency(state);
-            if (safety == SafetyGuard.Decision.MEDICAL_BOUNDARY) return medicalBoundary(state);
-            if (current.modelDriven()) prepareModelIntentState(state, current.intent());
+            AgentTurnResponse guarded = guardContinuation(state, originalMessage, current);
+            if (guarded != null) return guarded;
         }
 
+        // 轮数用尽：最后再看一眼收口，别把「三轮都在查工具、最后一次才给推荐」丢掉。
+        // 这里不再给修正机会——它已经是最后一轮了。
+        if (isStructuredRecommendation(current)) {
+            RecommendationCheck check = checkRecommendations(state, current, constraint, evidenceMarker);
+            if (check.ok()) return deliverRecommendation(state, current.answering(), check);
+            if (check.stopped() != null) return check.stopped();
+            return recommendationUnavailable(state);
+        }
         return finalizeToolEvidence(state, latestToolResponse,
                 "我已经完成当前查询。为避免重复查询，请从现有结果中选择，或告诉我想修改哪项条件。");
     }
 
-    private AgentTurnResponse finishToolLoopDecision(ConversationState state, String originalMessage,
+    /**
+     * 进入规划模型的那一份上下文：阶段、已知事实、今天、最近消息、身份、最近的识图。
+     *
+     * <p>工具循环的每一轮各建一份，内容随时在变；抽出来是为了让「续跑」和「推荐修正」用的是
+     * 同一份口径——修正轮也是同一轮对话里的续跑，不该看到不一样的上下文。
+     */
+    private AgentContext planContext(ConversationState state) {
+        return new AgentContext(state.stage.name(), knownFacts(state),
+                clock.today(), conversations.recentMessages(state.id), identityOf(state),
+                conversations.recentVision(state.id));
+    }
+
+    /**
+     * 续跑结果的安全预检与意图准备。返回非空表示这一轮到此为止（急症 / 医疗边界），
+     * 返回 null 表示照常往下走。
+     *
+     * <p>工具循环的常规续跑和推荐校验失败后的那一次修正共用它：修正轮也是模型的一次续跑，
+     * 不能因为「它是在改一份不合规的推荐」就跳过安全预检。
+     */
+    private AgentTurnResponse guardContinuation(ConversationState state, String originalMessage,
+                                                AgentRuntime.Outcome current) {
+        SafetyGuard.Decision safety = current.modelDriven()
+                ? safetyGuard.evaluateModel(originalMessage, current.facts())
+                : SafetyGuard.Decision.NONE;
+        if (safety == SafetyGuard.Decision.EMERGENCY) return emergency(state);
+        if (safety == SafetyGuard.Decision.MEDICAL_BOUNDARY) return medicalBoundary(state);
+        if (current.modelDriven()) prepareModelIntentState(state, current.intent());
+        return null;
+    }
+
+    // ---------------------------------------------------------------- 结构化推荐的校验与交付
+    //
+    // 推荐这一轮不再由 Java 重装、也不再交给回答模型润色：模型在最后一次调用里同时给出结构化
+    // recommendations 和最终话语 answering，Java 只校验结构化那一半，通过了就把 answering
+    // 原样交付。Java 因此不排序、不替补、不重写理由——它只回答一个问题：
+    // 「这几家医院，是不是这一轮真查过、真没被排除、理由真有出处？」
+
+    /** 这一轮是在推荐：模型给了结构化清单，或者 intent 就是它。 */
+    private static boolean isStructuredRecommendation(AgentRuntime.Outcome outcome) {
+        return outcome != null && outcome.modelDriven()
+                && outcome.route() == AgentOrchestrator.Route.RECOMMEND_HOSPITAL;
+    }
+
+    /** 一次推荐最多给几家。超过就整轮不展示，让模型自己删——Java 不替它挑前三条。 */
+    private static final int MAX_RECOMMENDATIONS = 3;
+
+    /**
+     * 模型口中的工具名 → {@code tool_call_logs} 里真实记下的工具名。
+     *
+     * <p>目录工具的追踪名和规划器工具名不是一套：{@code hospital.list} 落库时叫
+     * {@code catalog.queryHospitals}，号源的「附近日期」查询落库时叫 {@code appointment.queryAlternatives}。
+     * 不显式对上，模型引用了真实查过的证据也会被判成「没查过」。这张表是<b>工具名</b>的对应，
+     * 不是中文词表。
+     */
+    private static final Map<String, String> TRACE_TOOL_NAMES = Map.of(
+            "hospital.list", "catalog.queryHospitals",
+            "hospital.search", "catalog.queryHospitals",
+            "department.list", "catalog.queryDepartments",
+            "department.search", "catalog.queryDepartments",
+            "appointment.queryNearbySlots", "appointment.queryAlternatives",
+            "material.checklist", "material.generateChecklist");
+
+    /**
+     * 这些证据「只对某一家医院成立」：号源、路线、科室清单、院内指引，查的时候就是奔着某一家去的。
+     * 引它们当理由时，那一次调用的参数或结果里必须真的出现这家医院；否则「有证据」只是有证据，
+     * 证明不了什么。{@code hospital.list}、{@code appointment.history}、{@code profile.memorySummary}
+     * 这类是不分医院的，只要真跑过且有结果就算数。
+     */
+    private static final Set<String> HOSPITAL_SCOPED_TOOLS = Set.of(
+            "appointment.querySlots", "appointment.queryNearbySlots", "travel.routePlan",
+            "department.list", "department.search", "hospital.search", "hospital.locationGuide");
+
+    /** 工具自己报条数时用的字段名；用来分辨「查了但一条没有」和「查到了」。 */
+    private static final Set<String> TRACE_COUNT_FIELDS = Set.of("total", "returned", "count", "size");
+
+    /**
+     * 结构化推荐的校验结果。
+     *
+     * @param ok        这一份清单能不能直接交付
+     * @param validated 过了校验的医院，<b>顺序就是模型给的顺序</b>（Java 不重排）
+     * @param note      Java 得在 {@code answering} 前面说的一句理解说明（近似排除时才有）
+     * @param evidence  校验不过时回给模型的结构化问题；{@code ok} 时为空
+     * @param stopped   这一轮不能靠模型修正：Java 已经写好了终结回复（排除认不准 / 没有候选了）
+     */
+    private record RecommendationCheck(boolean ok, List<HospitalProfile> validated, String note,
+                                       String evidence, AgentTurnResponse stopped) {
+        static RecommendationCheck ok(List<HospitalProfile> validated, String note) {
+            return new RecommendationCheck(true, validated, note, null, null);
+        }
+
+        static RecommendationCheck retry(String evidence) {
+            return new RecommendationCheck(false, List.of(), "", evidence, null);
+        }
+
+        static RecommendationCheck stopped(AgentTurnResponse response) {
+            return new RecommendationCheck(false, List.of(), "", null, response);
+        }
+    }
+
+    /**
+     * 逐条校验模型给的结构化推荐。
+     *
+     * <p>顺序很要紧：<b>先读证据、再算候选</b>。候选是 Java 自己查目录算出来的，那次查询也会落追踪；
+     * 反过来写的话，模型只要引一句 {@code hospital.list}，Java 自己刚查的那一趟就成了它的「证据」。
+     * 所以证据快照取自 {@code prepareCandidates} 之前。
+     *
+     * <p>校验只回答「推荐对象是不是本轮真实候选、有没有被排除、科室在不在、引用的证据是不是本轮真查过
+     * 且是关于这一家的、条数够不够少、answering 里有没有夹带别家」。它<b>不</b>判断理由说得好不好、
+     * 也不排序——那是模型的事。
+     */
+    private RecommendationCheck checkRecommendations(ConversationState state, AgentRuntime.Outcome decision,
+                                                     TurnReadConstraint constraint, long evidenceMarker) {
+        List<ToolTrace> evidence = traces.since(state.id, evidenceMarker);
+        RecommendationPlan plan = prepareCandidates(state, constraint.facts(), true);
+        if (plan.blocked() != null) return RecommendationCheck.stopped(plan.blocked());
+
+        List<HospitalRecommendation> items = decision.recommendations();
+        List<String> errors = new ArrayList<>();
+        if (evidence.isEmpty()) {
+            // 最要紧的一条先说：一条工具都没查就给推荐，理由不可能有出处。
+            errors.add("NO_EVIDENCE_AT_ALL: 你这一轮还没有调用过任何只读工具，也就没有任何真实数据可以支撑推荐。"
+                    + "请先查（例如 hospital.list、department.list、appointment.querySlots），拿到结果再给 recommendations。");
+        }
+        if (items.isEmpty()) {
+            errors.add("NO_RECOMMENDATIONS: 这一轮没有给出 recommendations。");
+        }
+        if (items.size() > MAX_RECOMMENDATIONS) {
+            errors.add("TOO_MANY: 一次最多推荐 " + MAX_RECOMMENDATIONS + " 家，你给了 " + items.size() + " 家，请自己删到 3 家以内。");
+        }
+
+        Map<String, HospitalProfile> candidates = new LinkedHashMap<>();
+        for (HospitalProfile item : plan.kept()) candidates.put(item.id(), item);
+        Map<String, HospitalProfile> catalog = new LinkedHashMap<>();
+        for (HospitalProfile item : hospitalCatalogTool.listHospitals(state.id)) catalog.put(item.id(), item);
+
+        Set<String> seen = new LinkedHashSet<>();
+        List<HospitalProfile> validated = new ArrayList<>();
+        for (HospitalRecommendation item : items) {
+            if (item.hospitalId().isEmpty()) {
+                errors.add("MISSING_HOSPITAL_ID: 有一条推荐没有填 hospitalId。");
+                continue;
+            }
+            if (!seen.add(item.hospitalId())) {
+                errors.add("DUPLICATE_HOSPITAL: " + item.hospitalId() + " 出现了不止一次。");
+                continue;
+            }
+            HospitalProfile hospital = candidates.get(item.hospitalId());
+            if (hospital == null) {
+                HospitalProfile known = catalog.get(item.hospitalId());
+                errors.add(plan.excludedIds().contains(item.hospitalId())
+                        ? "HOSPITAL_EXCLUDED: " + describe(known, item.hospitalId())
+                        + " 是老人这一轮明确排除的医院，不能再推荐。"
+                        : "HOSPITAL_NOT_A_CANDIDATE: " + describe(known, item.hospitalId())
+                        + " 不在本轮的真实候选里，请只从 allowedCandidates 里选。");
+                continue;
+            }
+            if (plan.department() != null && !hasDepartment(state, hospital.id(), plan.department())) {
+                errors.add("DEPARTMENT_NOT_FOUND: " + hospital.name() + " 的目录里没有“" + plan.department()
+                        + "”这个科室。");
+                continue;
+            }
+            if (item.evidenceRefs().isEmpty()) {
+                errors.add("EVIDENCE_MISSING: " + hospital.name() + " 这条没有 evidenceRefs，"
+                        + "推荐理由必须说明是从哪一次真实查询里来的。");
+                continue;
+            }
+            for (String ref : item.evidenceRefs()) {
+                String problem = evidenceProblem(ref, hospital, evidence);
+                if (problem != null) errors.add(problem);
+            }
+            validated.add(hospital);
+        }
+
+        String answering = decision.answering();
+        if (answering == null || answering.isBlank()) {
+            errors.add("NO_ANSWERING: 这一轮没有给出 answering，老人看不到话。");
+        } else {
+            String smuggled = hospitalNamedIn(answering, catalog.values(), validated);
+            if (smuggled != null) {
+                errors.add("ANSWER_MENTIONS_HOSPITAL: answering 里提到了“" + smuggled
+                        + "”，它不在这次要推荐的医院里，整句不能给老人看。");
+            }
+        }
+
+        if (!errors.isEmpty()) return RecommendationCheck.retry(recommendationRepairEvidence(errors, plan));
+        return RecommendationCheck.ok(validated, plan.note());
+    }
+
+    /**
+     * 展示这一轮校验通过的推荐：<b>就用模型给的那句话</b>，不再润色，也不再重写理由。
+     *
+     * <p>按钮由 Java 用已校验的候选按模型给的顺序生成（label / action / value 与既有页面约定一致，
+     * 前端零改动）。文字是 {@code note + answering}——{@code note} 只在近似排除时有内容，
+     * 那是 Java 必须说的话（「您说的市一我理解成市第一医院」），其余情况就是逐字的 {@code answering}。
+     *
+     * <p>走 {@code respondWithoutModel}：<b>不调用回答模型</b>，也不再经过「权威回复草稿」那一层。
+     * 这句话已经过结构校验，交给润色层再改一遍，就等于把刚验过的东西重新变成没人校验的自由文本。
+     */
+    private AgentTurnResponse deliverRecommendation(ConversationState state, String answering,
+                                                    RecommendationCheck check) {
+        List<QuickReply> choices = check.validated().stream()
+                .map(item -> q("选择" + item.name(), "SET_HOSPITAL", item.id())).toList();
+        String note = check.note() == null ? "" : check.note();
+        String text = answering == null ? "" : answering.trim();
+        return respondWithoutModel(state, note + text, choices);
+    }
+
+    /**
+     * 两次都没能给出合法推荐：只回一句中性的话。
+     *
+     * <p><b>不复述模型那句，也不出现任何医院名、任何按钮。</b>校验没通过的那句话里到底提了谁、
+     * 说得对不对，Java 判断不了（中文自由措辞不可解析），所以整句都不能给老人看。
+     */
+    private AgentTurnResponse recommendationUnavailable(ConversationState state) {
+        return respondWithoutModel(state,
+                "这一轮我还没能给您一份靠得住的推荐，所以先不列医院了。"
+                        + "您可以告诉我医生要求复诊的科室，或换个说法再说一次，我重新查。",
+                resumeReplies(state));
+    }
+
+    /**
+     * 证据引用能不能算数：那一次调用这一轮真的发生过吗？真查到东西了吗？是关于这一家医院的吗？
+     *
+     * <p>判「查到没有」读的是落库的 {@code response_json}，不是会话里那个 {@code outcomeKind}——
+     * 后者在工具循环里几乎恒为 SUCCESS（只看响应形状），拿它当「有证据」等于没查过。
+     */
+    private String evidenceProblem(String ref, HospitalProfile hospital, List<ToolTrace> evidence) {
+        if (ref == null || ref.isBlank()) return "EVIDENCE_MISSING: 有一条 evidenceRefs 是空的。";
+        String traceName = TRACE_TOOL_NAMES.getOrDefault(ref, ref);
+        List<ToolTrace> hits = evidence.stream()
+                .filter(row -> traceName.equals(row.toolName())).toList();
+        if (hits.isEmpty()) {
+            return "EVIDENCE_NOT_GATHERED: 这一轮没有真的调用过“" + ref + "”，它不能当推荐理由的出处。";
+        }
+        if (hits.stream().noneMatch(row -> row.success() && traceHasResult(row.result()))) {
+            return "EVIDENCE_EMPTY: “" + ref + "”这一轮查过，但没有查到内容，不能当推荐理由的出处。";
+        }
+        if (!HOSPITAL_SCOPED_TOOLS.contains(ref)) return null;
+        boolean aboutThisOne = hits.stream()
+                .anyMatch(row -> row.success() && traceHasResult(row.result()) && traceMentions(row, hospital));
+        return aboutThisOne ? null
+                : "EVIDENCE_NOT_ABOUT_HOSPITAL: “" + ref + "”这一轮查的不是" + hospital.name()
+                + "（那一次的参数和结果里都没有这家医院），不能当它的推荐理由。";
+    }
+
+    /**
+     * 这次调用到底查到东西没有。
+     *
+     * <p>光看「JSON 是不是空的」会漏：工具在「查了但一条也没有」时返回的往往是
+     * {@code {"total":0,...}} 这种非空对象，当成证据就等于拿空结果去支撑推荐。所以还要看
+     * 工具自己报出来的条数——报了条数且全是 0，就是没查到。
+     */
+    private boolean traceHasResult(String responseJson) {
+        if (responseJson == null || responseJson.isBlank()) return false;
+        JsonNode node;
+        try {
+            node = json.readTree(responseJson);
+        } catch (Exception error) {
+            // 没按 JSON 落库的痕迹（比如错误文本）不当空处理，交给 success 那位去判断。
+            return true;
+        }
+        if (node == null || node.isNull()) return false;
+        if (node.isArray()) return !node.isEmpty();
+        if (node.isObject()) {
+            boolean reportedCount = false;
+            for (String field : TRACE_COUNT_FIELDS) {
+                JsonNode value = node.get(field);
+                if (value != null && value.isNumber()) {
+                    reportedCount = true;
+                    if (value.asInt() > 0) return true;
+                }
+            }
+            return !reportedCount && !node.isEmpty();
+        }
+        return !node.asText("").isBlank();
+    }
+
+    /** 这一次调用的参数或结果里，有没有出现这家医院的 id 或名字。 */
+    private static boolean traceMentions(ToolTrace trace, HospitalProfile hospital) {
+        String text = (trace.parameters() == null ? "" : trace.parameters())
+                + (trace.result() == null ? "" : trace.result());
+        return (!hospital.id().isBlank() && text.contains(hospital.id()))
+                || (!hospital.name().isBlank() && text.contains(hospital.name()));
+    }
+
+    /**
+     * {@code answering} 里有没有夹带真实医院名。
+     *
+     * <p>查的是<b>真实目录里的名字</b>，不是新增一份中文词表：凡是目录里认得出来的医院名出现在这句话里、
+     * 又不属于这次要推荐的那几家，整句就不展示。被排除的那家和「目录里真有、但没验过」的那家都在此列——
+     * 前者是绕着排除走，后者是夹带了一个没人验过的名字。
+     */
+    private static String hospitalNamedIn(String text, java.util.Collection<HospitalProfile> catalog,
+                                          List<HospitalProfile> allowed) {
+        String haystack = CatalogEntityResolver.canonicalName(text);
+        Set<String> allowedIds = allowed.stream().map(HospitalProfile::id).collect(java.util.stream.Collectors.toSet());
+        for (HospitalProfile item : catalog) {
+            String name = CatalogEntityResolver.canonicalName(item.name());
+            if (name.isEmpty() || !haystack.contains(name)) continue;
+            if (allowedIds.contains(item.id())) continue;
+            return item.name();
+        }
+        return null;
+    }
+
+    private static String describe(HospitalProfile known, String hospitalId) {
+        return known == null ? "“" + hospitalId + "”" : "“" + known.name() + "”";
+    }
+
+    private boolean hasDepartment(ConversationState state, String hospitalId, String department) {
+        return departmentCatalogTool.listDepartments(state.id, hospitalId).stream()
+                .anyMatch(row -> CatalogEntityResolver.canonicalName(row.name())
+                        .equals(CatalogEntityResolver.canonicalName(department)));
+    }
+
+    /**
+     * 校验不过时回给模型的结构化问题清单。
+     *
+     * <p>形状沿用 {@link #toolLoopEvidence} 那一套（{@code outcomeKind} + 结构化字段），
+     * 让模型不必从中文里猜「到底哪一条不合规」。{@code recommendation.validate} 只是个记号，
+     * <b>不注册成工具</b>，模型看不见它、也调不到它。
+     */
+    private String recommendationRepairEvidence(List<String> errors, RecommendationPlan plan) {
+        Map<String, Object> value = new LinkedHashMap<>();
+        value.put("outcomeKind", "MISSING_INFO");
+        value.put("toolName", "recommendation.validate");
+        value.put("problems", errors);
+        value.put("requestedDepartment", plan.department());
+        value.put("excludedHospitals", plan.excluded());
+        value.put("allowedCandidates", plan.kept().stream().map(item -> Map.of(
+                "hospitalId", item.id(), "name", item.name())).toList());
+        value.put("recommendationContract", List.of(
+                "每条推荐填 hospitalId / reason / evidenceRefs；一次最多 3 条，hospitalId 不能重复",
+                "hospitalId 只能取 allowedCandidates 里的真实 id",
+                "evidenceRefs 填你这一轮真正调用过、并且真的查到了内容的工具名；每条推荐至少一个",
+                "号源、路线、科室、院内指引这类证据必须是关于那一家医院的（参数里带上那家医院）",
+                "answering 里只准出现本次要推荐的医院，别的真实医院名一个都不能有"));
+        value.put("requiredShape", "{\"recommendations\":[{\"hospitalId\":\"...\",\"reason\":\"...\","
+                + "\"evidenceRefs\":[\"appointment.querySlots\"]}],\"answering\":\"...\"}");
+        try {
+            return json.writeValueAsString(value);
+        } catch (Exception error) {
+            return value.toString();
+        }
+    }
+
+    /**
+     * 工具循环里的一步：响应本身，加上「这一步是哪类结果」。
+     *
+     * <p>分类只在两个地方产生，不靠读中文反推：取消支线自己知道（{@link CancellationStep}），
+     * 其余的看响应形状——带确认卡就是等确认，阶段真的走到 COMPLETED 就是状态变了，剩下算成功。
+     * 判不出来时说成功，比编一个错的结果类型要好。
+     */
+    private record AgentToolStep(AgentTurnResponse response, ToolOutcome.Step outcome) { }
+
+    private AgentToolStep dispatchToolStep(ConversationState state, String value,
+                                           AgentRuntime.Outcome outcome) {
+        String tool = outcome.proposedTool() == null ? "" : outcome.proposedTool();
+        // 取消支线的结果类型只有它自己知道（摆的是卡、是候选、还是没查到），所以单独接一遍。
+        // 目前只读工具的映射落不到这条路由，这一段是分类口径的兜底，不是某条必经之路。
+        if (outcome.route() == AgentOrchestrator.Route.CANCEL_EXISTING_APPOINTMENT) {
+            CancellationStep step = beginCancellationStep(state, outcome.facts(), value,
+                    outcome.modelDriven() ? outcome.replyDraft() : null,
+                    modelCancellationSelection(outcome));
+            return new AgentToolStep(step.response(),
+                    new ToolOutcome.Step(step.kind(), tool, step.detail()));
+        }
+        AgentTurnResponse response = dispatchOutcome(state, value, outcome);
+        ToolOutcome.Kind kind;
+        if (response.confirmation() != null) {
+            kind = ToolOutcome.Kind.NEEDS_CONFIRMATION;
+        } else if (ConversationState.Stage.COMPLETED.name().equals(response.stage())) {
+            kind = ToolOutcome.Kind.STATE_CHANGED;
+        } else {
+            kind = ToolOutcome.Kind.SUCCESS;
+        }
+        return new AgentToolStep(response, new ToolOutcome.Step(kind, tool, response.stage()));
+    }
+
+    /**
+     * 工具循环的收口：模型这一轮没有再提工具，接着说什么。
+     *
+     * <p>工具循环里的每一轮都是「模型看着真实工具结果作答」，包括第一轮——它是由老人的话触发的，
+     * 但模型选的是只读查询，不是业务动作。<b>所以这里不写草稿、也不重新进预约业务流</b>，
+     * 交付的只有两样：真实查询结果、模型那句回答（拿不到就一句兜底说明）。
+     * 要改草稿，得由老人的下一句话走业务动作（{@code PROPOSE_WORKFLOW_ACTION}），那一轮不经过这里。
+     *
+     * <p>推荐路由<b>不走这里</b>：它在循环顶就被 {@link #checkRecommendations} 拦下来了，
+     * 模型那句自由措辞不能直接交付。
+     *
+     * <p>本轮的范围只到号源查询：{@code appointment.querySlots} 与 {@code appointment.queryNearbySlots}
+     * 的模型调用只查不改。其余只读工具（如 {@code hospital.search}）仍可能更新会话里的解析状态，
+     * 尚未逐个按同一口径核对。
+     */
+    private AgentTurnResponse finishToolLoopDecision(ConversationState state,
                                                      AgentRuntime.Outcome decision,
                                                      AgentTurnResponse latestToolResponse) {
         if (!decision.modelDriven() && latestToolResponse != null) {
@@ -985,15 +1546,74 @@ public class FollowupAgentService {
             return finalizeToolEvidence(state, latestToolResponse,
                     "查询已经完成。涉及预约、取消、提醒或通知的操作，还需要您查看确认内容后明确确认。");
         }
-        if (decision.route() == AgentOrchestrator.Route.DIRECT_ANSWER
-                && decision.replyDraft() != null && !decision.replyDraft().isBlank()) {
-            if (hasTaskFacts(decision.facts()) && taskInProgress(state)) {
-                applyFacts(state, decision.facts());
-                syncPresentationStage(state);
+        String reply = decision.replyDraft() == null || decision.replyDraft().isBlank()
+                ? "我已经完成了这项查询。您可以根据上面的真实结果继续选择。"
+                : decision.replyDraft();
+        return finalizeToolEvidence(state, latestToolResponse, reply);
+    }
+
+    /**
+     * 一次用户消息内的只读约束：这一轮 Java 拿来算推荐的两样条件——科室，以及老人明确排除的医院。
+     *
+     * <p>它存在的理由是<b>工具循环跨轮</b>：老人说「推荐心内科的医院，别给我市一」之后，模型常常
+     * 先查 {@code appointment.history} 或 {@code profile.memorySummary}，下一轮才给推荐。那一轮
+     * 它未必把排除项重说一遍；只看最后那一轮的 {@code facts.excludedHospitals}，排除就会在续跑轮里
+     * 悄悄失效，被排除的医院从推荐文字里回来。约束跟着整个循环走，这个缺口才不存在。
+     *
+     * <p><b>它只活在这一次用户消息的这一轮里</b>：一个局部变量，不落 {@code ConversationState}、
+     * 不写 {@code MemoryStore}，方法返回就没了。老人下一轮改口说「那家也可以」，那是新的一轮、
+     * 新的空约束——既不会被记住，也不会被上一轮的话挡住。
+     *
+     * <p>科室取第一次说定的那个，排除目标取并集（只增不减）：中途忘掉一个排除目标，等于把它放回候选。
+     */
+    private record TurnReadConstraint(String department, List<String> excludedHospitals) {
+        static TurnReadConstraint none() { return new TurnReadConstraint(null, List.of()); }
+
+        TurnReadConstraint merge(ExtractedFacts facts) {
+            if (facts == null) return this;
+            // 科室：第一次说定的那个就是这一轮的条件，后面几轮不重复说也不该丢。
+            String mergedDepartment = department != null ? department : facts.department();
+            if (facts.excludedHospitals().isEmpty()) {
+                if (mergedDepartment == department) return this;
+                return new TurnReadConstraint(mergedDepartment, excludedHospitals);
             }
-            return finalizeToolEvidence(state, latestToolResponse, decision.replyDraft());
+            List<String> merged = new ArrayList<>(excludedHospitals);
+            for (String raw : facts.excludedHospitals()) {
+                if (!merged.contains(raw)) merged.add(raw);
+            }
+            return new TurnReadConstraint(mergedDepartment, List.copyOf(merged));
         }
-        return dispatchOutcome(state, originalMessage, decision);
+
+        /** 交给 {@link #recommendHospitals} 的那一份事实：只带读条件，草稿字段一个都没有。 */
+        ExtractedFacts facts() {
+            return new ExtractedFacts("UNKNOWN", null, department, null, null, null, null, null,
+                    null, null, null, null, null, null, null, null, null, excludedHospitals);
+        }
+    }
+
+    /**
+     * 拿掉会落到草稿上的那几项，只留不属于「办理条件」的事实。
+     *
+     * <p>模型发起这一轮的 facts 不是老人的新说法：模型常把「这次要查哪家医院、哪一天」同时写进
+     * 工具参数和 facts 节点，续跑轮还会原样带一遍。带着它进业务流程，就会出现「老人问一句
+     * 市二院下周三有号吗，手头正办的那笔预约跟着改了日期」。所以医院、科室、日期、时间、陪同、
+     * 通知这些一概拿掉；致谢、情绪和关切照旧。
+     */
+    private static AgentRuntime.Outcome withoutDraftWrites(AgentRuntime.Outcome outcome) {
+        ExtractedFacts facts = outcome.facts();
+        if (facts == null) return outcome;
+        return new AgentRuntime.Outcome(outcome.route(),
+                new ExtractedFacts(facts.intent(), null, null, null, null, null, null, null, null,
+                        null, null, null, facts.acknowledgement(), facts.emotion(), facts.concern(), null,
+                        // 医生不是「这一轮查什么」的排除条件，草稿之外按原样保留会变成新的办理条件，
+                        // 这里只留排除目标。
+                        null,
+                        // 排除目标是「这一轮查什么」，不是草稿字段，原样留着。
+                        facts.excludedHospitals()),
+                outcome.replyDraft(), outcome.dialogueMode(), outcome.plannerSource(), outcome.proposedTool(),
+                outcome.proposedTools(), outcome.actionType(), outcome.intent(), outcome.modelDriven(),
+                // 结构化推荐与最终话语不是「办理条件」，不落草稿，原样带走。
+                outcome.recommendations(), outcome.answering(), outcome.javaFallback());
     }
 
     private AgentTurnResponse finalizeToolEvidence(ConversationState state,
@@ -1019,7 +1639,8 @@ public class FollowupAgentService {
                 calls.size() == 1 ? calls.get(0).toolName() : null, calls,
                 calls.size() == 1 ? com.team.silveragent.agent.planning.PlannerActionType.CALL_READ_TOOL
                         : com.team.silveragent.agent.planning.PlannerActionType.CALL_READ_TOOLS,
-                outcome.intent(), outcome.modelDriven());
+                outcome.intent(), outcome.modelDriven(),
+                outcome.recommendations(), outcome.answering(), outcome.javaFallback());
     }
 
     private AgentOrchestrator.Route toolRoute(PlannerToolCall call, AgentOrchestrator.Route fallback) {
@@ -1040,6 +1661,8 @@ public class FollowupAgentService {
             case "travel.routePlan" -> AgentOrchestrator.Route.QUERY_TRAVEL_GUIDE;
             case "hospital.locationGuide" -> AgentOrchestrator.Route.QUERY_LOCATION_GUIDE;
             case "drug.queryKnowledge" -> AgentOrchestrator.Route.QUERY_DRUG_KNOWLEDGE;
+            case "appointment.history" -> AgentOrchestrator.Route.QUERY_APPOINTMENT_HISTORY;
+            case "profile.memorySummary" -> AgentOrchestrator.Route.QUERY_PROFILE_MEMORY;
             default -> fallback;
         };
     }
@@ -1049,10 +1672,16 @@ public class FollowupAgentService {
     }
 
     private String toolLoopEvidence(int round, List<PlannerToolCall> calls,
-                                    AgentTurnResponse response) {
+                                    AgentTurnResponse response, ToolOutcome.Step outcome) {
         Map<String, Object> value = new LinkedHashMap<>();
         value.put("round", round);
         value.put("status", response.stage());
+        // 这一步是哪类结果，说给模型听：SUCCESS/NO_RESULT/MISSING_INFO/NEEDS_CLARIFICATION/
+        // NEEDS_CONFIRMATION/STATE_CHANGED/FAILURE。有了它，模型不必从中文里猜「是没查到还是参数不够」。
+        if (outcome != null) {
+            value.put("outcomeKind", outcome.kind().name());
+            value.put("outcomeDetail", outcome.detail());
+        }
         value.put("executedTools", calls.stream().map(call -> Map.of(
                 "name", call.toolName(), "arguments", call.arguments())).toList());
         value.put("authoritativeResult", response.reply());
@@ -1429,6 +2058,25 @@ public class FollowupAgentService {
             return respond(state, "请告诉我这个数是不是要重说，还是就按 " + state.pendingRecordValueText + " 记下来。",
                     recordConfirmReplies());
         }
+        if ("RECORD_UNIT".equals(state.pendingAction)) {
+            if ("RECORD_UNIT".equals(action)) return applyRecordUnit(state, safeValue);
+            return respondWithoutModel(state, "您说的是「"
+                            + spokenRecord(state.pendingRecordItem, state.pendingRecordValueText, null)
+                            + "」，这是斤还是公斤？",
+                    recordUnitReplies(state.pendingRecordValueText));
+        }
+        if ("RECORD_VALUE".equals(state.pendingAction)) {
+            if ("RECORD_VALUE".equals(action)) return applyRecordValue(state, safeValue);
+            return respondWithoutModel(state, "您说的是「"
+                            + spokenRecord(state.pendingRecordItem, state.pendingRecordValueText, null)
+                            + "」，量出来是多少？",
+                    recordValueReplies(state.pendingRecordValueText));
+        }
+        if ("RECORD_ITEM".equals(state.pendingAction)) {
+            if ("RECORD_ITEM".equals(action)) return applyRecordItem(state, safeValue);
+            return respondWithoutModel(state, "请点一下这是哪一项，也可以直接告诉我，比如说“血压”。",
+                    recordItemReplies());
+        }
         if ("CANCEL_TASK".equals(action)) return cancelTask(state);
         if ("RETRY_EXECUTION".equals(action) && state.stage == ConversationState.Stage.PARTIAL) {
             return buildConfirmation(state);
@@ -1445,7 +2093,10 @@ public class FollowupAgentService {
             return respondWithPlan(state, "原预约仍然有效。请修改草稿，确认新方案后才会变更原预约。",
                     List.of(q("修改日期", "CHANGE_DATE", ""), q("修改医院", "CHANGE_HOSPITAL", "")));
         }
+        // 选一条候选、往后翻一页，都是「接着处理这次取消」，不能因为这个人名下已经有一份预约
+        // 就被拦成「已有预约已保留，请选择下一步」——那正好是取消入口，拦住它等于没有出口。
         if (state.appointmentId != null && !List.of("CANCEL_APPOINTMENT", "QUERY_APPOINTMENTS",
+                "SELECT_APPOINTMENT_TO_CANCEL", "MORE_CANCEL_CANDIDATES",
                 "OPEN_TASKS", "NEW_BOOKING", "CONTACT_HUMAN", "CANCEL_TASK",
                 "RETRY_EXECUTION", "EDIT_BOOKING").contains(action))
             return respondWithPlan(state, "已有预约已保留，请选择下一步。", bookedActions(state));
@@ -1501,6 +2152,7 @@ public class FollowupAgentService {
             case "QUERY_CARE_TIMELINE" -> { return showCareTimeline(state); }
             case "QUERY_CARE_NOTIFICATIONS" -> { return showCareNotifications(state); }
             case "SELECT_APPOINTMENT_TO_CANCEL" -> { return prepareExistingCancellation(state, safeValue); }
+            case "MORE_CANCEL_CANDIDATES" -> { return showCancellationCandidatesPage(state, safeValue); }
             case "SELECT_TRAVEL_APPOINTMENT" -> { return selectTravelAppointment(state, safeValue); }
             case "CANCEL_TASK" -> { return cancelTask(state); }
             case "RESUME_INTERRUPTED" -> { return resumeInterruptedTask(state); }
@@ -1551,122 +2203,17 @@ public class FollowupAgentService {
         if (closed(state)) return closedResponse(state);
         reactivateIfExpired(state);
         if (stopped(state)) return stoppedResponse(state);
-        if (state.stage != ConversationState.Stage.AWAITING_CONFIRMATION || confirmationId == null
-                || !confirmationId.equals(state.confirmationId)) {
+        // 凭据的校验与消费都在 ConfirmationService 里，这里只认它给的裁决：不通过就什么都不动，
+        // 他还能按原来那个按钮重来一次；通过则凭据当场作废，同一把钥匙用不了第二回。
+        ConfirmationService.Decision decision = confirmations.consume(state, confirmationId);
+        if (!decision.accepted()) {
             return respondWithPlan(state, "这份确认已经失效或已办理，请查看当前计划后重新确认。",
                     state.appointmentId == null ? List.of(q("检查计划", "START_PLAN", "")) : bookedActions(state));
         }
-        state.confirmationId = null;
         conversations.addMessage(state.id, "user", approved ? "[确认] 执行操作" : "[确认] 暂不执行");
-
-        if ("MEMO".equals(state.pendingAction)) {
-            return confirmMemo(state, approved);
-        }
-
-        if ("CANCEL_MANAGED".equals(state.pendingAction)) {
-            return confirmManagedCancel(state, approved);
-        }
-
-        if (!approved) {
-            if ("CANCEL".equals(state.pendingAction) || "CANCEL_EXISTING".equals(state.pendingAction)) {
-                state.pendingAction = "CREATE";
-                state.pendingAppointmentId = null;
-                state.pendingAppointmentIds = List.of();
-                if (state.interruptedStage != null) {
-                    state.stage = state.interruptedStage;
-                    return respond(state, "好的，原预约已经保留。您要继续刚才的复诊办理吗？",
-                            resumeReplies(state));
-                }
-                state.stage = ConversationState.Stage.COMPLETED;
-                state.taskStatus = ConversationState.TaskStatus.COMPLETED;
-                return respond(state, "好的，原预约已经保留，没有执行取消操作。",
-                        List.of(q("查询我的预约", "QUERY_APPOINTMENTS", ""), q("重新办理", "NEW_BOOKING", "")));
-            }
-            state.pendingAction = "CREATE";
-            state.stage = state.appointmentId == null ? ConversationState.Stage.READY_TO_PLAN
-                    : (state.materialReminderDone && (!Boolean.TRUE.equals(state.needTravel) || state.departureReminderDone)
-                    && (!Boolean.TRUE.equals(state.notifyFamily) || state.notificationDone)
-                    ? ConversationState.Stage.COMPLETED : ConversationState.Stage.PARTIAL);
-            state.taskStatus = state.appointmentId == null
-                    ? ConversationState.TaskStatus.ACTIVE : ConversationState.TaskStatus.COMPLETED;
-            return respondWithPlan(state, "没有执行本次操作，已有预约保留。您可以返回修改。",
-                    state.appointmentId == null ? List.of(q("修改日期", "CHANGE_DATE", ""), q("修改偏好", "EDIT_PREFERENCES", ""), q("检查计划", "START_PLAN", "")) : bookedActions(state));
-        }
-        try {
-            // 代他人办理走照护端那条真实链路。老人端下面这段会把预约直接建到 state.userId 名下，
-            // 既不写 arranged_by 也不跑协同通知，老人端就看不出这份安排是别人代约的。
-            if (state.caregiving()) return executeCaregiverBooking(state);
-            if ("CANCEL".equals(state.pendingAction) || "CANCEL_EXISTING".equals(state.pendingAction)) {
-                List<String> targetIds = pendingCancellationIds(state);
-                appointmentTool.cancelAll(state.id, targetIds, state.userId);
-                state.pendingAction = "CREATE";
-                state.pendingAppointmentId = null;
-                state.pendingAppointmentIds = List.of();
-                if (state.appointmentId != null && targetIds.contains(state.appointmentId)) state.appointmentId = null;
-                String cancelled = targetIds.size() == 1 ? "这条已确认预约" : "这" + targetIds.size() + "条已确认预约";
-                if (state.interruptedStage != null) {
-                    state.stage = state.interruptedStage;
-                    return respond(state, cancelled + "已经取消，原模拟号源已释放。要继续刚才未完成的办理吗？",
-                            resumeReplies(state));
-                }
-                state.stage = ConversationState.Stage.CANCELLED;
-                state.taskStatus = ConversationState.TaskStatus.CANCELLED;
-                return respond(state, cancelled + "已经取消，原模拟号源已经释放。",
-                        List.of(q("查询我的预约", "QUERY_APPOINTMENTS", ""), q("重新办理", "NEW_BOOKING", "")));
-            }
-            if (!ready(state) || !state.scheduleChecked || state.travelPlan == null) {
-                state.stage = ConversationState.Stage.READY_TO_PLAN;
-                return advance(state, ExtractedFacts.empty());
-            }
-            if (state.appointmentId == null) {
-                state.appointmentId = state.originalAppointmentId == null
-                        ? appointmentTool.submit(state.id, state.selectedSlot.id(), state.userId)
-                        : appointmentTool.reschedule(state.id, state.originalAppointmentId, state.selectedSlot.id(), state.userId);
-                state.originalAppointmentId = null;
-                conversations.save(state, null);
-                rememberBookingPreferences(state);
-            }
-            LocalDateTime at = LocalDateTime.of(state.selectedSlot.date(), state.selectedSlot.time());
-            if (!state.materialReminderDone) {
-                callTool(state, "schedule.createReminder", Map.of("title", "复诊材料准备提醒", "remindAt", at.minusDays(1)),
-                        () -> scheduleTool.createReminder(state.id, state.userId, "复诊材料准备提醒", at.minusDays(1)));
-                state.materialReminderDone = true;
-                conversations.save(state, null);
-            }
-            if (Boolean.TRUE.equals(state.needTravel) && !state.departureReminderDone) {
-                callTool(state, "schedule.createReminder", Map.of("title", "复诊出发提醒", "remindAt", state.travelPlan.departureAt().minusMinutes(10)),
-                        () -> scheduleTool.createReminder(state.id, state.userId, "复诊出发提醒", state.travelPlan.departureAt().minusMinutes(10)));
-                state.departureReminderDone = true;
-                conversations.save(state, null);
-            }
-            if (Boolean.TRUE.equals(state.notifyFamily) && !state.notificationDone) {
-                callTool(state, "family.notify", Map.of("contactId", state.contact.id(), "message", notificationMessage(state)),
-                        () -> familyTool.notify(state.id, state.contact.id(), notificationMessage(state)));
-                state.notificationDone = true;
-                conversations.save(state, null);
-            }
-            materialPreparationTool.initialize(state.id, state.appointmentId, state.department, state.materials);
-            // 老人把“由安排者约好的复诊”改期成功 → 通知安排者
-            if (state.arrangedArrangerId != null && state.appointmentId != null && state.selectedSlot != null) {
-                careBooking.notifyCaregiver(state.arrangedArrangerId, state.userId,
-                        arrangerRescheduleMessage(state), "reschedule");
-                state.arrangedArrangerId = null;
-            }
-            state.stage = ConversationState.Stage.COMPLETED;
-            state.taskStatus = ConversationState.TaskStatus.COMPLETED;
-            return completionResult(state);
-        } catch (RuntimeException error) {
-            return toolError(state, error);
-        }
-    }
-
-    private List<String> pendingCancellationIds(ConversationState state) {
-        if (state.pendingAppointmentIds != null && !state.pendingAppointmentIds.isEmpty()) {
-            return state.pendingAppointmentIds.stream().distinct().toList();
-        }
-        String target = state.pendingAppointmentId != null ? state.pendingAppointmentId : state.appointmentId;
-        if (target == null || target.isBlank()) throw new IllegalStateException("当前确认卡没有可取消的预约");
-        return List.of(target);
+        // 这一轮到底要执行哪件事，由凭据上的登记说了算：动作类型与完整目标集合在签发时就冻在
+        // PendingOperation 里，此后任何会话字段怎么变都影响不了它。分派见 ConfirmationDispatcher。
+        return dispatcher.dispatch(state, decision.operation(), approved, this);
     }
 
     private AgentTurnResponse executionResult(ConversationState state, String message) {
@@ -1678,7 +2225,8 @@ public class FollowupAgentService {
     /**
      * 预约完成路径：口播与文字全部由权威 ResultCard 字段确定性拼接，不经过回答模型改写，避免关键事实被压缩或变形。
      */
-    private AgentTurnResponse completionResult(ConversationState state) {
+    @Override
+    AgentTurnResponse completionResult(ConversationState state) {
         ResultCard card = recordResult(state);
         String narration = completionNarration(card);
         List<QuickReply> actions = new ArrayList<>();
@@ -1689,75 +2237,6 @@ public class FollowupAgentService {
         return finishWithoutModel(state, response);
     }
 
-    /**
-     * 家属/志愿者确认后，替长辈把这次复诊落到真实数据里。
-     *
-     * <p>交给 {@link CareBookingService} 而不是在这里重写一遍：它本来就带归属校验、真实号源、
-     * 防重复预约、给老人的提醒，以及代约结果对家属/志愿者的协同通知。
-     * 自己再走一遍老人端的执行，等于让同一个业务有两条会逐渐走散的实现。
-     */
-    private AgentTurnResponse executeCaregiverBooking(ConversationState state) {
-        String subject = elderName(state.userId);
-        try {
-            if ("CANCEL".equals(state.pendingAction) || "CANCEL_EXISTING".equals(state.pendingAction)) {
-                careBooking.cancelUpcoming(state.actorUserId, state.userId);
-                state.pendingAction = "CREATE";
-                state.pendingAppointmentId = null;
-                state.pendingAppointmentIds = List.of();
-                state.appointmentId = null;
-                state.stage = ConversationState.Stage.CANCELLED;
-                state.taskStatus = ConversationState.TaskStatus.CANCELLED;
-                conversations.save(state, null);
-                return respondWithoutModel(state, "已取消" + subject + "的这次复诊，号源已经释放。"
-                                + "如果这张预约原本是别的照护者安排的，对方也会收到通知。",
-                        List.of(q("重新安排", "NEW_BOOKING", ""),
-                                q("查看" + subject + "的复诊安排", "QUERY_APPOINTMENTS", "")));
-            }
-            if (!ready(state)) {
-                state.stage = ConversationState.Stage.READY_TO_PLAN;
-                return advance(state, ExtractedFacts.empty());
-            }
-            CareBookingService.BookingRequest request = new CareBookingService.BookingRequest(
-                    state.hospitalId, state.departmentId, state.date.toString(), state.selectedSlot.id(),
-                    state.needTravel, state.transport, state.needCompanion);
-            // 改期走 modify（原位换号源、不停旧记录）；新约才走 book。
-            AppointmentRecordStore.AppointmentView booked = state.originalAppointmentId == null
-                    ? careBooking.book(state.actorUserId, state.userId, request)
-                    : careBooking.modify(state.actorUserId, state.userId, request);
-            state.appointmentId = booked.appointmentId();
-            state.originalAppointmentId = null;
-            // 提醒、材料与协同通知都已由 CareBookingService 落库，这里只把会话状态对齐，
-            // 免得界面上继续显示“未完成”。
-            state.materialReminderDone = true;
-            state.departureReminderDone = Boolean.TRUE.equals(state.needTravel);
-            state.notificationDone = true;
-            state.stage = ConversationState.Stage.COMPLETED;
-            state.taskStatus = ConversationState.TaskStatus.COMPLETED;
-            conversations.save(state, null);
-            String reply = "已经替" + subject + "安排好复诊：" + managedShort(booked)
-                    + "。复诊提醒已经建好，" + subject + "下次打开助手就会看到这次安排。";
-            // 结果卡直接取 CareBookingService 写好的那条记录：它已经写明了代约人和陪同人，
-            // 再走一遍老人端的 recordResult 会把这两项覆盖成“不通知家属”那套口径。
-            ResultCard result = new ResultCard(booked.appointmentId(), booked.hospital(), booked.department(),
-                    booked.date().format(DATE_LABEL), booked.time().format(TIME_LABEL),
-                    state.materials.isEmpty() ? booked.materials() : state.materials,
-                    booked.departureAt() == null ? "未提供出发建议（路线或时间信息不足）"
-                            : booked.departureAt().format(TIME_LABEL),
-                    booked.reminderStatus(), booked.familyStatus());
-            return finishWithoutModel(state, new AgentTurnResponse(state.id, state.stage.name(), reply,
-                    caregiverBookedActions(subject), plan(state), null, result,
-                    traces.findByConversation(state.id), null, reply, null));
-        } catch (IllegalArgumentException error) {
-            // 号源已失效、已有进行中的预约、关系被撤销——这些都是用户听得懂也改得动的，
-            // 原样报出来，不要裹成一句“办理遇到问题”。
-            state.stage = ConversationState.Stage.READY_TO_PLAN;
-            return respondWithoutModel(state, error.getMessage(),
-                    List.of(q("先取消已有预约", "CANCEL_APPOINTMENT", ""),
-                            q("重新选择时间", "CHANGE_DATE", ""), q("联系人工帮助", "CONTACT_HUMAN", "")));
-        } catch (RuntimeException error) {
-            return toolError(state, error);
-        }
-    }
 
     private ResultCard recordResult(ConversationState state) {
         String reminders = reminderStatusLabel(state);
@@ -1810,13 +2289,15 @@ public class FollowupAgentService {
         return minute == 0 ? prefix : prefix + minute + "分";
     }
 
-    private List<QuickReply> bookedActions(ConversationState state) {
+    @Override
+    List<QuickReply> bookedActions(ConversationState state) {
         return List.of(q("查看事项", "OPEN_TASKS", ""),
                 state.stage == ConversationState.Stage.PARTIAL ? q("补办未完成事项", "RETRY_EXECUTION", "") : q("修改预约", "EDIT_BOOKING", ""),
                 q("取消预约", "CANCEL_APPOINTMENT", ""), q("新建办理", "NEW_BOOKING", ""));
     }
 
-    private <T> T callTool(ConversationState state, String name, Map<String, ?> parameters, java.util.function.Supplier<T> operation) {
+    @Override
+    <T> T callTool(ConversationState state, String name, Map<String, ?> parameters, java.util.function.Supplier<T> operation) {
         try { return operation.get(); }
         catch (RuntimeException error) {
             traces.record(state.id, name, parameters, Map.of("error", String.valueOf(error.getMessage())), false);
@@ -1824,8 +2305,9 @@ public class FollowupAgentService {
         }
     }
 
-    private AgentTurnResponse toolError(ConversationState state, RuntimeException error) {
-        state.confirmationId = null;
+    @Override
+    AgentTurnResponse toolError(ConversationState state, RuntimeException error) {
+        confirmations.clear(state);
         traces.record(state.id, "workflow.error", Map.of("stage", state.stage.name()), Map.of("error", String.valueOf(error.getMessage())), false);
         if (state.appointmentId != null) {
             if ("CANCEL".equals(state.pendingAction)) {
@@ -1842,6 +2324,69 @@ public class FollowupAgentService {
         state.taskStatus = ConversationState.TaskStatus.ACTIVE;
         return respondWithPlan(state, "本步骤未完成：" + error.getMessage() + "。已保留信息，请重试或修改。",
                 List.of(q("重试检查", "START_PLAN", ""), q("修改日期", "CHANGE_DATE", ""), q("人工帮助", "CONTACT_HUMAN", "")));
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // ConfirmationSupport：确认执行器执行完之后，交回编排层做收尾的那几个口子。
+    //
+    // 这里全是转接，不新增任何判断——每个方法都对应本类里一个已有的出口。之所以要开这个口子、
+    // 以及为什么是包级私有的抽象类而不是接口，见 ConfirmationSupport 的类注释。
+    // ---------------------------------------------------------------------------------------
+
+    /** 草稿信息是否齐全（执行器读它决定「能不能照这份草稿写下去」）。 */
+    @Override
+    boolean draftComplete(ConversationState state) {
+        return ready(state);
+    }
+
+    /**
+     * 这张卡是不是「照草稿开新预约」、而且草稿里那个时段已经过去了。
+     *
+     * <p>只挡「照着草稿开新预约」这一条路（pendingAction 为 CREATE 或未设）。完成过的会话仍然
+     * 留着当初那份 selectedSlot，取消的是老预约、跟这个时段没关系，拿它去拦会让老人越等越
+     * 取消不了，只能重新选日期。
+     */
+    @Override
+    boolean draftSlotExpired(ConversationState state) {
+        return booksFromDraft(state) && ready(state) && slotAlreadyPassed(state.selectedSlot);
+    }
+
+    /** 被打断过的那件事的「继续办理」按钮。 */
+    @Override
+    List<QuickReply> resumeInterruptedReplies(ConversationState state) {
+        return resumeReplies(state);
+    }
+
+    /** 本会话到目前为止的工具调用记录。 */
+    @Override
+    List<AgentTurnResponse.ToolTrace> traceList(ConversationState state) {
+        return traces.findByConversation(state.id);
+    }
+
+    /** 备忘落库成功后的回读话术（一句话说了几天就逐条念）。 */
+    @Override
+    String memoRecordedReply(List<MemoStore.MemoView> created, String repeatRule) {
+        return memoSavedReply(created, repeatRule);
+    }
+
+    /** 多天备忘只写成了其中几条时的回读话术：写成的念，没写成的说清。 */
+    @Override
+    String memoPartlyRecordedReply(List<MemoStore.MemoView> created, List<LocalDateTime> missed,
+                                   String repeatRule) {
+        return memoPartlySavedReply(created, missed, repeatRule);
+    }
+
+    /** 业务执行器自己接住异常时，把这次失败记下来。 */
+    @Override
+    void recordToolFailure(ConversationState state, RuntimeException error) {
+        traces.record(state.id, "workflow.error", Map.of("stage", state.stage.name()),
+                Map.of("error", String.valueOf(error.getMessage())), false);
+    }
+
+    /** 交回漏斗继续下一步（信息不齐时）。 */
+    @Override
+    AgentTurnResponse advance(ConversationState state) {
+        return advance(state, ExtractedFacts.empty());
     }
 
     private boolean stopped(ConversationState state) {
@@ -1886,7 +2431,7 @@ public class FollowupAgentService {
     }
 
     private AgentTurnResponse emergency(ConversationState state) {
-        state.confirmationId = null;
+        confirmations.clear(state);
         if (state.taskStatus == ConversationState.TaskStatus.ACTIVE) {
             state.taskStatus = ConversationState.TaskStatus.PAUSED;
         }
@@ -1919,7 +2464,7 @@ public class FollowupAgentService {
     }
 
     private void invalidate(ConversationState state) {
-        state.confirmationId = null;
+        confirmations.clear(state);
         state.pendingAppointmentIds = List.of();
         state.scheduleChecked = false;
         state.travelPlan = null;
@@ -1985,7 +2530,8 @@ public class FollowupAgentService {
         return missing;
     }
 
-    private String notificationMessage(ConversationState state) {
+    @Override
+    String notificationMessage(ConversationState state) {
         return "复诊安排：" + state.hospital + " " + state.department + "，" + state.date.format(DATE_LABEL)
                 + " " + state.selectedSlot.time().format(TIME_LABEL) + (Boolean.TRUE.equals(state.needCompanion) ? "，需要陪同。" : "，不需要陪同。");
     }
@@ -2027,44 +2573,99 @@ public class FollowupAgentService {
     private AgentTurnResponse beginCancelExistingAppointment(ConversationState state, ExtractedFacts facts,
                                                              String originalMessage, String modelDraft,
                                                              CancellationSelection structuredSelection) {
+        return beginCancellationStep(state, facts, originalMessage, modelDraft, structuredSelection).response();
+    }
+
+    private CancellationStep beginCancellationStep(ConversationState state, ExtractedFacts facts,
+                                                   String originalMessage, String modelDraft,
+                                                   CancellationSelection structuredSelection) {
         if (structuredSelection != null && state.stage == ConversationState.Stage.AWAITING_CONFIRMATION
                 && ("CANCEL_EXISTING".equals(state.pendingAction) || "CANCEL".equals(state.pendingAction))) {
-            retireCancellationConfirmationForRevision(state);
+            confirmations.retire(state);
         }
         rememberInterruptedTask(state, "CANCEL_EXISTING_APPOINTMENT");
         if (structuredSelection != null && !structuredSelection.valid()) {
-            return cancellationCandidateList(state,
-                    myAppointmentTool.search(state.id, state.userId, null, null, null),
-                    "我还不能确定您想取消哪些预约，请从真实预约中选择，或重新说明范围。");
+            // 参数缺项或取值不合法：这次调用根本不够用，绝不能顺手当成「都取消」。
+            // 仍然把真实候选摆出来让老人点，但类型是「缺少信息」，和「对象不唯一」分得开。
+            return clarifyCancellationTargets(state, structuredSelection.rejection(), null);
         }
         List<AppointmentSummary> rows = structuredSelection == null
                 ? cancellationCandidates(state, facts, originalMessage)
                 : cancellationCandidates(state, structuredSelection);
         if (rows.isEmpty()) {
             state.sideTask = null;
-            return respond(state, "没有找到符合条件的已确认预约，所以没有执行取消。",
-                    resumeReplies(state, q("查询我的预约", "QUERY_APPOINTMENTS", "")));
+            // 没查到既不是出错也不是要澄清：把事实说清楚，再给一个能往下走的入口。
+            return new CancellationStep(ToolOutcome.Kind.NO_RESULT,
+                    respond(state, "没有找到符合条件的已确认预约，所以没有执行取消。",
+                            resumeReplies(state, q("查询我的预约", "QUERY_APPOINTMENTS", ""))),
+                    "库里没有符合条件的已确认预约");
         }
-        if (rows.size() == 1) return prepareExistingCancellation(state, List.of(rows.get(0)), modelDraft);
+        if (rows.size() == 1) {
+            return new CancellationStep(ToolOutcome.Kind.NEEDS_CONFIRMATION,
+                    prepareExistingCancellation(state, List.of(rows.get(0)), modelDraft),
+                    "已生成确认卡，等待老人确认");
+        }
 
         // “都取消 / 某日前的”已经明确圈定了一组对象：展示整组确认卡，一次确认后原子取消。
         // 普通“取消预约”没有圈定范围，仍只展示候选，不替老人猜。
         boolean batch = structuredSelection == null
                 ? isBatchCancellationRequest(originalMessage) : structuredSelection.batch();
         if (!state.caregiving() && batch) {
-            return prepareExistingCancellation(state, rows, modelDraft);
+            return new CancellationStep(ToolOutcome.Kind.NEEDS_CONFIRMATION,
+                    prepareExistingCancellation(state, rows, modelDraft),
+                    "已生成整组确认卡，等待老人确认");
         }
-        return cancellationCandidateList(state, rows, "我查到多条已确认预约。为防止取消错，请选择要取消的那一条。");
+        return clarifyCancellationTargets(state, null, rows);
     }
 
-    private AgentTurnResponse cancellationCandidateList(ConversationState state, List<AppointmentSummary> rows,
-                                                        String message) {
-        List<QuickReply> choices = rows.stream()
-                .map(item -> q(item.date().format(DATE_LABEL) + " " + item.time().format(TIME_LABEL)
-                                + " " + item.hospital(),
-                        "SELECT_APPOINTMENT_TO_CANCEL", item.appointmentId()))
-                .toList();
-        return respond(state, message, choices);
+    /**
+     * 取消对象不唯一（或参数不够用）时问「您说的是哪一条」。
+     *
+     * <p>问题可以来自模型，候选永远来自数据库：{@code rows} 是调用方刚用真实工具筛出来的，
+     * 传空则在 {@link ClarificationInteractionTool} 里从 {@code appointment.queryMine} 现取。
+     * 走到这里不会建卡、不会发 {@code confirmationId}——老人点选之后仍然要过那张确认卡。
+     */
+    private CancellationStep clarifyCancellationTargets(ConversationState state,
+                                                        ToolContract.Rejection rejection,
+                                                        List<AppointmentSummary> rows) {
+        List<AppointmentSummary> candidates = rows != null ? rows
+                : myAppointmentTool.search(state.id, state.userId, null, null, null);
+        boolean missingInfo = rejection != null;
+        ClarificationInteractionTool.Prompt prompt = clarificationInteraction.askWhichAppointmentToCancel(
+                state.id, candidates, null,
+                missingInfo
+                        ? "我还需要知道取消的范围，才能确定要取消哪几条预约。您可以从下面的真实预约里直接选一条。"
+                        : "我查到多条已确认预约。为防止取消错，请选择要取消的那一条。");
+        // 「一条都没有」盖过「缺参数」：没对象可选时，说清没查到比追问范围更有用。
+        ToolOutcome.Kind kind = missingInfo && prompt.kind() == ToolOutcome.Kind.NEEDS_CLARIFICATION
+                ? ToolOutcome.Kind.MISSING_INFO : prompt.kind();
+        String detail = missingInfo ? rejection.detail()
+                : prompt.kind() == ToolOutcome.Kind.NO_RESULT ? "库里没有可取消的已确认预约"
+                : "候选 " + candidates.size() + " 条，等老人点选或说出是哪一条";
+        // 候选列表同时是要念出来的话，所以这份回复不再交给模型润色：按钮是按它生成的那几条，
+        // 文字被改写就会出现「问的和按钮对不上」。
+        return new CancellationStep(kind,
+                respondWithoutModel(state, prompt.reply(), prompt.choices()), detail);
+    }
+
+    /**
+     * 澄清候选翻页：只是「再看几条」，不动任何业务状态。
+     *
+     * <p>候选每一页都从数据库现取，所以翻页看到的永远是真的；页码由按钮自己带过来（越界由工具夹回
+     * 有效范围），往前往后都到得了，候选不会再因为「只摆得下四条」而有一条谁都点不到。
+     */
+    private AgentTurnResponse showCancellationCandidatesPage(ConversationState state, String pageValue) {
+        int page = 0;
+        try {
+            page = Integer.parseInt(pageValue == null ? "" : pageValue.trim());
+        } catch (NumberFormatException ignored) {
+            // 页码读不出来就回到第一页：翻页是展示动作，不该因为一个脏参数把人卡住。
+        }
+        rememberInterruptedTask(state, "CANCEL_EXISTING_APPOINTMENT");
+        ClarificationInteractionTool.Prompt prompt = clarificationInteraction.askWhichAppointmentToCancel(
+                state.id, myAppointmentTool.search(state.id, state.userId, null, null, null), null,
+                "您想取消的是哪一条？可以从下面的真实预约里直接选一条。", page);
+        return respondWithoutModel(state, prompt.reply(), prompt.choices());
     }
 
     /** 模型模式只消费结构化工具参数，不再从中文原句的关键词推断取消范围。 */
@@ -2100,51 +2701,37 @@ public class FollowupAgentService {
             return List.of(rows.stream().min(Comparator.comparing(this::appointmentAt)).orElseThrow());
         }
         if (rows.size() > 1 && "NEAREST".equals(selection.position())) {
-            LocalDateTime now = clock.nowDateTime();
+            LocalDateTime now = clock.now();
             return List.of(rows.stream().min(Comparator.comparingLong(item ->
                     Math.abs(java.time.Duration.between(now, appointmentAt(item)).toMinutes()))).orElseThrow());
         }
         return rows;
     }
 
+    /**
+     * 把模型给的结构化参数读成取消范围。
+     *
+     * <p>参数读的是 {@link AgentRuntime#acceptedArguments} 归一化之后的那份：只留工具声明过的字段，
+     * 枚举补大写，空串当没给。模型硬塞的 {@code appointmentId} 不在声明里，读到这一步就已经没了——
+     * 「模型不得指定取消哪一条」这条约束靠的就是它，不是靠提示词里的一句叮嘱。
+     *
+     * <p>「这次调用够不够用」由 {@link ToolContract} 判，这里不另写一套范围检查。
+     */
     private CancellationSelection modelCancellationSelection(AgentRuntime.Outcome outcome) {
         if (!outcome.modelDriven() || outcome.actionType() != PlannerActionType.CALL_CONFIRMATION_TOOL
                 || outcome.proposedTools() == null || outcome.proposedTools().size() != 1
                 || !"interaction.requestConfirmation".equals(outcome.proposedTools().get(0).toolName())) {
             return null;
         }
-        Map<String, String> args = outcome.proposedTools().get(0).arguments();
+        PlannerToolCall call = outcome.proposedTools().get(0);
+        ToolContract.Rejection rejection = agentRuntime.rejection(call.toolName(), call);
+        Map<String, String> args = agentRuntime.acceptedArguments(call.toolName(), call);
         String scope = upper(args.get("scope"));
-        LocalDate date = parseIsoDate(args.get("date"));
-        LocalTime time = parseIsoTime(args.get("time"));
-        String direction = upper(args.get("direction"));
-        String period = upper(args.get("period"));
-        String position = upper(args.get("position"));
-        boolean knownScope = List.of("ALL", "DATE_RANGE", "SINGLE_FILTER", "AMBIGUOUS").contains(scope);
-        boolean valid = knownScope;
-        if ("DATE_RANGE".equals(scope)) {
-            valid = date != null && List.of("BEFORE", "ON_OR_BEFORE", "AFTER", "ON_OR_AFTER").contains(direction);
-        } else if ("SINGLE_FILTER".equals(scope)) {
-            valid = date != null || time != null || List.of("MORNING", "AFTERNOON").contains(period)
-                    || List.of("NEAREST", "EARLIEST").contains(position)
-                    || notBlank(args.get("hospital")) || notBlank(args.get("department"));
-        }
-        return new CancellationSelection(valid, scope, date, direction, time, period, position,
-                blankToNull(args.get("hospital")), blankToNull(args.get("department")));
-    }
-
-    private void retireCancellationConfirmationForRevision(ConversationState state) {
-        state.confirmationId = null;
-        state.pendingAppointmentId = null;
-        state.pendingAppointmentIds = List.of();
-        state.pendingAction = "CREATE";
-        if (state.interruptedStage != null) {
-            state.stage = state.interruptedStage;
-            state.taskStatus = ConversationState.TaskStatus.ACTIVE;
-        } else {
-            state.stage = ConversationState.Stage.COMPLETED;
-            state.taskStatus = ConversationState.TaskStatus.COMPLETED;
-        }
+        return new CancellationSelection(rejection == null, scope,
+                ToolContract.parseDate(args.get("date")), upper(args.get("direction")),
+                ToolContract.parseTime(args.get("time")), upper(args.get("period")),
+                upper(args.get("position")), blankToNull(args.get("hospital")),
+                blankToNull(args.get("department")), rejection);
     }
 
     private List<AppointmentSummary> cancellationCandidates(ConversationState state, ExtractedFacts facts,
@@ -2201,8 +2788,8 @@ public class FollowupAgentService {
         Matcher matcher = CANCELLATION_DATE.matcher(message == null ? "" : message);
         if (!matcher.find()) return modelDate;
         try {
-            // 这里筛的是数据库里已经存在的预约，过去两天也可能仍是 CONFIRMED。
-            // 因此“9月10日”按今年理解，不能套新建预约的“过去日期顺延到明年”规则。
+            // 这里筛的是数据库里已经存在的预约，过去两天也可能仍是 CONFIRMED，
+            // 所以“9月10日”一律按今年理解，只按业务时区的今天取年份。
             return LocalDate.of(clock.today().getYear(), Integer.parseInt(matcher.group(1)),
                     Integer.parseInt(matcher.group(2)));
         } catch (RuntimeException ignored) {
@@ -2250,7 +2837,7 @@ public class FollowupAgentService {
                     resumeReplies(state, q("查询我的预约", "QUERY_APPOINTMENTS", "")));
         }
         if (candidates.size() > 1 && latest) {
-            LocalDateTime now = clock.nowDateTime();
+            LocalDateTime now = clock.now();
             candidates = List.of(candidates.stream().min(Comparator.comparingLong(item ->
                     Math.abs(java.time.Duration.between(now, appointmentAt(item)).toMinutes()))).orElseThrow());
         } else if (candidates.size() > 1 && earliest) {
@@ -2300,11 +2887,21 @@ public class FollowupAgentService {
         state.pendingAppointmentId = target.appointmentId();
         state.pendingAppointmentIds = targets.stream().map(AppointmentSummary::appointmentId).distinct().toList();
         state.sideTask = "CANCEL_EXISTING_APPOINTMENT";
-        state.confirmationId = UUID.randomUUID().toString();
-        state.stage = ConversationState.Stage.AWAITING_CONFIRMATION;
+        // 授权范围与凭据一起交给 ConfirmationService：这一步之后，「这张卡对哪几条生效」就不再是
+        // 一个谁也说不准的问题——它和凭据绑在一起（一起进快照、一起作废），重启也不会缩水。
+        // 类型由这里给死：本方法建的就是取消预约的卡，不看 pendingAction 现算。
+        //
+        // 「谁的业务链路来取消」也一起给死：本人自办走老人端那批原子取消，代他人办理走
+        // CareBookingService（它会一并通知其他照护者）。这两个取值是两类动作，不是同一个类型
+        // 加一个执行时再看一眼的开关——那一眼用的又是可变状态，等于把已经冻在凭据里的事重新交还回去。
+        String confirmationId = confirmations.issue(state,
+                state.caregiving()
+                        ? ConfirmationService.PendingOperation.Kind.CANCEL_APPOINTMENTS_CAREGIVER
+                        : ConfirmationService.PendingOperation.Kind.CANCEL_APPOINTMENTS,
+                state.pendingAppointmentIds);
         state.taskStatus = ConversationState.TaskStatus.AWAITING_CONFIRMATION;
         ConfirmationInteractionTool.Prompt prompt = confirmationInteraction.requestCancellation(
-                state.id, state.confirmationId, targets, modelDraft);
+                state.id, confirmationId, targets, modelDraft);
         return finishWithoutModel(state, new AgentTurnResponse(state.id, state.stage.name(),
                 prompt.reply(), List.of(), null, prompt.card(), targets.size() == 1 ? resultCard(target) : null,
                 traces.findByConversation(state.id), null, prompt.speechText(), null));
@@ -2617,6 +3214,200 @@ public class FollowupAgentService {
                 resumeReplies(state));
     }
 
+    /** 已确认预约的路线：真正打开地图的那一种。 */
+    private static final String MODE_APPOINTMENT = "APPOINTMENT";
+    /** 候选条件的估算：只回用时和距离，不打开地图。 */
+    private static final String MODE_CANDIDATE = "CANDIDATE";
+
+    /**
+     * {@code travel.routePlan} 的入口。两种语义靠结构化 {@code mode} 分开，不靠「带了哪些参数」猜：
+     * APPOINTMENT 看某一次已确认预约的路线（Java 校验预约归属，照旧打开地图、发页面指令），
+     * CANDIDATE 只估算候选条件的用时（不打开地图、不改草稿）。
+     *
+     * <p>mode 缺省时才按参数唯一推断：只给 appointmentId → APPOINTMENT，只给候选参数 → CANDIDATE。
+     * 两边都给了、或者 mode 和参数对不上，一律不猜、转成澄清——猜错的代价不对称：
+     * 把「打开地图」猜成估算，老人被留在比较的半路上；把估算猜成「打开地图」，
+     * 则会在他还没定下来的时候跳走页面。
+     *
+     * <p><b>transport 只属于 CANDIDATE</b>（用于候选路线比较）。APPOINTMENT 用的是这条预约和
+     * 用户资料里已经存着的交通方式，<b>不接受这一次的 transport 覆盖</b>，所以带上它不算混用、
+     * 也不用报错，忽略即可。三种没分清的情形各给一句话，老人接下来要做的事不一样。
+     *
+     * <p>一个参数都不给的老调用（例如老人点了「查看地图」）原样走 {@link #showTravelGuide}，
+     * 那条路本来就会去数据库里定位到底要看哪一次预约。
+     */
+    private AgentTurnResponse travelGuideFor(ConversationState state, ExtractedFacts facts,
+                                            String originalMessage, AgentRuntime.Outcome outcome) {
+        if (!outcome.modelDriven()) {
+            return showTravelGuide(state, facts, originalMessage, false);
+        }
+        Map<String, String> arguments = toolArguments(outcome, "travel.routePlan");
+        String mode = blankToNull(arguments.get("mode"));
+        String appointmentId = blankToNull(arguments.get("appointmentId"));
+        // 「混着给」只看预约编号和「哪一家、哪一天、几点」。transport 不算：它只属于 CANDIDATE，
+        // APPOINTMENT 忽略它（预约与资料里存着什么就按什么走），带上它只是多了一个用不上的字段。
+        if (appointmentId != null && hasRouteCandidateLocation(arguments)) {
+            return routeModeMixedArguments(state);
+        }
+        boolean candidateArguments = hasRouteCandidateArguments(arguments);
+        if (mode == null) {
+            if (appointmentId == null && !candidateArguments) {
+                return showTravelGuide(state, facts, originalMessage, false);
+            }
+            mode = appointmentId != null ? MODE_APPOINTMENT : MODE_CANDIDATE;
+        }
+        if (MODE_APPOINTMENT.equals(mode)) {
+            if (appointmentId == null) return routeModeMissingAppointment(state);
+            return routeForAppointment(state, appointmentId);
+        }
+        // CANDIDATE：给药了 appointmentId 是模式说不通，什么都没给是条件不够，两句话不一样。
+        if (appointmentId != null) return routeModeMixedArguments(state);
+        if (!candidateArguments) return routeModeMissingConditions(state);
+        return routeEstimateReadOnly(state, arguments);
+    }
+
+    /**
+     * 三种「没分清」分开说，因为老人接下来要做的事不一样：缺预约编号要去挑一条预约，
+     * 缺条件要把医院或时间说出来，模式矛盾要说明白他到底想看哪一种。
+     *
+     * <p>都不摆候选：老人这一轮问的是路线，Java 手上并没有一个「正确的那一次预约」，
+     * 随便摆几条出来等于把猜错的责任推给他。
+     */
+    private AgentTurnResponse routeModeMissingAppointment(ConversationState state) {
+        return answerReadOnly(state, "您想看的是某一次复诊预约的路线，但没告诉我是哪一次。"
+                + "请从您的预约里选一条，我再打开它的地图。");
+    }
+
+    private AgentTurnResponse routeModeMissingConditions(ConversationState state) {
+        return answerReadOnly(state, "要估算路上要多久，我还需要知道去哪家医院、哪一天几点。"
+                + "请告诉我要去的医院或者时间。");
+    }
+
+    private AgentTurnResponse routeModeMixedArguments(ConversationState state) {
+        return answerReadOnly(state, "这一次的路线请求我没分清：是要看某一次已确认预约的路线，"
+                + "还是只估算某个候选条件的用时。请说明白是看已有预约的路线，还是估算候选的路线。");
+    }
+
+    /**
+     * 已确认预约的路线：这一条才是真正打开地图、发页面跳转指令的那条路。
+     *
+     * <p><b>预约归属由 SQL 把关</b>：{@link TravelGuideService#forAppointment} 的
+     * {@code WHERE a.user_id=? AND a.id=?} 就是这次调用的鉴权——模型给的 appointmentId 必须
+     * 真属于这位就诊人，否则查不到、抛异常，这里转成一句明确的回绝。
+     * 「不存在」和「不是您的」回同一句话，不给出可比较的差异，避免越权调用靠回话探测预约是否存在。
+     * 越权时不发 UiDirective，页面不会因为一个模型给的编号被带走。
+     */
+    private AgentTurnResponse routeForAppointment(ConversationState state, String appointmentId) {
+        // 紧急处置期间安全提示优先：这一条和 showTravelGuide 一样，不自动跳页。
+        if (state.stage == ConversationState.Stage.EMERGENCY_PAUSED) return emergencyNotice(state);
+        try {
+            return renderTravelGuide(state, appointmentId, false);
+        } catch (IllegalArgumentException missing) {
+            return answerReadOnly(state, "没有找到这条复诊预约，所以没有打开地图。"
+                    + "您可以先查询自己的预约，再从里面选一条看路线。");
+        }
+    }
+
+    /**
+     * 这次调用有没有给 CANDIDATE 要的东西。{@code appointmentId} 不算——它是另一种模式的参数。
+     *
+     * <p>只要给了 {@code transport} 就算：医院、日期、时刻可以回退到草稿里已经明确的条件，
+     * 「坐公交去要多久」本身就是一个完整的候选估算请求。
+     */
+    private boolean hasRouteCandidateArguments(Map<String, String> arguments) {
+        return hasRouteCandidateLocation(arguments) || blankToNull(arguments.get("transport")) != null;
+    }
+
+    /**
+     * 「算哪一家、哪一天、几点」——和 {@code appointmentId} 放在同一个请求里说不通的那三项。
+     *
+     * <p>{@code transport} <b>不算</b>：它只属于 CANDIDATE。APPOINTMENT 走的是这条预约和用户资料里
+     * 已经存着的交通方式（{@code travelGuides.forAppointment} 自己取），不接受这一次的
+     * {@code transport} 覆盖——所以「APPOINTMENT + appointmentId + transport」不是混用，
+     * 是正常的看地图请求多带了一个用不上的字段，忽略它就是了，不该为它把老人拦下来问一句。
+     */
+    private boolean hasRouteCandidateLocation(Map<String, String> arguments) {
+        return blankToNull(arguments.get("hospital")) != null
+                || blankToNull(arguments.get("date")) != null
+                || blankToNull(arguments.get("time")) != null;
+    }
+
+    /**
+     * 只估算一次候选路线的用时与距离。
+     *
+     * <p><b>这一轮只查不改、也不跳页面。</b>不写 {@code state.travelPlan}、不动草稿的任何字段，
+     * 不生成 {@code UiDirective}——推荐轮里替老人「打开地图」等于把他从比较的半路上带走，
+     * 而且那条指令是给某一次真实预约用的，候选医院根本没有预约可打开。
+     *
+     * <p>路线来自模拟数据，措辞里继续保留「模拟」二字；查不到就如实说查不到，
+     * 不拿别的交通方式或别家医院的用时顶上——「大概半小时吧」是最容易被写进推荐理由的那种编造。
+     */
+    private AgentTurnResponse routeEstimateReadOnly(ConversationState state, Map<String, String> arguments) {
+        String hospitalId = state.hospitalId;
+        String hospital = state.hospital;
+        String explicitHospital = blankToNull(arguments.get("hospital"));
+        if (explicitHospital != null) {
+            // 用的还是办理流程那一份解析器，口径一致：对不上目录就直说对不上，不用草稿里的旧医院顶上。
+            CatalogEntityResolver.Match match = entityResolver.hospital(explicitHospital,
+                    hospitalCatalogTool.listHospitals(state.id));
+            if (match.type() != CatalogEntityResolver.MatchType.EXACT) {
+                return unresolvedHospitalReply(state, match);
+            }
+            hospitalId = match.only().id();
+            hospital = match.only().name();
+        }
+        if (hospitalId == null) {
+            return answerReadOnly(state, "要预估路上要多久，得先知道去哪家医院。请告诉我是哪一家。");
+        }
+        String target = hospital;
+
+        String explicitDate = blankToNull(arguments.get("date"));
+        LocalDate date = explicitDate == null ? state.date : ToolContract.parseDate(explicitDate);
+        if (explicitDate != null && date == null) {
+            return answerReadOnly(state, "我没看准您说的是哪一天（“" + explicitDate
+                    + "”）。请再说一次，例如“9月19号”，或写成 2026-09-19 这样。");
+        }
+        String explicitTime = blankToNull(arguments.get("time"));
+        LocalTime time = explicitTime == null ? draftTime(state) : ToolContract.parseTime(explicitTime);
+        if (explicitTime != null && time == null) {
+            return answerReadOnly(state, "我没看准您说的是几点（“" + explicitTime
+                    + "”）。请按 09:30 这样的写法再说一次。");
+        }
+        if (date == null || time == null) {
+            return answerReadOnly(state, "要预估到" + target + "路上要多久，还得知道是哪一天的几点。"
+                    + "请告诉我复诊的日期和时间。");
+        }
+        String explicitTransport = blankToNull(arguments.get("transport"));
+        String transport = explicitTransport != null ? explicitTransport : state.transport;
+        if (transport == null) {
+            return answerReadOnly(state, "要预估到" + target + "路上要多久，还得知道您打算怎么去"
+                    + "（打车、公交还是步行）。");
+        }
+        String chosenTransport = transport;
+        String chosenHospitalId = hospitalId;
+        LocalDateTime at = LocalDateTime.of(date, time);
+        RouteGuide route;
+        try {
+            route = callTool(state, "travel.routePlan",
+                    Map.of("hospitalId", chosenHospitalId, "transport", chosenTransport, "appointmentAt", at),
+                    () -> routeGuideTool.plan(state.id, state.userId, chosenHospitalId, at, chosenTransport));
+        } catch (RuntimeException error) {
+            // 没有这条路线就说没有，绝不按距离或经验编一个用时——推荐理由里的「大概半小时」
+            // 一旦不是工具给的，老人据此选的时间就建立在假数据上。
+            return answerReadOnly(state, "我没有查到从您登记的住址到" + target + "选择" + chosenTransport
+                    + "的路线数据，所以没法给出预计用时。您可以换一种交通方式再问我。");
+        }
+        return answerReadOnly(state, "从您登记的住址到" + target + "，选择" + route.transport() + "预计约"
+                + route.durationMinutes() + "分钟、" + distanceLabel(route.distanceMeters())
+                + "。建议" + route.departureAt().format(TIME_LABEL) + "出发"
+                + simulatedSuffix(route) + "。这一轮只是在帮您比较，没有改动手上的预约。");
+    }
+
+    /** 模拟路线必须自己说出来：推荐理由里的距离和时间是模拟数据，不能读成真实路况。 */
+    private String simulatedSuffix(RouteGuide route) {
+        return "SIMULATED".equalsIgnoreCase(String.valueOf(route.source())) ? "（模拟路线，供参考）" : "";
+    }
+
     /**
      * 出行路线。本轮事实里的日期、医院、科室必须真正参与定位预约，
      * 不能再无条件退回“最近一条有效预约”，否则用户说出的日期会在 Java 阶段被丢掉。
@@ -2741,7 +3532,7 @@ public class FollowupAgentService {
         }
         if (referenced && rows.size() > 1) {
             // “上次 / 最近”本身就是筛选条件：按离现在最近的一条收敛，仍然只认数据库里的真实记录。
-            LocalDateTime now = clock.nowDateTime();
+            LocalDateTime now = clock.now();
             rows = List.of(rows.stream().min(Comparator.comparingLong(
                     item -> Math.abs(Duration.between(now, appointmentAt(item)).toMinutes()))).orElseThrow());
         }
@@ -2885,7 +3676,7 @@ public class FollowupAgentService {
     private String latestEffectiveAppointmentId(ConversationState state) {
         List<AppointmentSummary> rows = myAppointmentTool.search(state.id, state.userId, null, null, null);
         if (rows.isEmpty()) return null;
-        LocalDateTime now = clock.nowDateTime();
+        LocalDateTime now = clock.now();
         List<AppointmentSummary> upcoming = rows.stream()
                 .filter(item -> !appointmentAt(item).isBefore(now))
                 .sorted(Comparator.comparing(this::appointmentAt)).toList();
@@ -2985,7 +3776,6 @@ public class FollowupAgentService {
             state.interruptedStage = state.stage;
             state.interruptedPendingAction = state.pendingAction;
             state.interruptedPendingAppointmentId = state.pendingAppointmentId;
-            state.returnPolicy = "ASK_TO_RESUME";
         }
         state.sideTask = sideTask;
     }
@@ -3004,7 +3794,6 @@ public class FollowupAgentService {
         state.interruptedPendingAction = null;
         state.interruptedPendingAppointmentId = null;
         state.sideTask = null;
-        state.returnPolicy = null;
     }
 
     private void discardInterruption(ConversationState state) { clearInterruption(state); }
@@ -3147,11 +3936,267 @@ public class FollowupAgentService {
                         q("稍后再查", "RETRY_QUERY", "")));
     }
 
+    // ---------------------------------------------------------------- 号源查询的条件解析
+    //
+    // 号源查询与办理草稿是两件事。老人可以随口问一句「市二院下周三有号吗」，心里并不打算
+    // 把手头正在办的那笔预约改掉。所以下面先把「这次到底要查哪家医院、哪个科室、哪一天」
+    // 解析清楚：模型显式给的参数说了算，参数省略时才沿用会话里已经明确的条件；解析不出来
+    // 就停下说清楚，绝不悄悄退回旧条件再装作回答了这次的问题。
+
+    /**
+     * 一次号源查询的实际条件。
+     *
+     * <p>刻意不是直接读 {@code state} 里那几个字段：它可能指向草稿之外的医院、科室或日期。
+     */
+    private record SlotQuery(String hospitalId, String hospital, String departmentId, String department,
+                             LocalDate date) {
+        /** 说给老人（和模型）听的那套条件。回复正文与工具留痕都用它，免得两边说的不是同一件事。 */
+        String label() {
+            return hospital + "·" + department + (date == null ? "" : "·" + date.format(DATE_LABEL));
+        }
+    }
+
+    /**
+     * 条件解析的结果：要么给出一套能拿去查的条件，要么给出一条「这次查不了、要说清楚」的回复。
+     * 两者必有其一——不会既查不成又不说话，也不会悄悄退回旧条件接着查。
+     */
+    private record SlotQueryResolution(SlotQuery query, AgentTurnResponse stop) {
+        static SlotQueryResolution of(SlotQuery query) { return new SlotQueryResolution(query, null); }
+
+        static SlotQueryResolution stop(AgentTurnResponse response) {
+            return new SlotQueryResolution(null, response);
+        }
+    }
+
+    /**
+     * 取这次规划里点名 {@code toolName} 那次调用的参数。
+     *
+     * <p>按名字找，不按位置取：单工具路径只有一次调用，批量路径里可能夹着别的工具，
+     * 两条路必须解析出同一份参数，否则同一句话在两条路上会查出不同结果。
+     */
+    private Map<String, String> toolArguments(AgentRuntime.Outcome outcome, String toolName) {
+        if (outcome.proposedTools() == null) return Map.of();
+        return outcome.proposedTools().stream()
+                .filter(call -> toolName.equals(call.toolName()))
+                .map(PlannerToolCall::arguments)
+                .findFirst().orElse(Map.of());
+    }
+
+    /**
+     * 把这次号源查询的条件定下来。
+     *
+     * <p>口径只有一条：<b>模型显式给的参数说了算，参数省略时才沿用会话里已经明确的条件</b>。
+     * 显式参数解析不出来（日期没看准、医院或科室对不上、不唯一）时就地停下说清楚，
+     * 绝不退回草稿的旧条件再装作回答了这次问题——那会答非所问，而且从回复里看不出来。
+     *
+     * <p>显式参数只决定「这次查什么」，不写回草稿。要落到草稿上，得由老人下一步明确表达。
+     */
+    private SlotQueryResolution resolveSlotQuery(ConversationState state, Map<String, String> arguments,
+                                                 boolean requireDate) {
+        String hospitalId = state.hospitalId;
+        String hospital = state.hospital;
+        String explicitHospital = blankToNull(arguments.get("hospital"));
+        if (explicitHospital != null) {
+            CatalogEntityResolver.Match match = entityResolver.hospital(explicitHospital,
+                    hospitalCatalogTool.listHospitals(state.id));
+            if (match.type() != CatalogEntityResolver.MatchType.EXACT) {
+                return SlotQueryResolution.stop(unresolvedHospitalReply(state, match));
+            }
+            hospitalId = match.only().id();
+            hospital = match.only().name();
+        }
+
+        String departmentId = state.departmentId;
+        String department = state.department;
+        String explicitDepartment = blankToNull(arguments.get("department"));
+        if (explicitDepartment != null) {
+            if (hospitalId == null) {
+                return SlotQueryResolution.stop(respond(state,
+                        "要查科室的号源，得先知道是哪家医院。请告诉我要去哪家医院。", resumeReplies(state)));
+            }
+            CatalogEntityResolver.Match match = entityResolver.department(explicitDepartment,
+                    departmentCatalogTool.listDepartments(state.id, hospitalId));
+            if (match.type() != CatalogEntityResolver.MatchType.EXACT) {
+                return SlotQueryResolution.stop(unresolvedDepartmentReply(state, hospital, match));
+            }
+            departmentId = match.only().id();
+            department = match.only().name();
+        }
+
+        LocalDate date = state.date;
+        String explicitDate = blankToNull(arguments.get("date"));
+        if (explicitDate != null) {
+            // 用契约那一份解析器：模型写 2026-9-12 这种没补零的写法，契约认，这里就得认，
+            // 不能因为两条路各有一套宽松度而把一次合规的调用判成说不清。
+            date = ToolContract.parseDate(explicitDate);
+            if (date == null) {
+                // 「给了但看不懂」和「没给」是两件事：前者不能退回去用旧日期，那等于把
+                // 老人问的那天换成了另一天还照答不误。
+                return SlotQueryResolution.stop(respond(state,
+                        "我没看准您说的是哪一天（“" + explicitDate + "”）。请再说一次，"
+                                + "例如“9月19号”，或写成 2026-09-19 这样。", resumeReplies(state)));
+            }
+        }
+        if (date != null && date.isBefore(clock.today())) {
+            return SlotQueryResolution.stop(respond(state,
+                    date.format(DATE_LABEL) + "已经过去了，我没有拿它去查号。请告诉我要查哪一天。",
+                    resumeReplies(state)));
+        }
+        if (hospitalId == null) {
+            return SlotQueryResolution.stop(respond(state, "要查询号源，请先告诉我想去哪家医院。",
+                    resumeReplies(state)));
+        }
+        if (department == null) {
+            return SlotQueryResolution.stop(respond(state, "要查询号源，还需要先选择复诊科室。",
+                    resumeReplies(state)));
+        }
+        if (date == null && requireDate) {
+            return SlotQueryResolution.stop(respond(state,
+                    "要找附近日期的号源，得先知道以哪一天为准。请先告诉我想查哪一天。", resumeReplies(state)));
+        }
+        return SlotQueryResolution.of(new SlotQuery(hospitalId, hospital, departmentId, department, date));
+    }
+
+    /**
+     * 显式医院对不上目录时的回话。
+     *
+     * <p>用的还是办理流程那一份 {@link CatalogEntityResolver}，口径一致；区别在于这里是查询，
+     * 所以只解释清楚，不改草稿、也不摆「是这家医院吗」的确认按钮——那不是在问这次的事。
+     */
+    private AgentTurnResponse unresolvedHospitalReply(ConversationState state,
+                                                      CatalogEntityResolver.Match match) {
+        if (match.type() == CatalogEntityResolver.MatchType.AMBIGUOUS) {
+            String names = match.candidates().stream().map(CatalogEntityResolver.Candidate::name)
+                    .collect(java.util.stream.Collectors.joining("、"));
+            return respond(state, "您说的“" + match.raw() + "”对上了不止一家医院：" + names
+                    + "。我没替您挑，请说全名或院区，我再查号源。", resumeReplies(state));
+        }
+        if (match.type() == CatalogEntityResolver.MatchType.UNIQUE_APPROXIMATE) {
+            return respond(state, "您说的“" + match.raw() + "”我理解成“" + match.only().name()
+                    + "”，但没敢直接拿它去查号。请说全名或院区确认一下，我再查。", resumeReplies(state));
+        }
+        return respond(state, "我没在可办理的医院里找到“" + match.raw() + "”，所以没有拿别的医院替它去查。"
+                + "请换一个医院名称说，或联系人工确认。", resumeReplies(state));
+    }
+
+    /** 显式科室对不上目录时的回话；口径同上。 */
+    private AgentTurnResponse unresolvedDepartmentReply(ConversationState state, String hospital,
+                                                        CatalogEntityResolver.Match match) {
+        if (match.type() == CatalogEntityResolver.MatchType.AMBIGUOUS) {
+            String names = match.candidates().stream().map(CatalogEntityResolver.Candidate::name)
+                    .collect(java.util.stream.Collectors.joining("、"));
+            return respond(state, hospital + "的“" + match.raw() + "”对上了不止一个科室：" + names
+                    + "。我不能替您猜，请说完整科室名称，我再查号源。", resumeReplies(state));
+        }
+        if (match.type() == CatalogEntityResolver.MatchType.UNIQUE_APPROXIMATE) {
+            return respond(state, hospital + "的“" + match.raw() + "”我理解成“" + match.only().name()
+                    + "”，但没敢直接拿它去查号。请说完整科室名称确认一下，我再查。", resumeReplies(state));
+        }
+        return respond(state, "我没在" + hospital + "找到与“" + match.raw() + "”对应的科室，"
+                + "所以没有拿别的科室替它去查。请按医生安排重新说科室名称。", resumeReplies(state));
+    }
+
+    /**
+     * {@code appointment.querySlots} 的入口。
+     *
+     * <p>分界只有一条——<b>这一轮是不是模型发起的</b>，与参数给没给无关：
+     * <ul>
+     *   <li>模型发起的调用：一律按只读查询处理，<b>参数为空也一样</b>。缺的项回草稿里取
+     *       （见 {@link #resolveSlotQuery}），够用就查、不够就问；不推进阶段、不动确认卡。
+     *       要按这次结果改预约，等老人下一句明确说。</li>
+     *   <li>不经过模型的按钮/规则流程：走既有办理流程，行为与加这一层之前逐字相同。</li>
+     * </ul>
+     */
+    private AgentTurnResponse querySlotsFor(ConversationState state, ExtractedFacts facts,
+                                            AgentRuntime.Outcome outcome) {
+        if (!outcome.modelDriven()) {
+            // 老人按按钮或规则规划器走到这一步：他明确说了什么就落什么，照旧进办理流程。
+            if (facts.date() != null) applyFacts(state, facts);
+            else clearSlotSelection(state, true);
+            return showAvailableSlots(state);
+        }
+        // arguments 为空也走只读出口：缺的条件从草稿里取，取不到就追问，草稿本身不动。
+        Map<String, String> arguments = toolArguments(outcome, "appointment.querySlots");
+        SlotQueryResolution resolution = resolveSlotQuery(state, arguments, false);
+        if (resolution.stop() != null) return resolution.stop();
+        return answerSlotQueryReadOnly(state, resolution.query(), false);
+    }
+
+    /** {@code appointment.queryNearbySlots} 的入口；分界规则与 {@link #querySlotsFor} 相同。 */
+    private AgentTurnResponse nearbySlotsFor(ConversationState state, AgentRuntime.Outcome outcome) {
+        if (!outcome.modelDriven()) return queryNearbySlots(state);
+        Map<String, String> arguments = toolArguments(outcome, "appointment.queryNearbySlots");
+        SlotQueryResolution resolution = resolveSlotQuery(state, arguments, true);
+        if (resolution.stop() != null) return resolution.stop();
+        return answerSlotQueryReadOnly(state, resolution.query(), true);
+    }
+
+    /**
+     * 只回答这一次的号源查询。
+     *
+     * <p>不推进阶段、不写号源候选、不动「接不接受附近日期」的意愿，更不碰确认卡——老人问的是
+     * 另一家医院或另一天的号，不构成改动手头那笔预约的授权。回复里点名这次实际查的是哪家医院、
+     * 哪个科室、哪一天，模型据此知道究竟查了什么，不会把别处的号源当成他问的那一处；查到之后
+     * 只问一句要不要按它来，改不改由老人的下一句话决定。
+     */
+    private AgentTurnResponse answerSlotQueryReadOnly(ConversationState state, SlotQuery query,
+                                                      boolean nearby) {
+        if (query.date() == null) {
+            // 要查的是草稿之外的医院或科室，可这一天还没定下来——不能拿旧日期替它查。
+            return answerReadOnly(state, "我还没听清您想问哪一天的号源。请告诉我想查哪一天，我再查。");
+        }
+        if (nearby) {
+            List<Slot> slots = callTool(state, "appointment.queryAlternatives",
+                    Map.of("hospitalId", query.hospitalId(), "department", query.department(), "date", query.date()),
+                    () -> appointmentTool.queryAlternatives(
+                            state.id, query.hospitalId(), query.department(), query.date()));
+            if (slots.isEmpty()) {
+                return answerReadOnly(state, "我查了" + query.label() + "，" + query.date().format(DATE_LABEL)
+                        + "没有号，之后三天也没有可预约时段。您可以换日期、换医院，或稍后再查。");
+            }
+            return answerReadOnly(state, "我查了" + query.label() + "，" + query.date().format(DATE_LABEL)
+                    + "没有号。附近日期目前可以预约的时间：" + slotText(slots, 4) + "。要按这个来吗？");
+        }
+        List<Slot> slots = callTool(state, "appointment.querySlots",
+                Map.of("hospitalId", query.hospitalId(), "department", query.department(), "date", query.date()),
+                () -> appointmentTool.queryAvailableSlots(
+                        state.id, query.hospitalId(), query.department(), query.date()));
+        if (slots.isEmpty()) {
+            return answerReadOnly(state, "我查了" + query.label() + "，" + query.date().format(DATE_LABEL)
+                    + "没有可预约时段。您可以换一天、换医院，或稍后再查。");
+        }
+        // 查到只是查到：这一轮不替老人把预约改过去，只问一句要不要按它来。
+        return answerReadOnly(state, "我查了" + query.label() + "，可以预约的时间：" + slotText(slots, 4)
+                + "。要按这个来吗？");
+    }
+
+    /**
+     * 只读答案的出口：正等确认时，把老人手上那张卡原样带上。
+     *
+     * <p>带上卡不只是为了不丢按钮——确认卡是业务终点，这一轮的措辞就此固定，不再交给模型润色。
+     * 否则模型可能对着「正在等确认」的状态说出一句「好的，我这就帮您约上」，而屏幕上并没有发生
+     * 任何确认；这句话既不是真实动作，也和他手上的卡对不上。
+     */
+    private AgentTurnResponse answerReadOnly(ConversationState state, String reply) {
+        List<QuickReply> replies = resumeReplies(state);
+        ConfirmationCard pending = confirmations.stillValidCard(state);
+        return pending == null
+                ? respond(state, reply, replies)
+                : respondWithoutModel(state, reply, replies, null, null, pending);
+    }
+
+    /** 把真实号源摆成一句话。查询与办理两条路共用，免得同一批号源在两边说得不一样。 */
+    private String slotText(List<Slot> slots, int limit) {
+        return slots.stream().limit(limit).map(this::slotLabel)
+                .collect(java.util.stream.Collectors.joining("；"));
+    }
+
     private AgentTurnResponse queryNearbySlots(ConversationState state) {
         if (state.hospitalId == null || state.department == null || state.date == null) {
             return validateDraftForModel(state);
         }
-        state.acceptAlternative = true;
+        // 这里刻意不写 state.acceptAlternative：查一次附近日期不等于老人答应了「可以换日期」。
+        // 意愿只有他本人说了（或点了「可以换日期」）才算数，办理流程问到这一步时照旧会问。
         state.stage = ConversationState.Stage.NO_SLOT;
         state.alternatives = callTool(state, "appointment.queryAlternatives",
                 Map.of("hospitalId", state.hospitalId, "department", state.department, "date", state.date),
@@ -3809,6 +4854,83 @@ public class FollowupAgentService {
                         q("查看我的预约", "QUERY_APPOINTMENTS", "")));
     }
 
+    /**
+     * {@code schedule.checkConflict} 的入口。
+     *
+     * <p>分界与号源查询是同一把尺子——<b>这一轮是不是模型发起的</b>：
+     * <ul>
+     *   <li>模型发起的调用：按只读查询处理（见 {@link #checkConflictReadOnly}）。模型问的是
+     *       「这个时间冲不冲突」，不是「把草稿推进到冲突这一步」。</li>
+     *   <li>不经过模型的按钮/规则流程：走既有办理流程，行为与加这一层之前逐字相同——
+     *       它本来就有权推进阶段、记下冲突、摆候选号源。</li>
+     * </ul>
+     */
+    private AgentTurnResponse checkSchedule(ConversationState state, AgentRuntime.Outcome outcome) {
+        return outcome.modelDriven() ? checkConflictReadOnly(state, outcome) : checkSchedule(state);
+    }
+
+    /**
+     * 只回答这一次的日程冲突查询。
+     *
+     * <p>推荐轮里模型要拿「哪个时间不冲突」当理由，就得能单独问一次时间，而这一问不能顺手
+     * 把办理推着往前走。所以这里和号源只读出口（{@link #answerSlotQueryReadOnly}）同口径：
+     * 不写 {@code stage}、不写 {@code conflicts}、不写 {@code alternatives}、不置
+     * {@code scheduleChecked}，<b>也不经由 {@code checkDuplicate} 生成确认卡</b>。
+     * 中间那几项看着像「顺便记一下」，但工具循环收口时的 {@code finalizeToolEvidence} 真的会
+     * 落盘，于是「查一下时间」就变成了「替老人把预约往前推了一步」。
+     *
+     * <p>条件只用这一次调用给的 {@code date}/{@code time}，缺了才回草稿取；取不到就直说要哪一项，
+     * 不拿别的时段的结论顶上。冲突一律点名说不冲突/有冲突——不能默默把冲突时段混在候选里，
+     * 那正是「老人以为这个时间空着」的来源。
+     */
+    private AgentTurnResponse checkConflictReadOnly(ConversationState state, AgentRuntime.Outcome outcome) {
+        Map<String, String> arguments = toolArguments(outcome, "schedule.checkConflict");
+        String explicitDate = blankToNull(arguments.get("date"));
+        LocalDate date = explicitDate == null ? state.date : ToolContract.parseDate(explicitDate);
+        if (explicitDate != null && date == null) {
+            // 「给了但看不懂」不退回去用旧日期：那是把老人问的那天换成另一天还照答不误。
+            return answerReadOnly(state, "我没看准您说的是哪一天（“" + explicitDate
+                    + "”）。请再说一次，例如“9月19号”，或写成 2026-09-19 这样。");
+        }
+        String explicitTime = blankToNull(arguments.get("time"));
+        LocalTime time = explicitTime == null ? draftTime(state) : ToolContract.parseTime(explicitTime);
+        if (explicitTime != null && time == null) {
+            return answerReadOnly(state, "我没看准您说的是几点（“" + explicitTime
+                    + "”）。请按 09:30 这样的写法再说一次。");
+        }
+        if (date == null || time == null) {
+            return answerReadOnly(state, "要帮您看这个时间冲不冲突，得先知道是哪一天的几点。请告诉我日期和具体时间。");
+        }
+        LocalDateTime start = LocalDateTime.of(date, time);
+        // 「正好等于此刻」也算已经过去，口径与号源查询（appointment_time > 当前时间）和
+        // 确认闸门（{@link #slotAlreadyPassed}）一致：同一个整点，一边说还能约、另一边说过去了，
+        // 老人就会拿到一个永远确认不成的时段。
+        if (!start.isAfter(clock.now())) {
+            return answerReadOnly(state, date.format(DATE_LABEL) + time.format(TIME_LABEL)
+                    + "已经过去了，我没有拿它去查日程。请告诉我另一个时间。");
+        }
+        List<Conflict> conflicts = callTool(state, "schedule.checkConflict",
+                Map.of("userId", state.userId, "start", start),
+                () -> scheduleTool.findConflicts(state.id, state.userId, start, start.plusMinutes(APPOINTMENT_DURATION)));
+        String when = date.format(DATE_LABEL) + " " + time.format(TIME_LABEL);
+        if (conflicts.isEmpty()) {
+            return answerReadOnly(state, when + "这个时间与您已有的日程不冲突。"
+                    + "这一轮只是在帮您比较，没有改动手上的预约。");
+        }
+        // 冲突一定要点名说：它必须以「有冲突」的样子出现在候选里，不能被混进去当一个普通时段。
+        String items = conflicts.stream().limit(CONFLICT_DISPLAY_LIMIT)
+                .map(item -> item.title() + "（" + item.startAt() + " 至 " + item.endAt() + "）")
+                .collect(java.util.stream.Collectors.joining("；"));
+        return answerReadOnly(state, when + "与您已有的日程有冲突：" + items
+                + "。换一个时间能避开它。要不要改由您说了算，我没有改动手上的预约。");
+    }
+
+    /** 草稿里已经定下来的时刻；没有就返回 null。只读查询拿它当兜底条件，不写回任何字段。 */
+    private LocalTime draftTime(ConversationState state) {
+        if (state.selectedSlot != null && state.selectedSlot.time() != null) return state.selectedSlot.time();
+        return state.requestedTime;
+    }
+
     private AgentTurnResponse checkSchedule(ConversationState state) {
         if (!ready(state)) return advance(state, ExtractedFacts.empty());
         // 用户在号源锁定时就已经明确「仍保留这个时间」（见 slotBlocked / keepConflict）：
@@ -3865,6 +4987,9 @@ public class FollowupAgentService {
 
     private AgentTurnResponse buildConfirmation(ConversationState state) {
         if (!ready(state)) return advance(state, ExtractedFacts.empty());
+        // 选号那一刻可能就在今天早上，走到这一步已经是下午：先把已经过去的时段挡在外面，
+        // 不能让一张写着「今天 09:00」的确认卡发到老人手上。
+        if (slotAlreadyPassed(state.selectedSlot)) return reaskAfterPassedSlot(state);
         LocalDateTime at = LocalDateTime.of(state.selectedSlot.date(), state.selectedSlot.time());
         if (state.travelPlan == null) {
             state.travelPlan = callTool(state, "travel.plan", Map.of("hospital", state.hospital, "appointmentAt", at, "transport", state.transport),
@@ -3872,7 +4997,19 @@ public class FollowupAgentService {
         }
         // 重述待确认内容（例如用户在确认卡前说“打开地图”）时保留原确认凭据，
         // 避免确认卡看似被刷新、旧按钮突然失效。
-        if (state.confirmationId == null) state.confirmationId = UUID.randomUUID().toString();
+        // 但保留的前提是「手上那份就是这张卡」：类型得是开新预约、目标得是同一批。这里是
+        // booking 卡，若手上那份是上一轮那张取消卡的凭据（类型不同），这里会换一把新钥匙，
+        // 旧凭据当场作废——否则老人对着这张「确认办理」点头，执行出来的是上一轮那次取消。
+        // 手上那份读不出来（旧快照）时同样换新的，否则它会一路带到确认那一步才作废。
+        //
+        // 「谁在办」也进类型：本人自办与代他人办理是两条不同的业务链路（后者要写代约归属、
+        // 通知其他照护者），签发时就得定下来是哪一个。合并成一个类型、执行时再看 caregiving()，
+        // 就等于让一个可变状态决定这次确认要动谁的业务。
+        confirmations.ensureIssued(state,
+                state.caregiving()
+                        ? ConfirmationService.PendingOperation.Kind.BOOKING_CAREGIVER
+                        : ConfirmationService.PendingOperation.Kind.BOOKING,
+                List.of());
         state.stage = ConversationState.Stage.AWAITING_CONFIRMATION;
         state.taskStatus = ConversationState.TaskStatus.AWAITING_CONFIRMATION;
         ConfirmationCard card = confirmationCard(state, at);
@@ -3967,7 +5104,8 @@ public class FollowupAgentService {
     }
 
     /** 不带计划卡的纯文本回复（用于“家属代约计划”等已有预约的开场与管理话术）。 */
-    private AgentTurnResponse respondSimple(ConversationState state, String reply, List<QuickReply> quickReplies) {
+    @Override
+    AgentTurnResponse respondSimple(ConversationState state, String reply, List<QuickReply> quickReplies) {
         return finish(state, AgentTurnResponse.message(state.id, state.stage.name(), reply, quickReplies));
     }
 
@@ -3989,7 +5127,8 @@ public class FollowupAgentService {
                 .findFirst();
     }
 
-    private String managedShort(AppointmentRecordStore.AppointmentView plan) {
+    @Override
+    String managedShort(AppointmentRecordStore.AppointmentView plan) {
         return plan.date().format(DATE_LABEL) + " " + plan.time().format(TIME_LABEL)
                 + "，" + plan.hospital() + " " + plan.department();
     }
@@ -4035,7 +5174,8 @@ public class FollowupAgentService {
     }
 
     /** 代约完成后的按钮。 */
-    private List<QuickReply> caregiverBookedActions(String subjectName) {
+    @Override
+    List<QuickReply> caregiverBookedActions(String subjectName) {
         return List.of(
                 q("查看" + subjectName + "的复诊安排", "QUERY_APPOINTMENTS", ""),
                 q("最近的复诊动态", "QUERY_CARE_TIMELINE", ""),
@@ -4083,7 +5223,7 @@ public class FollowupAgentService {
                     List.of(q("记一条提醒", "CONTINUE", "")));
         }
         String subject = elderName(state.userId);
-        MemoParser.MemoIntent intent = MemoParser.detect(value);
+        MemoParser.MemoIntent intent = MemoParser.detect(value, clock.now());
         String text = intent == null || intent.text() == null || intent.text().isBlank()
                 ? value.trim() : intent.text().trim();
         if (text.isBlank()) {
@@ -4091,14 +5231,74 @@ public class FollowupAgentService {
                     "您想提醒" + subject + "做什么？比如“提醒" + subject + "明天上午带身份证”。",
                     caregiverActions(subject));
         }
-        String from = (state.relationLabel == null ? "照护者" : state.relationLabel)
-                + " " + elderName(state.actorUserId);
-        LocalDateTime remindAt = intent == null ? null : intent.remindAt();
-        memoTool.create(state.id, state.userId, "「" + from + "」提醒：" + text, remindAt, null);
-        careBooking.notifyCaregiver(state.actorUserId, state.userId, "已给" + subject + "留提醒：" + text, "info");
-        String when = remindAt == null ? ""
-                : "，到" + remindAt.toLocalDate() + " " + remindAt.toLocalTime() + "会提醒";
-        return respondWithoutModel(state, "已经给" + subject + "留好提醒：" + text + when
+        // 一句话里说了不止一个时间点：跟老人端同一套判据、同一个理由（见 askOneThingAtATime）。
+        // 这里更要说清“还没留”——家属听到“好的”会以为已经留好了，长辈那边其实什么都没有。
+        if (MemoParser.severalMomentsInOneSentence(value)) {
+            return respondWithoutModel(state, "您这句话里像是说了不止一件事（或不止一个时间），我怕记串了，"
+                            + "先没有给" + subject + "留。请您一件一件说，"
+                            + "比如“提醒" + subject + "明天上午带身份证”。",
+                    caregiverActions(subject));
+        }
+        // 缺日子/缺钟点/缺重复锚点：先问，不许写。
+        // 以前这几种是直接落库的：说“每周提醒我妈量血压”，存的是一条没有提醒时间的长期备忘——
+        // 家属听到的是“已经给王阿姨留好提醒”，长辈那边到哪天都不响，还说不出哪里错了。
+        // 追问共用老人端那套话术（同一套“您想哪天/几点”），家属端不出确认卡这条在 finishMemoAnswer 里兜住。
+        if (intent != null && intent.repeatDayGap() != null) return askMemoRepeatDay(state, intent);
+        if (intent != null && intent.needsDay()) return askMemoDay(state, intent);
+        if (intent != null && intent.needsTime()) return askMemoTime(state, intent);
+        return commitElderRemind(state, text, remindAts(intent), intent == null ? null : intent.repeatRule());
+    }
+
+    /** 备忘里那几个到点时间（去掉空值、去重、按时间排）。 */
+    private List<LocalDateTime> remindAts(MemoParser.MemoIntent intent) {
+        return intent == null ? List.of()
+                : intent.remindAts().stream().filter(at -> at != null).distinct().sorted().toList();
+    }
+
+    /**
+     * 家属/志愿者给长辈留提醒的<b>唯一落库口</b>——直写、补答日子后、补答钟点后都走这里。
+     *
+     * <p>四件事只在这一处做，分开写迟早走散：
+     * <ul>
+     *   <li><b>称呼摘掉</b>：“提醒我<b>妈</b>带身份证”里的“我妈”是他在叫谁，不是事项
+     *       （见 {@link MemoParser#stripElderAddress}）——留着的话长辈看到的备忘是“妈带身份证”。</li>
+     *   <li><b>抬头</b>：正文写成“「小丽」提醒：带身份证”。长辈收到一条凭空出现的备忘，不知道是谁让做的，
+     *       这正是“协同”最容易丢的一环。</li>
+     *   <li><b>一条一天、每条只说自己那天</b>：只留第一天，长辈会以为后面几天也设好了，到点却不响；
+     *       而多天原句整段抄进每条（“下周周一周二周三量血压”）会让周三那条说自己周一。
+     *       逐天改写与老人端同一条路（{@code textForDay} + {@code stripSchedule}）。</li>
+     *   <li><b>通知 + 回读</b>：回读用“9月22日（周二）08:00”这种中文写法，不贴 {@code LocalDate.toString()}
+     *       出来的生日期——家属要照着这句话核对，念不出来就等于没回读。</li>
+     * </ul>
+     */
+    private AgentTurnResponse commitElderRemind(ConversationState state, String text, List<LocalDateTime> ats,
+                                               String repeatRule) {
+        String subject = elderName(state.userId);
+        String repeat = MemoStore.normalizeRepeat(repeatRule);
+        String prefix = "「" + (state.relationLabel == null ? "照护者" : state.relationLabel)
+                + " " + elderName(state.actorUserId) + "」提醒：";
+        // “提醒我妈…”里的“我妈”是他在叫谁，不是事项：留在正文里，长辈看到的是“妈带身份证”。
+        // 摘掉之后再落库、再回读，家属听到的这句话才和长辈在首页看到的是同一句
+        String memoText = MemoParser.stripElderAddress(text);
+        List<LocalDateTime> times = ats == null ? List.of() : ats;
+        if (times.isEmpty()) {
+            // 没有到点时间的长期备忘不能摘正文：“下周家人来接我”里的时间是内容本身，不是提醒
+            memoTool.create(state.id, state.userId, prefix + memoText, null, repeat);
+        } else {
+            for (LocalDateTime at : times) {
+                memoTool.create(state.id, state.userId,
+                        prefix + MemoParser.stripSchedule(MemoParser.textForDay(memoText, at.toLocalDate(), clock.today())),
+                        at, repeat);
+            }
+        }
+        // 回读用老人端那一套（“9月22日（周二） 08:00”／重复的念“每周三 08:00”），
+        // 不贴 LocalDate.toString() 出来的生日期：家属要照着这句话核对
+        String when = times.isEmpty() ? "（长期备忘，不到点提醒）"
+                : "，到" + String.join("、",
+                        times.stream().map(at -> memoMomentLabel(at, repeat)).toList()) + "会提醒";
+        careBooking.notifyCaregiver(state.actorUserId, state.userId,
+                "已给" + subject + "留提醒：" + memoText + when, "info");
+        return respondWithoutModel(state, "已经给" + subject + "留好提醒：" + memoText + when
                         + "。" + subject + "打开助手就能在备忘里看到，上面写着是您留的。",
                 caregiverBookedActions(subject));
     }
@@ -4121,7 +5321,203 @@ public class FollowupAgentService {
                 caregiverActions(elderName(state.userId)));
     }
 
-    private String elderName(String userId) {
+    /**
+     * 预约历史事实：把库里真实发生过的记录摆给模型看。
+     *
+     * <p><b>只说「预约过」。</b>Java 这边产出的是纯事实标签——「已预约（还没到日子）」
+     * 「已预约（日子已经过了）」「已取消」——没有一个字说人去过医院。项目里没有可靠的
+     * 到院/就诊完成事实，而「预约成功」和「人真的去了」是两件事：把前者说成后者，
+     * 是这套功能最容易犯、后果也最重的错。措辞规则在提示词里再写一遍，这里保证没有可被
+     * 误读成到院的词。
+     *
+     * <p><b>这一轮只查不改。</b>查询条件只决定这次查什么，不落到草稿上；出口走
+     * {@link #answerReadOnly}，正等确认时把老人手上那张卡原样带回。老人真想改成这家，
+     * 下一轮由他自己说了算，走正常业务动作。
+     */
+    private AgentTurnResponse showAppointmentHistory(ConversationState state, AgentRuntime.Outcome outcome) {
+        Map<String, String> arguments = toolArguments(outcome, "appointment.history");
+        ProfileQueryService.HistoryQuery query = new ProfileQueryService.HistoryQuery(
+                arguments.get("hospital"), arguments.get("department"), arguments.get("status"),
+                // 日期用的是契约那一份宽松解析（认 2026-9-12 这种写法），解析不出来就当没给这个条件——
+                // 不另写一套格式判断，免得同一个参数在两处有两种解释。
+                ToolContract.parseDate(arguments.get("from")), ToolContract.parseDate(arguments.get("to")));
+        if (query.rangeReversed()) {
+            // 反过来的范围是「你这两句话对不上」，不是「那段时间没有记录」。
+            // 当成空结果回答，老人会以为自己那段真的没有预约——实际上他要的那段根本没被查过。
+            // 所以：一条 SQL 都不跑、一条留痕都不落，也说清楚是这个范围本身不成立。
+            return answerReadOnly(state, "您说的开始日期 " + query.from() + " 晚于结束日期 " + query.to()
+                    + "，这两个日期是反的，我没法按这个范围查。请重新说一下要查哪一段时间。");
+        }
+        ProfileQueryService.History history;
+        try {
+            history = profileQuery.history(state.actorUserId, state.actorRole, state.userId, query);
+        } catch (IllegalArgumentException error) {
+            // 权限类消息一律不走模型润色：措辞被改软就等于把边界说模糊了。
+            // 也不清确认卡——查不了是权限问题，和他手上那张卡没有任何关系。
+            return answerReadOnly(state, "现在查不了这位老人的预约记录：" + error.getMessage() + "。");
+        }
+        traces.record(state.id, "appointment.history",
+                Map.of("userId", state.userId, "arguments", arguments), historyTrace(history), true);
+        return answerReadOnly(state, appointmentHistoryText(state, history));
+    }
+
+    /**
+     * 长期记忆摘要：明确偏好与「系统从预约里总结出来的」分开说。
+     *
+     * <p>把两者混成一摞「用户偏好」，模型就会拿一条系统自己归纳的「常去的医院是市一院」
+     * 当成老人亲口说过的要求去劝他，而老人从没这么说过。来源和更新时间原样带出来，
+     * 让读的人能自己判断这条还算不算数。
+     */
+    private AgentTurnResponse showProfileMemory(ConversationState state) {
+        ProfileQueryService.MemorySummary summary;
+        try {
+            summary = profileQuery.memorySummary(state.actorUserId, state.actorRole, state.userId);
+        } catch (IllegalArgumentException error) {
+            return answerReadOnly(state, "现在查不了这位老人的长期记忆：" + error.getMessage() + "。");
+        }
+        traces.record(state.id, "profile.memorySummary", Map.of("userId", state.userId),
+                Map.of("explicitPreferences", summary.explicitPreferences().size(),
+                        "bookingHistory", summary.bookingHistory().size(),
+                        "unverifiableCount", summary.unverifiableCount()), true);
+        return answerReadOnly(state, profileMemoryText(state, summary));
+    }
+
+    /** 预约历史摆成给模型看的一段话。事实、统计、当轮要求三段各自标明来历，不揉成一句「您的偏好」。 */
+    private String appointmentHistoryText(ConversationState state, ProfileQueryService.History history) {
+        StringBuilder text = new StringBuilder(elderName(state.userId)).append("的预约记录：");
+        if (history.total() == 0) {
+            text.append("没有查到符合条件的记录。");
+        } else {
+            String facts = history.facts().stream()
+                    .map(fact -> fact.date().format(DATE_LABEL) + " " + fact.time().format(TIME_LABEL)
+                            + " " + fact.hospital() + " " + fact.department() + "（" + factLabel(fact.status()) + "）")
+                    .collect(java.util.stream.Collectors.joining("；"));
+            // 这里刻意不写「不代表已经到院」这类免责句：说了「到院」两个字，就等于把那个词
+            // 放回了提示词。Java 只给纯事实标签，能不能说到院由提示词那条硬红线去管。
+            text.append("共 ").append(history.total()).append(" 条，按日期从晚到早列出 ")
+                    .append(history.facts().size()).append(" 条：").append(facts).append("。");
+        }
+        if (!history.tendencies().isEmpty()) {
+            String items = history.tendencies().stream()
+                    .map(item -> itemLabel(item.dimension()) + "是" + tendencyLabel(item)
+                            + "（已确认预约中出现 " + item.count() + " 次）")
+                    .collect(java.util.stream.Collectors.joining("；"));
+            text.append(" 历史统计（只统计已确认的预约，是多次记录形成的统计，不是老人明确说过的偏好）：")
+                    .append(items).append("。");
+        } else if (history.confirmedTotal() == 1) {
+            text.append(" 历史统计：只查到 1 次已确认的预约，还谈不上习惯。");
+        }
+        return text.append(currentDraftNote(state)).toString();
+    }
+
+    private String profileMemoryText(ConversationState state, ProfileQueryService.MemorySummary summary) {
+        StringBuilder text = new StringBuilder(elderName(state.userId)).append("的长期记忆：");
+        if (summary.isEmpty()) {
+            text.append("没有查到记录。");
+        } else {
+            text.append("共 ").append(summary.explicitPreferences().size() + summary.bookingHistory().size())
+                    .append(" 条。");
+            // 明确偏好也不能说成「就是现在的偏好」：它是老人在**某个时间点**说过的话，
+            // 说过之后可能改主意。带出更新时间、并要求时间较久或与当轮要求不一致时回头问一句，
+            // 是这条记录能被安全使用的唯一前提——本项目没有任何「偏好自动过期」的可靠阈值，
+            // 所以不发明天数，只把判断交回给这一轮的真实对话。
+            appendMemories(text, "老人曾明确表达的偏好",
+                    summary.explicitPreferences(),
+                    "这些是老人曾明确表达的偏好，附带更新时间；如果时间较久或与当轮要求不一致，"
+                            + "需要询问现在是否仍适用。");
+            appendMemories(text, "系统根据已确认预约沉淀的历史事实",
+                    summary.bookingHistory(),
+                    "这些是系统自己归纳出来的历史事实，不是老人明确说过的偏好：只说明最近一次"
+                            + "确认预约的是什么，不代表他以后还想这样，同样要按更新时间复核。");
+            if (summary.unverifiableCount() > 0) {
+                text.append("另有 ").append(summary.unverifiableCount())
+                        .append(" 条来源不明的记录，我没有采用。");
+            }
+        }
+        return text.append(currentDraftNote(state)).toString();
+    }
+
+    private void appendMemories(StringBuilder text, String title, List<MemoryStore.Memory> items,
+                                String note) {
+        if (items.isEmpty()) return;
+        String lines = items.stream().limit(MEMORY_LIST_LIMIT)
+                .map(memory -> "（" + memory.kind() + "）" + memory.content()
+                        + "（来源 " + memory.source() + "，更新于 " + memory.updatedAt() + "）")
+                .collect(java.util.stream.Collectors.joining("；"));
+        text.append(" ").append(title).append("：").append(lines).append("。").append(note);
+    }
+
+    /**
+     * 当轮要求：当前办理草稿里已经定下来的条件。
+     *
+     * <p>它不在库里，也不在记忆里——是这一轮对话里老人自己说的。摆出来的唯一目的是让模型
+     * 明白优先级：当前要求压过明确偏好，明确偏好压过统计倾向。少了这一段，
+     * 「上次去的那家还考虑吗」就可能在老人已经改口说「这次去市二院」之后还往回劝。
+     */
+    private String currentDraftNote(ConversationState state) {
+        List<String> parts = new ArrayList<>();
+        if (notBlank(state.hospital)) parts.add("医院=" + state.hospital);
+        if (notBlank(state.department)) parts.add("科室=" + state.department);
+        if (state.date != null) parts.add("日期=" + state.date.format(DATE_LABEL));
+        if (state.selectedSlot != null && state.selectedSlot.time() != null) {
+            parts.add("时间=" + state.selectedSlot.time().format(TIME_LABEL));
+        } else if (state.requestedTime != null) {
+            parts.add("时间=" + state.requestedTime.format(TIME_LABEL));
+        } else if (notBlank(state.timePreference)) {
+            parts.add("时段=" + ("MORNING".equals(state.timePreference) ? "上午" : "下午"));
+        }
+        if (parts.isEmpty()) {
+            return " 本轮办理中还没有确定医院、科室、日期或时间；这些历史与统计只是候选，"
+                    + "要不要用由老人自己决定。";
+        }
+        return " 本轮办理中已经明确的条件（优先级最高，历史与统计都不能覆盖它）："
+                + String.join("、", parts) + "。";
+    }
+
+    /** 事实标签里没有一个字能读成「人已经去过了」。 */
+    private String factLabel(ProfileQueryService.FactStatus status) {
+        return switch (status) {
+            case CONFIRMED_UPCOMING -> "已预约，还没到日子";
+            case CONFIRMED_PAST -> "已预约，日子已经过了";
+            case CANCELLED -> "已取消";
+            case UNKNOWN -> "状态未知";
+        };
+    }
+
+    private String itemLabel(ProfileQueryService.Tendency.Dimension dimension) {
+        return switch (dimension) {
+            case HOSPITAL -> "最常预约的医院";
+            case DEPARTMENT -> "最常预约的科室";
+            case PERIOD -> "预约时段偏";
+        };
+    }
+
+    private String tendencyLabel(ProfileQueryService.Tendency tendency) {
+        return switch (tendency.dimension()) {
+            case HOSPITAL, DEPARTMENT -> tendency.value();
+            case PERIOD -> "MORNING".equals(tendency.value()) ? "上午" : "下午";
+        };
+    }
+
+    /** 工具留痕里只落结构化字段，不落整段话术：留痕是给排查看的，不该成为第二条返回通道。 */
+    private Map<String, Object> historyTrace(ProfileQueryService.History history) {
+        return Map.of("total", history.total(),
+                "confirmedTotal", history.confirmedTotal(),
+                "returned", history.facts().size(),
+                "facts", history.facts().stream().map(fact -> Map.of(
+                        "date", fact.date().toString(),
+                        "time", fact.time().toString(),
+                        "hospital", fact.hospital(),
+                        "department", fact.department(),
+                        "status", fact.status().name())).toList(),
+                "tendencies", history.tendencies().stream().map(item -> Map.of(
+                        "dimension", item.dimension().name(),
+                        "value", item.value(),
+                        "count", item.count())).toList());
+    }
+
+    @Override
+    String elderName(String userId) {
         return catalog.user(userId).map(CareCatalogRepository.UserProfile::name).orElse(userId);
     }
 
@@ -4156,51 +5552,22 @@ public class FollowupAgentService {
                     List.of(q("查看事项", "OPEN_TASKS", "")));
         }
         state.pendingAction = "CANCEL_MANAGED";
-        state.stage = ConversationState.Stage.AWAITING_CONFIRMATION;
-        state.confirmationId = UUID.randomUUID().toString();
+        // 要取消的是哪一条，就在这一刻<b>写死</b>进凭据：`plan` 是查出来的那一条，卡片上写的也是它。
+        // 以前这里传的是空列表，执行时再按「当前那份代约安排」现找一遍——多一套口径就多一次
+        // 「卡上写 A、实际取消 B」的机会（这中间别人又代约了一条更早的，现找就会找错）。
+        String confirmationId = confirmations.issue(state,
+                ConfirmationService.PendingOperation.Kind.CANCEL_MANAGED,
+                List.of(plan.appointmentId()));
         ConfirmationCard card = new ConfirmationCard(
                 "确认取消这次由" + plan.arrangedLabel() + "约好的复诊吗？",
                 List.of("医院科室：" + plan.hospital() + " · " + plan.department(),
                         "复诊时间：" + plan.date().format(DATE_LABEL) + " " + plan.time().format(TIME_LABEL),
                         "释放号源并停用关联提醒",
                         "取消后会自动通知安排者" + plan.arrangedLabel()),
-                "确认后取消预约；返回则保留原安排。", "确认取消预约", "保留预约", state.confirmationId);
+                "确认后取消预约；返回则保留原安排。", "确认取消预约", "保留预约", confirmationId);
         return finish(state, new AgentTurnResponse(state.id, state.stage.name(),
                 "取消这次安排需要明确确认。", List.of(), null, card, null,
                 traces.findByConversation(state.id)));
-    }
-
-    private AgentTurnResponse confirmManagedCancel(ConversationState state, boolean approved) {
-        AppointmentRecordStore.AppointmentView plan = upcomingArranged(state).orElse(null);
-        state.pendingAction = "CREATE";
-        if (!approved) {
-            state.stage = ConversationState.Stage.COMPLETED;
-            return respondSimple(state, "好的，没有取消，这次安排仍然保留。",
-                    plan == null ? List.of(q("办理复诊", "CONTINUE", ""))
-                            : List.of(q("查看这次安排", "VIEW_MANAGED", ""),
-                                    q("临时改期或取消", "MANAGE_MANAGED", ""),
-                                    q("查看事项", "OPEN_TASKS", "")));
-        }
-        if (plan == null) {
-            state.stage = ConversationState.Stage.COMPLETED;
-            return respondSimple(state, "没有找到可取消的安排，可能已改期或取消。",
-                    List.of(q("查看事项", "OPEN_TASKS", "")));
-        }
-        try {
-            appointmentTool.cancel(state.id, plan.appointmentId(), state.userId);
-        } catch (RuntimeException error) {
-            traces.record(state.id, "workflow.error", Map.of("stage", state.stage.name()),
-                    Map.of("error", String.valueOf(error.getMessage())), false);
-            state.stage = ConversationState.Stage.COMPLETED;
-            return respondSimple(state, "取消没有成功，原预约保留：" + error.getMessage(),
-                    List.of(q("联系人工帮助", "CONTACT_HUMAN", ""), q("查看事项", "OPEN_TASKS", "")));
-        }
-        careBooking.notifyCaregiver(plan.arrangedBy(), state.userId,
-                "取消通知：" + elderName(state.userId) + "已取消您代约的复诊：" + managedShort(plan) + "。预约与关联提醒已失效。",
-                "cancel");
-        state.stage = ConversationState.Stage.CANCELLED;
-        return respondSimple(state, "已取消这次由" + plan.arrangedLabel() + "约好的复诊，并已通知" + plan.arrangedLabel() + "。号源已释放。",
-                List.of(q("新建办理", "NEW_BOOKING", ""), q("查看事项", "OPEN_TASKS", "")));
     }
 
     /**
@@ -4211,8 +5578,8 @@ public class FollowupAgentService {
      * 解析不出具体的项目/数值/时间时，这里返回 null 退回原链路，宁可多问一句，也不能回一句
      * 模棱两可的“好的”。（实测过：不接这条路由时，模型会对老人说“我给您记一个提醒”，而库里一条都没有。）
      *
-     * <p>每一条分支的上下文闸门与回退模式里那一段关键词预检保持完全一致，这样开关模型前后
-     * 老人的得到的行为是一样的。
+     * <p>每一条分支的上下文闸门与回退模式里那一段关键词预检保持完全一致（备忘看 {@link #memoContext}，
+     * 实测数值与发周报看 {@link #dailyHealthContext}），这样开关模型前后老人的得到的行为是一样的。
      */
     private AgentTurnResponse modelDailyRoute(AgentOrchestrator.Route route, ConversationState state, String value) {
         switch (route) {
@@ -4222,19 +5589,23 @@ public class FollowupAgentService {
                 return command != null ? command : memoReply(state, value);
             }
             case SEND_HEALTH_REPORT -> {
-                if (!memoContext(state)) return null;
+                if (!dailyHealthContext(state)) return null;
                 HealthReportParser.ReportIntent report = HealthReportParser.detect(value);
                 return report == null ? null : healthReportReply(state, report);
             }
             case RECORD_HEALTH_VALUE -> {
                 // “把这个月的血压发给女儿”里也有“记录”字样，先让发周报认走，否则永远发不出去
                 HealthReportParser.ReportIntent report = HealthReportParser.detect(value);
-                if (report != null && memoContext(state)) return healthReportReply(state, report);
-                HealthRecordParser.RecordIntent record = HealthRecordParser.detect(value);
-                if (record == null) return null;
-                // 回查历史数值不受上下文限制；要落一条新记录的仍然只在备忘上下文中进行
-                if (record.kind() != HealthRecordParser.Kind.QUERY && !memoContext(state)) return null;
-                return healthRecordReply(state, record, value);
+                if (report != null && dailyHealthContext(state)) return healthReportReply(state, report);
+                List<HealthRecordParser.RecordIntent> records = healthRecordIntents(value);
+                // 认不出项目、但老人在报一个数（“我今天量了，是135”）：问一句这是哪一项，别猜也别丢。
+                // 不在能落地的上下文里时它返回 null，退回原链路
+                if (records.isEmpty()) return askWhichItem(state, value);
+                // 回查历史数值不受上下文限制；要落一条新记录的仍然只在日常上下文里进行——
+                // 例外是他手上那张健康记录卡还没点头时又报了一条新数（见 replacesPendingHealthRecord）
+                if (records.get(0).kind() != HealthRecordParser.Kind.QUERY && !dailyHealthContext(state)
+                        && !replacesPendingHealthRecord(state, records.get(0))) return null;
+                return healthRecordReply(state, records, value);
             }
             default -> {
                 return null;
@@ -4250,46 +5621,241 @@ public class FollowupAgentService {
                 || state.stage == ConversationState.Stage.READY_TO_PLAN;
     }
 
+    /**
+     * 能安全落地“记一条实测数值 / 把记录发给家属”的上下文。
+     *
+     * <p>这里刻意比 {@link #memoContext} 宽松。备忘是“要做的事”，得有上下文才谈得上时间；
+     * 而实测数值是已经发生过的事实，写的是 health_records 这张跟复诊草稿毫无关系的表，
+     * 唯一必须让路的只有那张正等老人点头的确认卡（那时“90”可能是对卡片的回答，不是一次测量）。
+     *
+     * <p>回归：原来这里借用了 {@code memoContext}，而它会在草稿有医院、没有 appointmentId 时为假。
+     * 模型把上一句闲聊里的东西写进草稿（例如凭空落一个就诊医院）之后，“我今天走了6000步”
+     * 和“我低压95”就被静默吞掉，只有一句“请告诉我就诊医院”——老人以为记上了，库里一条没有。
+     * 确定性的数值不该被一条模型自己填的草稿挡住。
+     *
+     * <p>急救暂停时也不抢话：那时先让老人处理紧急情况，和备忘同一个道理。
+     */
+    private boolean dailyHealthContext(ConversationState state) {
+        if (state.stage == ConversationState.Stage.EMERGENCY_PAUSED) return false;
+        return state.stage != ConversationState.Stage.AWAITING_CONFIRMATION;
+    }
+
+    /**
+     * 手上那张健康记录卡还没点头，他这一句又报出了一条实测数值。
+     *
+     * <p>为什么要认这一句：不认就等于他报的这个数被静默吞掉——回复变成一句“这句话我还没听准”，
+     * 而他以为已经说过了。数值是已经量到的事实，要么落进一张卡，要么当面告诉他没记。
+     * 认下来之后走 {@link #healthRecordConfirmCard} 里那条“换掉手上这张卡”的分支。
+     *
+     * <p><b>只放行“平静地报出一个能记住的数”</b>这一种句子，两道都卡着：
+     * <ul>
+     *   <li>句子里要有一个明确的项目词（{@code Kind.RECORD}）。“卡还悬着时他说 90”更可能是对卡片上
+     *       那个数的回答，而不是新量的一次；而“90”本来也解析不成一条测量——{@link HealthRecordParser}
+     *       要求句子里有项目词（“血糖6.4”认得出，“90”认不出）。</li>
+     *   <li>这个数要量得出来（{@code !needsConfirm()}）。“血压800”那类先要反问他一句“是重新量一个
+     *       还是照记”，走的是另一条路（见 {@link #askRecordConfirm}），而那条路<b>不换卡</b>：
+     *       它只会改手上的草稿，屏幕上那张卡却还是上一条。放它进来，就会出现“卡上写着 138、
+     *       点下去写的是 800”。所以宁可让这一句走原来的链路，卡原样留着。</li>
+     * </ul>
+     *
+     * <p>判据是<b>签发时冻下来的类型</b>（{@code confirmationKind}，与执行时看的是同一处），
+     * 不是 {@code pendingAction}：后者是各业务分支随手改的会话字段，而“手上这张卡是哪一类”
+     * 只有签发那一刻说了算。认不出来的类型名一律当“不是我这一类”。
+     */
+    private boolean replacesPendingHealthRecord(ConversationState state, HealthRecordParser.RecordIntent intent) {
+        return intent != null && intent.kind() == HealthRecordParser.Kind.RECORD && !intent.needsConfirm()
+                && healthRecordCardPending(state);
+    }
+
+    /** 手上是不是正悬着一张还没点头的健康记录卡：凭据、类型、等待确认，三者齐备才算。 */
+    private boolean healthRecordCardPending(ConversationState state) {
+        if (state.confirmationId == null) return false;
+        if (state.stage != ConversationState.Stage.AWAITING_CONFIRMATION) return false;
+        return ConfirmationService.PendingOperation.Kind.stored(state.confirmationKind)
+                == ConfirmationService.PendingOperation.Kind.HEALTH_RECORD;
+    }
+
     /** 备忘识别：识别不到返回 null 走原链路；时间不明确先追问钟点；显式托付直接记，隐式先给确认卡。 */
+    /**
+     * 备忘这条路（模型开关都要走）：办之前先看看这句话里是不是还夹着一个<b>健康数值</b>。
+     *
+     * <p>这是「一句话两件事」的另一面。健康数值那条链路里，夹着的提醒会被当面交回老人
+     * （见 {@link #alsoATimedMemoNote}）；反过来，这句话也可能先被备忘认领
+     * （“我血压 130，顺便提醒我明天早上吃药”——模型离线时按关键词路由，模型在线时也可能是模型
+     * 判成了记备忘），于是一整句进备忘、<b>数没人接</b>。老人在 8198 上真遇到过：备忘存成
+     * “我血压130，顺便提醒我早上吃药”，血压那半从此不在他的记录里，他也从没被告知。
+     *
+     * <p>所以：数值那半不跟着办，但要说出来，让他单独再说一遍（跟另一面同一口径）。
+     * 补话同样拼在<b>草稿</b>上——定稿那一步已经把回复写进会话历史，贴上去的话只落在屏幕，
+     * 下一轮上下文里没有，等于没说过（做法见 {@link #deferFinalization}，工具循环里同款）。
+     *
+     * <p>补话这一轮走 {@link #respondWithoutModel}：这句话唯一的产出就是“那个数我还没记”这个交代，
+     * 让模型重写措辞就有可能被润掉，润掉了老人就当数已经报过了。
+     */
     private AgentTurnResponse memoReply(ConversationState state, String value) {
-        MemoParser.MemoIntent memo = MemoParser.detect(value);
+        String also = alsoAHealthValueNote(value);
+        if (also.isEmpty()) return memoReplyDraft(state, value);
+        deferFinalization.set(true);
+        AgentTurnResponse draft;
+        try {
+            draft = memoReplyDraft(state, value);
+        } finally {
+            deferFinalization.remove();
+        }
+        if (draft == null) return null;
+        return respondWithoutModel(state, draft.reply() + also, draft.quickReplies(),
+                draft.uiDirective(), draft.notice(), draft.confirmation());
+    }
+
+    /**
+     * “这句话里还夹着一个数”的补话，判据是<b>认出了一个量得出来的实测值</b>：
+     * 项目明确、数值得在范围内（血压 130）、不是离谱值。
+     *
+     * <p>不认离谱值（血压 800 / “早上8点量血压”里被读成数值的那个 8）：那类句子本身就有歧义，
+     * 说一句“您还报了一个血压 8”只会让他更糊涂；它们各有各的去处（前者健康链路会反问他重测还是照记）。
+     */
+    private String alsoAHealthValueNote(String raw) {
+        HealthRecordParser.RecordIntent also = raw == null ? null : HealthRecordParser.detect(raw);
+        if (also == null || also.kind() != HealthRecordParser.Kind.RECORD) return "";
+        if (also.item() == null || also.valueNum() == null || also.issue() != null) return "";
+        return "另外，您这句话里还报了一个" + also.item() + " " + also.valueText()
+                + "，我这一轮没有一起记到健康记录里——请单独再说一遍，我帮您记上。";
+    }
+
+    private AgentTurnResponse memoReplyDraft(ConversationState state, String value) {
+        MemoParser.MemoIntent memo = MemoParser.detect(value, clock.now());
         if (memo == null) return null;
-        state.pendingMemoDay = null;
+        state.pendingMemoDays = null;
+        // 一句话说了不止一个时间点（“周一八点吃药，周三下午三点复查”）：解析器只认一套“钟点+日子”，
+        // 硬记就是两件事共用一个钟点、第二件的时间被顶掉（“9月15号和9月20号”还会丢一天）。
+        // 这里不猜，也不留半截草稿，请他一件一件说。
+        if (MemoParser.severalMomentsInOneSentence(value)) return askOneThingAtATime(state);
         // “每周提醒我量血压”这种没说周几/几号的，趁早问清楚：照原样存下来只会是一条永远不响的备忘
         if (memo.repeatDayGap() != null) return askMemoRepeatDay(state, memo);
         if (memo.needsDay()) return askMemoDay(state, memo);
         if (memo.needsTime()) return askMemoTime(state, memo);
         if (memo.explicit()) return recordMemo(state, memo);
         state.pendingMemoText = memo.text();
-        state.pendingMemoAt = memo.remindAt();
+        state.pendingMemoAts = memo.remindAts();
         state.pendingMemoRepeat = memo.repeatRule();
         state.memoNeedsApproval = true;
         state.memoReturnStage = state.stage;
         return memoConfirmCard(state);
     }
 
-    /** 老人说的那天已经过去了（如周四说“这周三”）：先问清楚是哪一天，不替他猜上周还是下周。 */
+    /**
+     * 一句话里说了不止一个时间点（“周一八点吃药，周三下午三点复查”）：不猜，请他一件一件说。
+     *
+     * <p>解析器一条备忘只认一套“钟点 + 日子”，两个时间点挤在一句里，第二处会把第一处顶掉，
+     * 于是<b>两件事共用一个时间</b>——老人到点听到的是张冠李戴的提醒，而且听不出来错在哪。
+     * 不是不能记，是这一句里“哪半句配哪个时间”机器判不准，所以宁可不记。
+     *
+     * <p><b>不落库、也不留草稿</b>：没有可靠的依据挑出“头一件”，替他挑就是替他做决定；
+     * 留个半截草稿更糟——下一句会被接着当成补充答案。这一轮只回一句话，状态原地不动，
+     * 他重说的那一句从零解析，干干净净。
+     */
+    private AgentTurnResponse askOneThingAtATime(ConversationState state) {
+        return respondWithoutModel(state,
+                "您这句话里像是说了不止一件事（或不止一个时间），我怕记串了，"
+                        + "先没有记。请您一件一件说，我先记头一件——比如“提醒我周一早上八点吃药”。",
+                List.of());
+    }
+
+    /**
+     * 补答的那一句里带了不止一个钟点：一次只认一个，请他分开说。
+     *
+     * <p>这里和 {@link #askOneThingAtATime} 有一处关键差别：<b>草稿留着</b>。追问到这一步，
+     * 要记的内容已经问清楚了（{@code pendingMemoText}），作废的是“钟点”这个答案、不是整条备忘。
+     * 清掉草稿等于让他为了一个钟点把内容重讲一遍——比不记还烦人。
+     * 所以 {@code pendingMemoText/pendingMemoDays/pendingAction} 一个都不动，问题还是原来那个问题。
+     *
+     * <p>话术要把话说全：我一次只记一个到点时间（为什么），另一件事等这轮说完再跟我说一遍（怎么补救）。
+     * 少了后半句，老人以为两件都交代过了，第二件就变成静默丢掉。
+     *
+     * <p>走 {@link #respondWithoutModel} 而不是 {@code respond}：这句话唯一的产出就是“那件事我还没记”
+     * 这个交代，模型改写措辞时完全可能把它润掉（它能看到的只有一句“权威草稿”，
+     * 校验也只管紧急/医疗/确认卡那几类），真润掉了，这条判据就白做了。
+     * 按钮的 action 沿用当前 {@code pendingAction}：回到原来那个追问处理器，答完日子/钟点仍然接得上。
+     */
+    private AgentTurnResponse askOneClockAtATime(ConversationState state) {
+        return respondWithoutModel(state,
+                "您这句里有两个时间，我一次只能记一个到点时间，怕记串了——"
+                        + "先说我该按哪个时间来提醒？比如“早上8点”。"
+                        + "另外那件事，等这条记好了您再跟我说一遍，我另给您记上。",
+                memoNoTimeReply(state.pendingAction == null ? "MEMO_TIME" : state.pendingAction));
+    }
+
+    /**
+     * 改期那一句里带了不止一个到点时间（“改成明天早上八点，还有周三下午三点”“改成周三和周五”）：
+     * 一次只认一个，请他挑。
+     *
+     * <p>和补答路径同源（见 {@link #askOneClockAtATime}），差别有两处：那边是「记」这边是「改」；
+     * 那边多天答复要拆成几条备忘（所以只拦钟点），而改期只动这一条备忘、装不下两天，所以这里
+     * 连日子一起拦。
+     *
+     * <p>要改的那条备忘由 {@code pendingMemoId} 认着，{@code pendingAction} 仍是
+     * {@code MEMO_EDIT_TIME}——他重新说一句就回到 {@code editMemoTo}，不必从头再走一遍“改第几条”。
+     */
+    private AgentTurnResponse askOneTimeForEditAtATime(ConversationState state) {
+        return respondWithoutModel(state,
+                "您这句里有两个时间，我一次只能把这条备忘改成其中一个，怕改错——"
+                        + "先说我该按哪个时间来提醒？比如“明天早上8点”或“周三下午3点”。"
+                        + "另外那个时间，您单独跟我说一遍，我另给您记一条。",
+                memoStopRemindReply());
+    }
+
+    /**
+     * 日期没定下来时先问清楚是哪一天。三种情形：
+     * 老人说的那天已经过去了（周四说“这周三”）；只说了范围没说哪天（“我这周要吃药”“我这个月要吃药”）；
+     * 日子说明白了、可<b>那个点今天已经过完</b>了（傍晚说“今天下午三点”）。
+     * 三种都不替他猜——猜出来的日期一旦错了，老人到点没被提醒还查不出原因。
+     */
     private AgentTurnResponse askMemoDay(ConversationState state, MemoParser.MemoIntent memo) {
         state.pendingMemoText = memo.text();
-        state.pendingMemoAt = null;
+        state.pendingMemoAts = null;
         state.pendingMemoRepeat = memo.repeatRule();
-        state.pendingMemoDay = null;
+        state.pendingMemoDays = null;
         state.memoNeedsApproval = !memo.explicit();
         state.memoReturnStage = state.stage;
         state.pendingAction = "MEMO_DAY";
         state.stage = ConversationState.Stage.MEMO_TIME;
-        state.confirmationId = null;
-        LocalDate past = MemoParser.pastWeekdayDate(memo.text());
-        String nextWeek = MemoParser.nextWeekdayWord(memo.text());
-        return respond(state, "您说的“" + (past == null ? "那天" : memoDayLabel(past)) + "”已经过去了。"
-                        + "您是指哪一天呢？可以告诉我“" + nextWeek + "”，或者直接说个日期，比如“9月16号”。"
-                        + "不需要提醒就说“不用提醒，只记下”。",
-                memoDayReplies(nextWeek));
+        confirmations.clear(state);
+        List<LocalDate> past = MemoParser.pastWeekdays(memo.text(), clock.today());
+        // 日期其实说明白了，缺的是这一天里那个点已经过完了（“今天下午三点”在傍晚说）。
+        // 拿“您说的是‘那天’，还没说具体哪一天”去问，老人只会觉得助手没听懂——他没说错日子。
+        // 说的是“这周三”那种已经过去的日子时不走这条：那时要问的确实是“哪一天”（多半是下周三）。
+        LocalDateTime passed = past.isEmpty() ? MemoParser.passedMoment(memo.text(), clock.now()) : null;
+        if (passed != null) {
+            String moved = memoTimeLabel(passed.plusDays(1));
+            return respond(state, "您说的" + memoTimeLabel(passed) + "已经过了。要改成" + moved + "吗？"
+                            + "也可以直接说个时间，比如“明天早上八点”；不需要提醒就说“不用提醒，只记下”。",
+                    List.of(q("改成明天", "MEMO_DAY", "明天"),
+                            q("不用提醒，只记下", "MEMO_DAY", "不用提醒，只记下")));
+        }
+        // “这周/下周”“这个月/下个月”只说范围没说哪天，说“那天已经过去了”是无中生有——那天还没定呢
+        String week = MemoParser.bareWeekWord(memo.text());
+        String scope = week != null ? week : MemoParser.bareMonthWord(memo.text());
+        String opening = !past.isEmpty()
+                ? "您说的“" + memoDaysLabel(past) + "”已经过去了。"
+                : "您说的是“" + (scope == null ? "那天" : scope) + "”，还没说具体哪一天。";
+        // 周范围点得出一个“这周日/下周三”；月范围里没有哪个日子是“显然”的，
+        // 就不摆那枚按钮——替他在这个月里挑一天，比不挑更糟。让他自己说个日期。
+        String suggest = week == null ? null : MemoParser.weekDaySuggestion(memo.text(), clock.today());
+        String how = suggest == null
+                ? "您是指哪一天呢？直接说个日期就行，比如“9月16号”。"
+                : "您是指哪一天呢？可以告诉我“" + suggest + "”，或者直接说个日期，比如“9月16号”。";
+        return respond(state, opening + how + "不需要提醒就说“不用提醒，只记下”。",
+                memoDayReplies(suggest));
     }
 
-    private List<QuickReply> memoDayReplies(String nextWeek) {
+    /** 第一枚按钮是给周范围的“这周日/下周三”；月范围给不出具体哪天，就只摆后两枚。 */
+    private List<QuickReply> memoDayReplies(String suggest) {
+        if (suggest == null) {
+            return List.of(q("明天", "MEMO_DAY", "明天"),
+                    q("不用提醒，只记下", "MEMO_DAY", "不用提醒，只记下"));
+        }
         return List.of(
-                q(nextWeek, "MEMO_DAY", nextWeek),
+                q(suggest, "MEMO_DAY", suggest),
                 q("明天", "MEMO_DAY", "明天"),
                 q("不用提醒，只记下", "MEMO_DAY", "不用提醒，只记下"));
     }
@@ -4317,6 +5883,11 @@ public class FollowupAgentService {
         return date.format(MEMO_DAY_ONLY) + "（" + memoWeekdayLabel(date) + "）";
     }
 
+    /** 好几天时逐天列出来：只回读第一天，老人没法发现后面哪天听错了。 */
+    private String memoDaysLabel(List<LocalDate> days) {
+        return String.join("、", days.stream().map(this::memoDayLabel).toList());
+    }
+
     private String memoWeekdayLabel(LocalDate date) {
         return "周" + "一二三四五六日".charAt(date.getDayOfWeek().getValue() - 1);
     }
@@ -4327,14 +5898,14 @@ public class FollowupAgentService {
      */
     private AgentTurnResponse askMemoRepeatDay(ConversationState state, MemoParser.MemoIntent memo) {
         state.pendingMemoText = memo.text();
-        state.pendingMemoAt = null;
+        state.pendingMemoAts = null;
         state.pendingMemoRepeat = memo.repeatRule();
-        state.pendingMemoDay = null;
+        state.pendingMemoDays = null;
         state.memoNeedsApproval = !memo.explicit();
         state.memoReturnStage = state.stage;
         state.pendingAction = "MEMO_REPEAT_DAY";
         state.stage = ConversationState.Stage.MEMO_TIME;
-        state.confirmationId = null;
+        confirmations.clear(state);
         boolean weekly = !"MONTHLY".equals(memo.repeatRule());
         String ask = weekly
                 ? "您想每周几提醒呢？比如说“每周三”"
@@ -4356,29 +5927,33 @@ public class FollowupAgentService {
             String text = state.pendingMemoText;
             state.pendingMemoText = null;
             state.pendingMemoRepeat = null;
-            state.pendingMemoDay = null;
+            state.pendingMemoDays = null;
             state.memoNeedsApproval = false;
             state.memoReturnStage = null;
             state.pendingAction = "CREATE";
             if (state.stage == ConversationState.Stage.MEMO_TIME) state.stage = ConversationState.Stage.READY_TO_PLAN;
-            return writeMemo(state, text, null, null);
+            return writeMemo(state, text, List.of(), null);
         }
-        LocalDate day = MemoParser.resolveRepeatAnchor(state.pendingMemoRepeat, value);
+        // 与 applyMemoAnswer 同一处判据、同一个理由：答句里的第二个钟点会被静默丢掉。
+        // 放在 resolveRepeatAnchor 之前——锚点听懂了也不该顺着往下写，那句里还有半句我们没接住。
+        if (MemoParser.severalClocksInOneSentence(value)) return askOneClockAtATime(state);
+        LocalDate day = MemoParser.resolveRepeatAnchor(state.pendingMemoRepeat, value, clock.today());
         if (day == null) {
             return respond(state, "没听清是哪一天。请再说一次，比如“每周三”或“每月15号”；不需要提醒就说“不用提醒，只记下”。",
                     memoNoTimeReply("MEMO_REPEAT_DAY"));
         }
-        LocalDateTime at = MemoParser.resolveRemindAt(state.pendingMemoText, value, day);
-        if (at == null) {
+        List<LocalDateTime> ats = MemoParser.resolveRemindAt(state.pendingMemoText, value,
+                List.of(day), clock.now());
+        if (ats.isEmpty()) {
             // 锚点听懂了、还差钟点：带着这一天接着问几点
-            state.pendingMemoDay = day;
+            state.pendingMemoDays = List.of(day);
             state.pendingAction = "MEMO_TIME";
             return respond(state, "好的，" + repeatAnchorLabel(state.pendingMemoRepeat, day)
                             + "。还差具体几点，请告诉我几点提醒，比如“早上8点”或“下午3点”；"
                             + "不需要到点提醒就说“不用提醒，只记下”。",
                     memoNoTimeReply("MEMO_TIME"));
         }
-        return finishMemoAnswer(state, at);
+        return finishMemoAnswer(state, ats);
     }
 
     /** 助手侧查/改/删已有备忘：识别不出返回 null，走“新记一条”和原链路。 */
@@ -4504,7 +6079,7 @@ public class FollowupAgentService {
     private AgentTurnResponse askMemoEditTime(ConversationState state, MemoStore.MemoView memo) {
         state.pendingMemoId = memo.id();
         state.pendingAction = "MEMO_EDIT_TIME";
-        state.confirmationId = null;
+        confirmations.clear(state);
         return respond(state, "要把「" + memo.text() + "」的提醒改到什么时候？可以说“明天早上八点”，"
                 + "也可以说“改成每周三下午三点”；不想再提醒就说“不用提醒了”。", memoStopRemindReply());
     }
@@ -4519,6 +6094,14 @@ public class FollowupAgentService {
     /** 把某条备忘的提醒改成老人新说的那个时间（也可改成重复的，或改成不再提醒）。 */
     private AgentTurnResponse editMemoTo(ConversationState state, MemoStore.MemoView memo, String answer) {
         String value = answer == null ? "" : answer.trim();
+        // 「改成明天早上八点，还有周三下午三点」「改成周三和周五」：这条备忘只装得下一个到点时间，
+        // 而下面 resolveRemindAt 的结果只取第一条——第二处会被静默丢掉，老人以为改到了下午三点，
+        // 到点响的却是早上八点，或者周五那次根本没改上，还听不出错在哪。不猜，请他挑一个再说。
+        // 两个判据都只看他这一句：备忘正文里本来就写着几天的那种老条目不算，那不是这次要改的东西。
+        if (MemoParser.severalMomentsInOneSentence(value)
+                || MemoParser.resolveDays(value, clock.today()).size() > 1) {
+            return askOneTimeForEditAtATime(state);
+        }
         // 正文原来写着的“每天早上八点”要跟着时间一起走：只改 remind_at 会让首页出现
         // “事项：每天早上八点量血压 / 提醒：每周五 15:00”这种自己跟自己打架的显示。
         // 以后时间只由“提醒”那一行负责，正文只留事项本身。
@@ -4531,10 +6114,14 @@ public class FollowupAgentService {
             cancelMemoCommand(state);
             return memoHandoff(state, "好的，已把「" + text + "」改成不再提醒，只留在健康备忘里。" + tail);
         }
+        // 周期只认老人**这一句里说了的**。他没说周期，这条改完就只剩这一次——不能替他沿用
+        // 这条备忘原来那个：老人说的是“明天早上七点”这一天，系统照原来的周期办就成了
+        // “以后每周三 07:00”“以后每月23号 07:00”，等于替他许了个他从没提过的长期承诺，
+        // 原来那个周五/12号还一并丢了。想接着重复的，说“改成每天早上七点”就行，一句话的事。
         String repeat = MemoParser.repeatRuleIn(value);
         LocalDate anchor = null;
         if (repeat != null && !"DAILY".equals(repeat)) {
-            anchor = MemoParser.resolveRepeatAnchor(repeat, value);
+            anchor = MemoParser.resolveRepeatAnchor(repeat, value, clock.today());
             // 只说“每周/每月”没说周几/几号：接着问，不能存一条永远不响的重复提醒
             if (anchor == null) {
                 return respond(state, "没听清是每周几还是每月几号。请再说一次，比如“改成每周三下午三点”。",
@@ -4542,25 +6129,37 @@ public class FollowupAgentService {
             }
         }
         // 算时间仍用原话：老人只说“改成每周三”时，钟点要沿用正文里那个（“每天八点”的八点），
-        // 否则会说“没听清”再问一遍，而且第二轮答钟点时把每周三这个周期丢掉
-        LocalDateTime at = MemoParser.resolveRemindAt(memo.text(), value, anchor);
+        // 否则会说“没听清”再问一遍，而且第二轮答钟点时把每周三这个周期丢掉。
+        // 改期只动这一条备忘，所以这里说的是“哪天”就取第一条，不给它拆出新条目。
+        List<LocalDateTime> resolved = MemoParser.resolveRemindAt(memo.text(), value,
+                anchor == null ? List.of() : List.of(anchor), clock.now());
+        LocalDateTime at = resolved.isEmpty() ? null : resolved.get(0);
         if (at == null) {
             return respond(state, "没听清要改成什么时候。请再说一个时间，比如“明天早上八点”；不想再提醒就说“不用提醒了”。",
                     memoStopRemindReply());
         }
+        // 重复提醒存在 remind_at 里的始终是“下一次到点”（见 MemoStore 类注释）：老人说的那个钟点
+        // 可能已经过去了（周三 16:00 说“改到每周三下午三点”），直接存会留一条已经过期的提醒。
+        LocalDateTime remindAt = repeat == null ? at : MemoStore.nextOccurrence(at, repeat, clock.now());
         callTool(state, "memo.update",
-                Map.of("memoId", memo.id(), "remindAt", at, "repeat", repeat == null ? "仅一次" : repeat),
-                () -> memoTool.update(state.id, state.userId, memo.id(), text, at, repeat));
+                Map.of("memoId", memo.id(), "remindAt", remindAt, "repeat", repeat == null ? "仅一次" : repeat),
+                () -> memoTool.update(state.id, state.userId, memo.id(), text, remindAt, repeat));
         cancelMemoCommand(state);
-        String when = repeat == null ? memoTimeLabel(at) : "以后" + memoRepeatLabel(at, repeat);
-        return memoHandoff(state, "好的，已把「" + text + "」的提醒改成" + when + "，到点打开应用会提醒您。" + tail);
+        // 说的是**存进去的那个**时间：顺延过之后 at 可能已经不对了
+        String when = repeat == null ? memoTimeLabel(remindAt) : "以后" + memoRepeatLabel(remindAt, repeat);
+        // 原来重复、这一句又没说周期：改完就只剩这一次了。这件事必须说出来——不说的话，
+        // 每天吃的那顿药从此不再响，而他以为自己只是换了个钟点，从回话里看不出任何异常。
+        String dropped = repeat == null && memo.repeatRule() != null
+                ? "（这条原来" + memoRepeatLabel(memo.remindAt(), memo.repeatRule()) + " 提醒，现在只提醒这一次。）"
+                : "";
+        return memoHandoff(state, "好的，已把「" + text + "」的提醒改成" + when + "，到点打开应用会提醒您。" + dropped + tail);
     }
 
     /** 删之前先问一句：删掉就找不回来了。 */
     private AgentTurnResponse askMemoDelete(ConversationState state, MemoStore.MemoView memo) {
         state.pendingMemoId = memo.id();
         state.pendingAction = "MEMO_DELETE_CONFIRM";
-        state.confirmationId = null;
+        confirmations.clear(state);
         return respond(state, "要删掉「" + memoLine(memo) + "」这条备忘吗？删掉就找不回来了。", memoDeleteReplies());
     }
 
@@ -4612,14 +6211,14 @@ public class FollowupAgentService {
     /** 老人只给了日期/时段没给钟点（如“明早”“每天”）：先追问具体几点，暂不落库。 */
     private AgentTurnResponse askMemoTime(ConversationState state, MemoParser.MemoIntent memo) {
         state.pendingMemoText = memo.text();
-        state.pendingMemoAt = null;
+        state.pendingMemoAts = null;
         state.pendingMemoRepeat = memo.repeatRule();
-        state.pendingMemoDay = null;
+        state.pendingMemoDays = null;
         state.memoNeedsApproval = !memo.explicit();
         state.memoReturnStage = state.stage;
         state.pendingAction = "MEMO_TIME";
         state.stage = ConversationState.Stage.MEMO_TIME;
-        state.confirmationId = null;
+        confirmations.clear(state);
         String hint = MemoParser.timeHintOf(memo.text());
         // “每天提醒我量血压”里没有任何日期词，回显“当天”会让老人莫名其妙；重复的就说重复周期
         if ("当天".equals(hint) && memo.repeatRule() != null) hint = repeatLabel(memo.repeatRule());
@@ -4633,17 +6232,27 @@ public class FollowupAgentService {
     /** 备忘确认卡（复用预约确认门）。隐式备忘在老人点头后才落库。 */
     private AgentTurnResponse memoConfirmCard(ConversationState state) {
         state.pendingAction = "MEMO";
-        state.stage = ConversationState.Stage.AWAITING_CONFIRMATION;
-        state.confirmationId = UUID.randomUUID().toString();
+        String confirmationId = confirmations.issue(state,
+                ConfirmationService.PendingOperation.Kind.MEMO, List.of());
         String text = state.pendingMemoText;
-        LocalDateTime at = state.pendingMemoAt;
+        // 走到这里 ats 一定不是 null：上面 issue 那一步已经把"草稿不齐"的卡拦在门外了（见 payloadIntact）。
+        // 留着兜底是因为这里的退化方向是安全的那一边（卡片说"暂不设置时间"，执行时会被判凭据不可信），
+        // 而不是拿一个 null 去拼卡片。
+        List<LocalDateTime> ats = state.pendingMemoAts == null ? List.of() : state.pendingMemoAts;
         List<String> operations = new ArrayList<>();
         operations.add("备忘内容：" + text);
-        operations.add(at == null ? "提醒：暂不设置时间（作为长期备忘）"
-                : "提醒：" + memoRepeatLabel(at, state.pendingMemoRepeat) + "，到点打开应用会提醒您");
+        if (ats.isEmpty()) {
+            operations.add("提醒：暂不设置时间（作为长期备忘）");
+        } else {
+            // 一句话说几天就列几行：老人点头之前得能核对每一天的日期听没听错，
+            // 只写一句“共 3 条”等于没给他核对的机会
+            for (LocalDateTime at : ats) {
+                operations.add("提醒：" + memoRepeatLabel(at, state.pendingMemoRepeat) + "，到点打开应用会提醒您");
+            }
+        }
         ConfirmationCard card = new ConfirmationCard("帮您记下这条健康备忘吗？", operations,
                 "只记录健康/复诊相关事项；确认后写入首页“健康备忘”，可随时查看、标记完成或删除。",
-                "确认记下", "先不用", state.confirmationId);
+                "确认记下", "先不用", confirmationId);
         return finish(state, new AgentTurnResponse(state.id, state.stage.name(),
                 "您说的这件健康事项，我可以帮您记下来并按时提醒。需要我记下吗？", List.of(),
                 null, card, null, traces.findByConversation(state.id)));
@@ -4651,44 +6260,18 @@ public class FollowupAgentService {
 
     /** 显式托付：调备忘录工具落库，回复后回到原办理上下文。 */
     private AgentTurnResponse recordMemo(ConversationState state, MemoParser.MemoIntent memo) {
-        return writeMemo(state, memo.text(), memo.remindAt(), memo.repeatRule());
+        return writeMemo(state, memo.text(), memo.remindAts(), memo.repeatRule());
     }
 
-    /** 落库一条备忘并回到原办理上下文（显式直写、以及追问后落库共用）。 */
-    private AgentTurnResponse writeMemo(ConversationState state, String text, LocalDateTime at, String repeatRule) {
-        String repeat = MemoStore.normalizeRepeat(repeatRule);
-        // 正文只留“事项”，时间只由“提醒”那一行负责。不摘的话首页会变成
-        // “明早八点提醒我吃药 / 提醒：明天 08:00”，同一件事说两遍，改过时间的旧备忘
-        // 又是另一种长相。没有提醒的长期备忘不能摘——“9月20号家人来接我”里的日期
-        // 是内容本身，不是提醒，摘掉就把事记残了。
-        String saved = at == null ? text : MemoParser.stripSchedule(text);
-        MemoStore.MemoView created = callTool(state, "memo.create",
-                Map.of("text", saved, "remindAt", at == null ? "长期" : at.toString(),
-                        "repeat", repeat == null ? "仅一次" : repeat),
-                () -> memoTool.create(state.id, state.userId, saved, at, repeat));
-        state.pendingMemoRepeat = null;
-        state.pendingMemoDay = null;
-        return memoHandoff(state, memoSavedReply(created.text(), at, repeat));
-    }
-
-    /** 隐式备忘的确认结果（复用预约确认门）。 */
-    private AgentTurnResponse confirmMemo(ConversationState state, boolean approved) {
-        state.pendingAction = "CREATE";
-        state.stage = state.memoReturnStage == null ? ConversationState.Stage.READY_TO_PLAN : state.memoReturnStage;
-        state.memoReturnStage = null;
-        state.memoNeedsApproval = false;
-        String text = state.pendingMemoText;
-        LocalDateTime at = state.pendingMemoAt;
-        String repeat = state.pendingMemoRepeat;
-        state.pendingMemoText = null;
-        state.pendingMemoAt = null;
-        state.pendingMemoRepeat = null;
-        state.pendingMemoDay = null;
-        if (!approved) return memoHandoff(state, "好的，这条没有记下。");
-        if (text == null || text.isBlank()) {
-            return memoHandoff(state, "这条备忘内容已失效，请重新对我说一遍。");
-        }
-        return writeMemo(state, text, at, repeat);
+    /**
+     * 备忘的落库入口（显式托付直写、追问补齐之后落库）。
+     *
+     * <p>它和确认卡那条路落到同一个执行器：三条路写的是同一条库、回读的是同一套话术，
+     * 在服务里再留一份，两边迟早在「正文要不要摘掉时间」这类细节上走散。
+     */
+    private AgentTurnResponse writeMemo(ConversationState state, String text, List<LocalDateTime> ats,
+                                        String repeatRule) {
+        return dispatcher.writeMemo(state, text, ats, repeatRule, this);
     }
 
     /** 老人回答“几点”的入口：可打字（聊天）也可点快捷回复（动作 MEMO_TIME）。 */
@@ -4697,10 +6280,10 @@ public class FollowupAgentService {
                 "没听清具体钟点。请再说一个时间，比如“早上8点”或“下午3点”；不需要到点提醒就说“不用提醒，只记下”。");
     }
 
-    /** 老人回答“哪一天”的入口（“这个星期三”已经过去时追问用）。 */
+    /** 老人回答“哪一天”的入口（那天已过去、或只说了“这周/下周”时追问用）。 */
     private AgentTurnResponse applyMemoDay(ConversationState state, String answer) {
-        return applyMemoAnswer(state, answer, memoDayReplies(MemoParser.nextWeekdayWord(
-                        state.pendingMemoText == null ? "" : state.pendingMemoText)),
+        String pending = state.pendingMemoText == null ? "" : state.pendingMemoText;
+        return applyMemoAnswer(state, answer, memoDayReplies(MemoParser.weekDaySuggestion(pending, clock.today())),
                 "没听清是哪一天。请再说一次日期，比如“下周三”或“9月16号”；不需要提醒就说“不用提醒，只记下”。");
     }
 
@@ -4713,72 +6296,135 @@ public class FollowupAgentService {
             return respond(state, "刚才要记的那条内容已经失效，请把想记的话重新对我说一遍。",
                     List.of(q("重新办理复诊", "CONTINUE", "")));
         }
+        // 补答里带了两个钟点（“早上八点吃药，下午三点量血压”）：下面 resolveRemindAt 只取一个钟点，
+        // 第二个会被静默丢掉、两个日子还会共用第一个钟点。草稿留着，只让他把时间一个一个说
+        // （判据只看钟点：答句说“下周三，下周五”是同一件事的两天，本来就该拆条，不能拦）。
+        if (MemoParser.severalClocksInOneSentence(value)) return askOneClockAtATime(state);
         boolean keepStanding = containsAny(value, MEMO_NO_TIME);
-        LocalDate answeredDay = keepStanding ? null : MemoParser.resolveDay(value);
-        LocalDateTime at = keepStanding ? null
-                : MemoParser.resolveRemindAt(state.pendingMemoText, value, state.pendingMemoDay);
-        if (!keepStanding && at == null) {
+        List<LocalDate> answeredDays = keepStanding ? List.of() : MemoParser.resolveDays(value, clock.today());
+        List<LocalDateTime> ats = keepStanding ? List.of()
+                : MemoParser.resolveRemindAt(state.pendingMemoText, value, state.pendingMemoDays, clock.now());
+        if (!keepStanding && ats.isEmpty()) {
             // 日子听懂了（“下周三”）但还差钟点：接着问几点，别把刚听懂的日子又丢掉，
             // 也不能回一句“没听清是哪一天”——老人明明已经说清楚了
-            if (answeredDay != null) {
-                state.pendingMemoDay = answeredDay;
+            if (!answeredDays.isEmpty()) {
+                state.pendingMemoDays = answeredDays;
                 state.pendingAction = "MEMO_TIME";
-                return respond(state, "好的，记成" + memoDayLabel(answeredDay)
+                return respond(state, "好的，记成" + memoDaysLabel(answeredDays)
                                 + "。还差具体几点，请告诉我几点提醒，比如“早上8点”或“下午3点”；"
                                 + "不需要到点提醒就说“不用提醒，只记下”。",
                         memoNoTimeReply("MEMO_TIME"));
             }
             return respond(state, retryNote, retryReplies);
         }
-        return finishMemoAnswer(state, at);
+        return finishMemoAnswer(state, ats);
     }
 
-    /** 追问齐了（内容+到点时间）之后的共同落地：隐式备忘走确认卡，显式直写。 */
-    private AgentTurnResponse finishMemoAnswer(ConversationState state, LocalDateTime at) {
-        state.pendingMemoDay = null;
-        state.pendingMemoAt = at;
-        if (state.memoNeedsApproval) return memoConfirmCard(state);
+    /**
+     * 追问齐了（内容+到点时间）之后的共同落地：隐式备忘走确认卡，显式直写。
+     *
+     * <p><b>代长辈留提醒走另一支。</b>家属端的提醒按设计不出确认卡（家属是自己人，问一声再点头只会多一屏），
+     * 所以 caregiving 这一支排在卡片判断<b>之前</b>；落库和回读也换成家属那一套
+     * （{@link #commitElderRemind}）——抬头写明是谁留的、逐天改写正文、回一条协同通知。
+     * 不这么分的话，家属补答完钟点之后走的是老人端的口吻（“已记下 1 条”），
+     * 通知也不会发，等于替长辈留了提醒却没人知道。
+     */
+    private AgentTurnResponse finishMemoAnswer(ConversationState state, List<LocalDateTime> ats) {
+        state.pendingMemoDays = null;
+        state.pendingMemoAts = ats;
+        boolean caregiving = state.caregiving();
+        if (!caregiving && state.memoNeedsApproval) return memoConfirmCard(state);
         String text = state.pendingMemoText;
         String repeat = state.pendingMemoRepeat;
         state.pendingMemoText = null;
         state.pendingMemoRepeat = null;
-        state.pendingMemoDay = null;
+        state.pendingMemoDays = null;
         state.pendingAction = "CREATE";
         state.stage = state.memoReturnStage == null ? ConversationState.Stage.READY_TO_PLAN : state.memoReturnStage;
         state.memoReturnStage = null;
         state.memoNeedsApproval = false;
-        return writeMemo(state, text, at, repeat);
+        if (caregiving) return commitElderRemind(state, text, ats, repeat);
+        return writeMemo(state, text, ats, repeat);
     }
 
     /** 丢弃暂存中的备忘草稿（追问被打断/内容失效时）。 */
     private void clearMemoDraft(ConversationState state) {
         state.pendingMemoText = null;
-        state.pendingMemoAt = null;
+        state.pendingMemoAts = null;
         state.pendingMemoRepeat = null;
-        state.pendingMemoDay = null;
+        state.pendingMemoDays = null;
         state.memoNeedsApproval = false;
         state.memoReturnStage = null;
-        state.confirmationId = null;
+        confirmations.clear(state);
         state.pendingAction = "CREATE";
         if (state.stage == ConversationState.Stage.MEMO_TIME) {
             state.stage = ConversationState.Stage.READY_TO_PLAN;
         }
     }
 
-    private String memoSavedReply(String text, LocalDateTime at, String repeatRule) {
+    /**
+     * 回读记下了什么。一句话说了好几天时会写成好几条，所以按条列出来——
+     * 老人只有逐条听到日期，才能发现其中哪天听错了，不然“已记下”三个字掩盖了三条里的错。
+     */
+    private String memoSavedReply(List<MemoStore.MemoView> created, String repeatRule) {
         String repeat = MemoStore.normalizeRepeat(repeatRule);
+        if (created.size() > 1) {
+            StringBuilder lines = new StringBuilder("好的，已记下 " + created.size() + " 条。");
+            for (MemoStore.MemoView memo : created) {
+                lines.append("\n· ").append(memoMomentLabel(memo.remindAt(), repeat));
+            }
+            return lines.append("\n您可以在首页“健康备忘”中查看、标记完成或删除。").toString();
+        }
+        MemoStore.MemoView memo = created.get(0);
         String when;
-        if (at == null) {
+        if (memo.remindAt() == null) {
             when = "这条作为长期备忘保留。";
         } else if (repeat == null) {
-            when = "到" + memoTimeLabel(at) + "打开应用会提醒您。";
+            when = "到" + memoTimeLabel(memo.remindAt()) + "打开应用会提醒您。";
         } else {
             // 重复提醒把周期锚点一起回读（“以后每周三 15:00”）：
             // 只说“每周”老人听不出是哪天，也就没法发现听错了
-            when = "以后" + memoRepeatLabel(at, repeat) + "到点打开应用会提醒您。";
+            when = "以后" + memoRepeatLabel(memo.remindAt(), repeat) + "到点打开应用会提醒您。";
         }
-        return "好的，已记下：“" + text + "”。" + when
+        return "好的，已记下：“" + memo.text() + "”。" + when
                 + "您可以在首页“健康备忘”中查看、标记完成或删除。";
+    }
+
+    /**
+     * 多天备忘写到一半失败时的回读：写成的那几条逐条念，没写成的如实说清是哪几天。
+     *
+     * <p>两句话都不能省。只说“已经记下 2 条”，老人以为三天都设好了，第三天永远不响；
+     * 只说“没记上”，他又会以为一条都没有、回头重复说一遍——两条路都让他照着话去首页核对时
+     * 对不上号。
+     */
+    private String memoPartlySavedReply(List<MemoStore.MemoView> created, List<LocalDateTime> missed,
+                                        String repeatRule) {
+        String repeat = MemoStore.normalizeRepeat(repeatRule);
+        StringBuilder lines = new StringBuilder();
+        if (created.isEmpty()) {
+            lines.append("好的，这条我没能记上，现在一条都没有。");
+        } else {
+            lines.append("好的，已记下 ").append(created.size()).append(" 条。");
+            for (MemoStore.MemoView memo : created) {
+                lines.append("\n· ").append(memoMomentLabel(memo.remindAt(), repeat));
+            }
+        }
+        lines.append("\n还有 ").append(missed.size()).append(" 条没记上：");
+        lines.append(String.join("、", missed.stream().map(at -> memoMomentLabel(at, repeat)).toList()));
+        return lines.append("。您把这几条再说一遍，我接着记。").toString();
+    }
+
+    /**
+     * 回读某一条提醒时刻的文案：一次性的连日期一起念（“9月16日（周三） 08:00”），
+     * 重复的念周期锚点（“每周三 08:00”）。
+     *
+     * <p>带上星期几是有意的：老人说的是“这周周一周二周三”，回读里只有“9月16日”他得自己数
+     * 日子才知道那是周几，听不出听没听错。
+     */
+    private String memoMomentLabel(LocalDateTime at, String repeat) {
+        if (at == null) return "长期备忘";
+        return repeat == null ? memoDayLabel(at.toLocalDate()) + " " + at.format(TIME_LABEL)
+                : memoRepeatLabel(at, repeat);
     }
 
     /**
@@ -4808,9 +6454,17 @@ public class FollowupAgentService {
     }
 
     /** 记完备忘/健康数值后把话头交回原来的办理上下文，不打断复诊办理。 */
-    private AgentTurnResponse memoHandoff(ConversationState state, String note) {
+    @Override
+    AgentTurnResponse memoHandoff(ConversationState state, String note) {
         if (state.appointmentId != null) {
             return respondWithPlan(state, note, bookedActions(state));
+        }
+        // 办理已经停止：备忘记完就停在这儿。原来会落到最后的 askHospital，等于把老人刚取消掉的
+        // 办理又推回去（那句“我们继续办理复诊，请问您想去哪家医院”还会把 stage 从 CANCELLED
+        // 改成 ASK_HOSPITAL）。要重新办，得由老人自己点“新建办理”。
+        if (state.stage == ConversationState.Stage.CANCELLED) {
+            return respondWithoutModel(state, note + " 这次办理已经停止，想重新办理时告诉我。",
+                    List.of(q("新建办理", "NEW_BOOKING", ""), q("查看事项", "OPEN_TASKS", "")));
         }
         if (state.stage == ConversationState.Stage.READY_TO_PLAN) {
             return respondWithPlan(state, note + " 可以继续办理复诊。",
@@ -4837,14 +6491,300 @@ public class FollowupAgentService {
         return at.format(MEMO_LABEL);
     }
 
-    /** 实测数值：记录或回查。两条路都不落到预约链路（“我的血压是100”不是要办复诊）。 */
-    private AgentTurnResponse healthRecordReply(ConversationState state, HealthRecordParser.RecordIntent intent,
+    /**
+     * 实测数值：记录或回查。两条路都不落到预约链路（“我的血压是100”不是要办复诊）。
+     *
+     * <p>{@code also} 是“这句话里还夹着另一件事”的补话（见 {@link #alsoATimedMemoNote}），
+     * 由三个出口拼在<b>草稿</b>里——不是等出口把回复定稿之后再往上一贴：定稿那一步已经写进会话
+     * 历史了（见 {@code finish}），补话只落在屏幕上、没落进他这一轮的记录，下一轮的上下文就对不上。
+     */
+    private AgentTurnResponse healthRecordReply(ConversationState state, List<HealthRecordParser.RecordIntent> records,
                                                 String raw) {
-        if (intent.kind() == HealthRecordParser.Kind.QUERY) return healthRecordQuery(state, intent.item());
-        // 血压 800、体温 60 这种量不出来的数：先问一句是重测还是照记。既不静默丢（老人报了数却
-        // 什么都没发生，还会顺着链路被问“去哪家医院”），也不闷头记成一条不可能的数据。
-        if (intent.needsConfirm()) return askRecordConfirm(state, intent);
-        return recordValue(state, intent, raw);
+        String also = alsoATimedMemoNote(raw);
+        HealthRecordParser.RecordIntent first = records.get(0);
+        // 撤销只有一条路，和“报了几项”无关：他说的“记错了”冲着的就是最近那一条
+        if (first.kind() == HealthRecordParser.Kind.UNDO) return undoLatestRecord(state);
+        if (records.size() == 1 && first.kind() == HealthRecordParser.Kind.QUERY) {
+            return healthRecordQuery(state, first.item(), also);
+        }
+        return continueRecords(state, records, raw, also);
+    }
+
+    /**
+     * 这一句里报了几项。
+     *
+     * <p>撤销那条（{@code Kind.UNDO}）也在里头：它解析出来的记录项目、数值、时间都是空的，
+     * 谁要是把它当成一条普通记录去发确认卡，签发那一刻就会被判成“缺了执行要用的内容”而报错。
+     * 所以 {@link #healthRecordReply} 第一件事就是把它认走。
+     */
+    private static List<HealthRecordParser.RecordIntent> healthRecordIntents(String value) {
+        return HealthRecordParser.detectAll(value);
+    }
+
+    /**
+     * 老人说“记错了”：删掉他自己最近的那一条，并把删掉的那条念给他听。
+     *
+     * <p>为什么要念：他说“记错了”，可他心里那条“错的”未必就是库里最近的那一条——很可能他刚
+     * 报了两个数，想删的是头一个。念出来他才知道究竟删掉了哪条；删错了再说一句“记错了”，
+     * 删的就是下一条。不念的话，他以为删掉的是 A、实际没的是 B，而 A 还在。
+     *
+     * <p>一条都没有时不编一句“好的已删除”：那是他说了一句话、库里什么都没发生。
+     */
+    private AgentTurnResponse undoLatestRecord(ConversationState state) {
+        HealthRecordStore.RecordView removed = callTool(state, "healthRecord.delete",
+                Map.of("userId", state.userId),
+                () -> healthRecordTool.deleteLatest(state.id, state.userId));
+        if (removed == null) {
+            return memoHandoff(state, "您还没记过数值，没有可以删的。想记就跟我说“我的血压是100”。");
+        }
+        return memoHandoff(state, "好，已经把刚才那条「" + recordLabel(removed) + "」删掉了。"
+                + "要是删错了，再说一声“记错了”，我把下一条也删掉。");
+    }
+
+    /** 一条记录念出来：“体重 190 斤”。“其他”那类是老人的原话，本身就不是“项目+数”，只念原话。 */
+    private static String recordLabel(HealthRecordStore.RecordView row) {
+        if (HealthRecordParser.OTHER.equals(row.item())) return row.valueText();
+        return spokenRecord(row.item(), row.valueText(), row.unit());
+    }
+
+    /**
+     * 一句话里报的几项按顺序办：<b>该问的先问清楚，剩下的发一张卡一次确认</b>。
+     *
+     * <p>为什么不能只办第一条（原来就是这样）：老人说了两件事，机器只做了前一件，嘴上还说
+     * “好的已记下”，第二件在他看不见的地方消失了——回看时那一条根本不在。
+     *
+     * <p>为什么要先问再发卡：卡上列着的每一行，点一次“确认记下”就要原样写进库。带着疑问的那条
+     * （血压 800 量不出来、190 没说单位）先问一句，答完它就是一条干净的记录，也就能和其余几条
+     * 一起上卡；否则卡上会写着一个我们其实还没敢认的数，而他一点头就把它当真的记下了。
+     *
+     * @param records 这一句里认出来的全部记录，按老人说的顺序
+     */
+    private AgentTurnResponse continueRecords(ConversationState state,
+                                              List<HealthRecordParser.RecordIntent> records, String raw,
+                                              String also) {
+        // 这一刻是“他说的这段话”的时刻，这一句里的每一条都取同一个：卡上写着哪一刻，
+        // 写进库的那几条就都得是哪一刻，不能第一条是这一秒、第二条是下一秒
+        LocalDateTime at = clock.now();
+        for (int i = 0; i < records.size(); i++) {
+            if (!needsAQuestion(records.get(i))) continue;
+            // 手上那张卡写着的是上一条数值，而这一问之后要记的是另一条。卡不撤下来，
+            // 他对着卡上那行点头、写进去的却是这一条（草稿换了、凭据还活着）——正是
+            // healthRecordConfirmCard 那段注释里说的那件事，这里也得撤一次。
+            String note = also;
+            if (healthRecordCardPending(state)) {
+                note = replacedRecordLabel(state) + "还没确认，我撤下来了，没有记进去。" + also;
+                confirmations.clear(state);
+            }
+            List<HealthRecordParser.RecordIntent> rest = new ArrayList<>(records);
+            rest.remove(i);
+            // 问的这一条进手上那几个暂存字段，其余几条另存一处（见 recordRestOf）：
+            // 混在一起，答完之后就分不清哪条是哪条了
+            List<PendingRecord> waiting = recordRestOf(rest, raw, at);
+            // “只有说法、没有数”（我血压有点高）问的是“量出来是多少”，和“这个数不太对”
+            // 不是同一问：混用一个状态名，他答的“没量过”会被拿去当“数不太对”的回答解析
+            return records.get(i).issue() == HealthRecordParser.Issue.NO_VALUE
+                    ? askRecordValue(state, records.get(i), raw, note, waiting, at)
+                    : askRecordConfirm(state, records.get(i), raw, note, waiting, at);
+        }
+        return healthRecordConfirmCard(state, records, raw, also);
+    }
+
+    /**
+     * 这一条要不要先问一句。
+     *
+     * <p>量不出的数（血压 800）、说反了的一对数（80/120）、没说单位的体重（190）问的是
+     * “他说的是不是这个意思”；只有说法、没有数的那条（“我血压有点高”）问的是“量出来是多少”。
+     * 四问各有各的措辞和按钮（见 {@link #askRecordValue} 与 {@link #askRecordConfirm}），
+     * 共同点是：<b>都没有一个可以直接写进库的数</b>，直接落库就是把我们没敢认的东西当真的记下。
+     */
+    private static boolean needsAQuestion(HealthRecordParser.RecordIntent intent) {
+        return intent.issue() != null;
+    }
+
+    /** 只有说法、没有数的那一条（“血压 有点高”）：按他说的那句存，不挂单位。 */
+    private static HealthRecordParser.RecordIntent spokenOnly(String item, String valueText) {
+        return new HealthRecordParser.RecordIntent(HealthRecordParser.Kind.RECORD, item, null, valueText, null, null);
+    }
+
+    /** 把还没办的那几条暂存起来：原话与量到的时刻一起带着走，接着办时不重新解析、不重新取时间。 */
+    private static List<PendingRecord> recordRestOf(List<HealthRecordParser.RecordIntent> rest, String raw,
+                                                    LocalDateTime at) {
+        List<PendingRecord> stashed = new ArrayList<>();
+        for (HealthRecordParser.RecordIntent intent : rest) {
+            stashed.add(new PendingRecord(intent.item(), intent.valueNum(), intent.valueText(), intent.unit(),
+                    raw, at, intent.issue() == null ? null : intent.issue().name()));
+        }
+        return List.copyOf(stashed);
+    }
+
+    /** 暂存的那几条还原成待办的记录（带着当时那个疑问：该问的照问，该记的照记）。 */
+    private static List<HealthRecordParser.RecordIntent> restoreRecordRest(List<PendingRecord> rest) {
+        List<HealthRecordParser.RecordIntent> intents = new ArrayList<>();
+        if (rest == null) return intents;
+        for (PendingRecord record : rest) {
+            intents.add(new HealthRecordParser.RecordIntent(HealthRecordParser.Kind.RECORD, record.item(),
+                    record.valueNum(), record.valueText(), record.unit(),
+                    record.issue() == null ? null : HealthRecordParser.Issue.valueOf(record.issue())));
+        }
+        return intents;
+    }
+
+    /**
+     * 老人把那一问问清楚了（答了单位、重报了一个数、说了“照记”）之后怎么落。
+     *
+     * <p>这一句里<b>没有别的</b>了就直接写库：他刚为这个数表过态，再叠一张卡让他点第二次头
+     * 是白问一遍——一个数问两遍，老人只会觉得这件事没完。这一句里<b>还有别的</b>几条时，
+     * 手上这条加上等着的那几条，照 {@link #continueRecords} 的规矩接着办：该问的下一问继续问，
+     * 剩下的一起上卡（多值只有一条出口，就是那张卡）。
+     */
+    private AgentTurnResponse resumeRecords(ConversationState state, HealthRecordParser.RecordIntent settled,
+                                            String raw, String also, LocalDateTime at) {
+        List<HealthRecordParser.RecordIntent> rest = restoreRecordRest(state.pendingRecordRest);
+        clearPendingRecord(state);
+        if (rest.isEmpty()) return recordValue(state, settled, raw, at);
+        List<HealthRecordParser.RecordIntent> all = new ArrayList<>();
+        all.add(settled);
+        all.addAll(rest);
+        return continueRecords(state, all, raw, also);
+    }
+
+    /** 一条读数念出来：“体重 190 斤”。没有单位时不拖一个空格，更不会印出一个 null。 */
+    private static String spokenRecord(String item, String valueText, String unit) {
+        return unit == null || unit.isBlank() ? item + " " + valueText : item + " " + valueText + " " + unit;
+    }
+
+    /**
+     * 一句话里夹着两件事时的补话：数值那半进健康记录，另半句<b>带时间的提醒</b>不跟着办——
+     * 这条路上没有任何一处会写备忘。
+     *
+     * <p>为什么非得说出来：老人说完「我血压 130，顺便提醒我明天早上吃药」就去等提醒了，
+     * 而库里的备忘一条都没有。这不是“少办一件”的措辞问题，是他说出口的话被静默丢掉。
+     * 按“一件一件办”的口径，这里只办数值，并把另一件明确交回给他，让他再说一遍
+     * （其余“一句话多个时间”的场景见 {@code severalMomentsInOneSentence} 那套回问）。
+     *
+     * <p>判据是<b>“这句里还有一件带时间的让提醒”</b>，不是“能解析出备忘”：{@code MemoParser}
+     * 对显式托付本来就宽松，「记一下我血压130」也能解析成一条备忘，可那是同一件事、不是第二件，
+     * 照那句判会说出一句误导他的话。所以两句都要：句子里有让提醒的话（见
+     * {@link MemoParser#asksForAReminder}），且那半句带时间。
+     *
+     * <p>时间<b>认得出钟点</b>（“明天早上八点提醒我吃药”）和<b>只说了时段</b>（“明天早上提醒我吃药”）
+     * 都算第二件——后者这一轮本来就该反问他几点（见 {@code MemoParser#clockTimeOfUnsaid}），
+     * 更得说出来：他要等的是那个提醒，而这条链路一个备忘都不写。
+     */
+    private String alsoATimedMemoNote(String raw) {
+        if (!MemoParser.asksForAReminder(raw)) return "";
+        MemoParser.MemoIntent also = MemoParser.detect(raw, clock.now());
+        if (also == null) return "";
+        if (also.remindAts().isEmpty() && !also.needsTime()) return "";
+        return "另外，您这句话里还有一件要提醒的事，我这一轮没有一起办——请单独再说一遍，我这就给您记上。";
+    }
+
+    /**
+     * 健康记录确认卡：老人平静地报了一个数值（“我的血压是100”），先让他点头再落库。
+     *
+     * <p>为什么这条要一道门：健康记录是他自己拿给医生看的数据，而“听错了数”在这条路上没有任何
+     * 别的护栏——“136”听成“160”既不离谱也不自相矛盾，机器判不出来，只有他本人看一眼才知道。
+     * 所以卡上把三样一起复述清楚：记哪一项、记成什么数、什么时候量的；这三样也正是执行时
+     * 要用的草稿，随凭据一起进快照（见 {@code ConfirmationService.payloadIntact}）。
+     *
+     * <p>记录时间取<b>此刻</b>并冻在草稿里，而不是等确认时再取一次：他在晚上九点半量的血压，
+     * 隔了十分钟才点确认，记录里该是九点半。卡上写哪一刻，写进库的就是哪一刻。
+     *
+     * <p>{@code pendingAction} 用 {@code RECORD_CARD} 而不是反问那条的 {@code RECORD_CONFIRM}：
+     * 后者是被反问之后老人答话的入口，两种状态混用一个名字，他随手打一句“150”就会被当成
+     * 在回答一个他从没见过的问题。
+     *
+     * <p><b>手上已经有一张健康卡时，这一张换掉那一张</b>（同一会话手上只该有一张卡）：
+     * 他上一条还没点头，这一句又报了一个新数，两个数不能各占一张卡等他挑。换掉的是那张卡，
+     * 不是他正在办的事——原来办到哪一步沿用最早那一次记下的，确认之后照样接着办。
+     */
+    private AgentTurnResponse healthRecordConfirmCard(ConversationState state,
+                                                      List<HealthRecordParser.RecordIntent> records, String raw,
+                                                      String also) {
+        // 先清旧凭据、再改草稿，顺序不能反：只改草稿不清凭据，屏幕上那张旧卡（写着上一条）就配上了
+        // 这一条新数值——他对着卡上的「血压 138」点头，写进去的是「血糖 6.4」。清掉之后那张卡上的
+        // 按钮当场失效（凭据对不上了），他按下去只会得到一句“这份确认已经失效”。
+        boolean replacing = healthRecordCardPending(state);
+        String replaced = replacing ? replacedRecordLabel(state) : null;
+        if (replacing) confirmations.clear(state);
+        // 卡上列着的是一整句里的每一条，写进库的也必须是一条不少（见 HealthRecordExecutor#commit）。
+        // 手上暂存的那几个字段只装得下第一条，其余几条另存一列，一起随凭据进快照。
+        HealthRecordParser.RecordIntent first = records.get(0);
+        LocalDateTime at = clock.now();
+        state.pendingRecordItem = first.item();
+        state.pendingRecordValueNum = first.valueNum();
+        state.pendingRecordValueText = first.valueText();
+        state.pendingRecordUnit = first.unit();
+        state.pendingRecordRaw = raw;
+        state.pendingRecordAt = at;
+        state.pendingRecordRest = recordRestOf(records.subList(1, records.size()), raw, at);
+        if (!"RECORD_CARD".equals(state.pendingAction)) {
+            state.recordReturnAction = state.pendingAction;
+            state.recordReturnStage = state.stage;
+        }
+        state.pendingAction = "RECORD_CARD";
+        String confirmationId = confirmations.issue(state,
+                ConfirmationService.PendingOperation.Kind.HEALTH_RECORD, List.of());
+        List<String> lines = new ArrayList<>();
+        for (HealthRecordParser.RecordIntent record : records) {
+            lines.add("记录内容：" + spokenRecord(record.item(), record.valueText(), record.unit()));
+        }
+        lines.add("记录时间：" + at.format(MEMO_LABEL));
+        ConfirmationCard card = new ConfirmationCard("帮您记下" + readingCount(records.size()) + "健康数值吗？",
+                lines,
+                "确认后写入首页“健康记录”，随时可以查看；记错了也能删掉重记。",
+                "确认记下", "先不用", confirmationId);
+        // 换卡时把被撤下那条说出来：否则他以为两个数都记了，或者以为上一条已经记进去了
+        String what = records.size() == 1 ? "您说的这个数" : "您说的这几个数";
+        String question = (replaced == null
+                ? what + "，我帮您记到“健康记录”里。需要我记下吗？"
+                : what + "，我帮您记到“健康记录”里。" + replaced + "还没确认，我撤下来了，"
+                        + "没有记进去。需要我记下现在" + (records.size() == 1 ? "这一条" : "这几条") + "吗？") + also;
+        return finish(state, new AgentTurnResponse(state.id, state.stage.name(),
+                question, List.of(),
+                null, card, null, traces.findByConversation(state.id)));
+    }
+
+    /** 卡上那几行怎么称呼：“这条 / 这两条 / 这几条”。 */
+    private static String readingCount(int count) {
+        return count == 1 ? "这条" : count == 2 ? "这两条" : "这几条";
+    }
+
+    /** 手上那张卡上记的是哪一条（“刚才那条「血压 138 mmHg」”），只说给老人听，不作任何判据。 */
+    private String replacedRecordLabel(ConversationState state) {
+        if (state.pendingRecordItem == null || state.pendingRecordValueText == null) return "刚才那条数值";
+        String unit = state.pendingRecordUnit;
+        String reading = unit == null || unit.isBlank()
+                ? state.pendingRecordValueText : state.pendingRecordValueText + " " + unit;
+        return "刚才那条「" + state.pendingRecordItem + " " + reading + "」";
+    }
+
+    /** 健康数值落库成功后的回读话术（确认卡与反问后直写两条路共用）。 */
+    @Override
+    String healthRecordedReply(String item, String valueText, String unit, LocalDateTime at) {
+        // 单位可能是空的（“我血压有点高”这条只存了他说的话，没挂单位）：不拖一个空格，也不印 null
+        return "好的，已记下：" + at.format(MEMO_LABEL) + " " + item + " " + valueText
+                + (unit == null || unit.isBlank() ? "" : " " + unit)
+                + "。以后想回看，问我“我最近" + item + "多少”就行，首页“健康记录”里也留着。";
+    }
+
+    @Override
+    String healthRecordedReply(List<HealthRecordStore.RecordView> recorded) {
+        if (recorded.isEmpty()) return "好的，已记下。";
+        if (recorded.size() == 1) {
+            HealthRecordStore.RecordView only = recorded.get(0);
+            return healthRecordedReply(only.item(), only.valueText(), only.unit(), only.recordedAt());
+        }
+        // 一句里报了几项就逐条念几项：他只说了“都记下了”是看不出哪一个听错的，
+        // 念出来他才能当场发现“我说的不是这个数”。念的是写进库的那几条，不是打算写的那几条。
+        StringBuilder readings = new StringBuilder();
+        for (HealthRecordStore.RecordView row : recorded) {
+            if (readings.length() > 0) readings.append("、");
+            readings.append(row.unit() == null || row.unit().isBlank()
+                    ? row.item() + " " + row.valueText() : row.item() + " " + row.valueText() + " " + row.unit());
+        }
+        return "好的，已记下：" + recorded.get(0).recordedAt().format(MEMO_LABEL) + " " + readings
+                + "。以后想回看，问我“我最近血压多少”就行，首页“健康记录”里也留着。";
     }
 
     /**
@@ -4870,40 +6810,74 @@ public class FollowupAgentService {
                 List.of(q("继续办理复诊", "CONTINUE", "")));
     }
 
-    /** 真往库里写一条实测值；回读记下了什么，老人才能发现听错了数。 */
+    /**
+     * 真往库里写一条实测值；回读记下了什么，老人才能发现听错了数。
+     *
+     * <p>它和确认卡那条路落到同一个执行器：两条路写的是同一张表、回读的是同一套话术，
+     * 在服务里再留一份，两边迟早在「记录时间取哪一刻」这类细节上走散。
+     *
+     * <p>这里只留反问之后那一条入口（老人刚为这个数表过态，不必再点一次头）；平静报数那条
+     * 走 {@link #healthRecordConfirmCard}。
+     */
     private AgentTurnResponse recordValue(ConversationState state, HealthRecordParser.RecordIntent intent,
                                           String raw) {
-        LocalDateTime at = MemoParser.nowInDemoZone();
-        HealthRecordStore.RecordView created = callTool(state, "healthRecord.create",
-                Map.of("item", intent.item(), "value", intent.valueText(), "unit", intent.unit()),
-                () -> healthRecordTool.create(state.id, state.userId, intent.item(), intent.valueNum(),
-                        intent.valueText(), intent.unit(), raw, at));
-        return memoHandoff(state, "好的，已记下：" + created.recordedAt().format(MEMO_LABEL) + " "
-                + created.item() + " " + created.valueText() + " " + created.unit()
-                + "。以后想回看，问我“我最近" + created.item() + "多少”就行，首页“健康记录”里也留着。");
+        return recordValue(state, intent, raw, clock.now());
+    }
+
+    /** 记录时间由调用方给死的入口：反问前暂存的那条要把“量到的时刻”一起带过来。 */
+    private AgentTurnResponse recordValue(ConversationState state, HealthRecordParser.RecordIntent intent,
+                                          String raw, LocalDateTime at) {
+        return dispatcher.writeHealthRecord(state, intent.item(), intent.valueNum(), intent.valueText(),
+                intent.unit(), raw, at, this);
     }
 
     /**
-     * 数值看起来不对时先反问，暂存这一条等老人表态。
-     * 这里只判断“量不出这个数”，不判断“这个数好不好”——后者是医学判断，助手不做。
+     * 数值看起来不对（或者单位没交代）时先反问，暂存这一条等老人表态。
+     * 这里只判断“量不出这个数”“这是斤还是公斤”，不判断“这个数好不好”——后者是医学判断，助手不做。
+     *
+     * @param rest 这一句里<b>其余几条</b>（已经暂存好、原顺序不动），等他答完这一问接着办
+     *             （见 {@link #continueRecords}）
+     * @param at   这一段话的时刻：这一问的这条和等着的那几条共用同一个，答完之后卡上写的、
+     *             写进库的都是它
      */
-    private AgentTurnResponse askRecordConfirm(ConversationState state, HealthRecordParser.RecordIntent intent) {
+    private AgentTurnResponse askRecordConfirm(ConversationState state, HealthRecordParser.RecordIntent intent,
+                                               String raw, String also, List<PendingRecord> rest, LocalDateTime at) {
         state.pendingRecordItem = intent.item();
         state.pendingRecordValueNum = intent.valueNum();
         state.pendingRecordValueText = intent.valueText();
         state.pendingRecordUnit = intent.unit();
-        // 反问前正在办的流程（复诊办理、改期草稿）要记下来，答完还回去
-        if (!"RECORD_CONFIRM".equals(state.pendingAction)) state.recordReturnAction = state.pendingAction;
-        state.pendingAction = "RECORD_CONFIRM";
-        String value = intent.valueText() + " " + intent.unit();
+        // 原话与量到的时刻一起暂存：他答“照记”时落库的仍是这一条（同一个数、同一刻），
+        // 不是“反问之后我们又重新理解了一遍”的另一条
+        state.pendingRecordRaw = raw;
+        state.pendingRecordAt = at;
+        state.pendingRecordRest = rest == null ? List.of() : rest;
+        // 没说单位的体重走另一个状态名：“这是斤还是公斤”和“这个数不太对”是两个不同的问题，
+        // 混用一个名字，他答的“公斤”会被当成“这个数不太对”的回答去解析。
+        boolean unitAsk = intent.issue() == HealthRecordParser.Issue.UNIT;
+        String pending = unitAsk ? "RECORD_UNIT" : "RECORD_CONFIRM";
+        // 反问前正在办的流程（复诊办理、改期草稿）要记下来，答完还回去。手上刚撤下来一张卡时
+        // 不能记 "RECORD_CARD"：那是个“屏幕上正显示着一张卡”的状态，凭据已经撤了，
+        // 还回去只会让会话停在一个没有卡的空状态上——要还的是那张卡弹出来之前的动作。
+        String previous = "RECORD_CARD".equals(state.pendingAction) ? state.recordReturnAction : state.pendingAction;
+        if (!pending.equals(previous)) state.recordReturnAction = previous;
+        state.pendingAction = pending;
+        String value = spokenRecord(intent.item(), intent.valueText(), intent.unit());
+        // 数没问题、单位没交代（“我体重190”）：190 斤和 190 公斤都说得通，替他挑一个就是替他改数据。
+        // 给两个按钮，点一下就是一个准确的答案，比让他再说一句“是公斤”省事。
+        // 走不经过模型的出口：这一问就是“二选一”，措辞被改写就可能把选项说糊。
+        if (unitAsk) {
+            return respondWithoutModel(state, "您说的是「" + value + "」，这是斤还是公斤？" + also,
+                    recordUnitReplies(intent.valueText()));
+        }
         if (intent.issue() == HealthRecordParser.Issue.SWAPPED) {
-            return respond(state, "您说的是「" + intent.item() + " " + value + "」，这两个数是不是说反了？"
-                            + "血压的前一个数要比后一个大。您重新说一遍，还是就按 " + intent.valueText() + " 记下来？",
+            return respond(state, "您说的是「" + value + "」，这两个数是不是说反了？"
+                            + "血压的前一个数要比后一个大。您重新说一遍，还是就按 " + intent.valueText() + " 记下来？"
+                            + also,
                     recordConfirmReplies());
         }
-        return respond(state, "您说的是「" + intent.item() + " " + value + "」，这个数好像不太对："
+        return respond(state, "您说的是「" + value + "」，这个数好像不太对："
                         + intent.item() + "一般量不出这个数来，可能是听错了或者看错了。"
-                        + "您重新量一个，还是就按 " + intent.valueText() + " 记下来？",
+                        + "您重新量一个，还是就按 " + intent.valueText() + " 记下来？" + also,
                 recordConfirmReplies());
     }
 
@@ -4923,9 +6897,13 @@ public class FollowupAgentService {
         // 直接回一个数（“150”“5.6”）：当成重测值，不用老人再把“我的血压是”说一遍
         HealthRecordParser.RecordIntent retry = HealthRecordParser.detect(item + "是" + value);
         if (retry != null && retry.kind() == HealthRecordParser.Kind.RECORD) {
-            if (retry.needsConfirm()) return askRecordConfirm(state, retry);   // 换了个数还是量不出来
-            clearPendingRecord(state);
-            return recordValue(state, retry, value);
+            // 重报的这个数还带着疑问（量不出来）：再问一遍，这一问换了条记录但其余几条照样等着
+            if (needsAQuestion(retry)) {
+                return askRecordConfirm(state, retry, value, "", state.pendingRecordRest, clock.now());
+            }
+            // 重报的这个数记“他说这句话的时刻”：这是新量的一次，不是刚才那条被反问的数
+            // 重报的这个数记“他说这句话的时刻”：这是新量的一次，不是刚才那条被反问的数
+            return resumeRecords(state, retry, value, "", clock.now());
         }
         if (containsAny(value, RECORD_RETRY_WORDS)) return askRetryRecord(state, item);
         // 短促的应声（“好的”“嗯”）不是别的意思，再问一遍，别当成换了话题
@@ -4938,14 +6916,172 @@ public class FollowupAgentService {
         return null;
     }
 
-    /** 老人说“照记”：就按他说的数写进去，他的数据他做主。 */
+    /**
+     * 老人回答“这是斤还是公斤”。
+     *
+     * <p>两种答法都认：点按钮（值就是“斤/公斤”），或者自己说一句（“是斤”“190斤”“95公斤”）。
+     * 说了个数带单位就按那个数记（“95公斤”跟刚才的 190 不是同一个数，他自己改了口）；
+     * 只说了单位就按刚才暂存的那个数记——这就是非要问这一句的原因，替他挑一个单位等于替他改数据。
+     *
+     * <p>答的不是单位（说了别的事）返回 null：把话头交回下面的链路，不把老人卡在这一问上——
+     * 和“这个数不太对”那条反问一个规矩。
+     */
+    private AgentTurnResponse applyRecordUnit(ConversationState state, String answer) {
+        String item = state.pendingRecordItem;
+        if (item == null) {                    // 状态不完整：清掉，别把老人卡在这个问题上
+            clearPendingRecord(state);
+            return null;
+        }
+        String value = answer == null ? "" : answer.trim();
+        if (containsAny(value, RECORD_DROP_WORDS)) {
+            clearPendingRecord(state);
+            return memoHandoff(state, "好的，这条数值先不记了。");
+        }
+        // 他自己又说了一个带单位的数（“95公斤”）：按新说的那个记，数也听他的
+        HealthRecordParser.RecordIntent restated = HealthRecordParser.detect(item + "是" + value);
+        if (restated != null && restated.kind() == HealthRecordParser.Kind.RECORD && !needsAQuestion(restated)) {
+            return resumeRecords(state, restated, "老人回答单位：" + value, "", clock.now());
+        }
+        String unit = unitWord(value);
+        if (unit == null) {
+            // 短促的应声（“嗯”“是这个”）没回答问题，再问一遍；别的说法就当换了话题
+            if (value.length() <= 4 && value.chars().noneMatch(Character::isDigit)) {
+                return respondWithoutModel(state, "您说的是「"
+                                + spokenRecord(item, state.pendingRecordValueText, null) + "」，这是斤还是公斤？",
+                        recordUnitReplies(state.pendingRecordValueText));
+            }
+            clearPendingRecord(state);
+            return null;
+        }
+        // 原话和量到的时刻都在 clearPendingRecord 之前取出来（那个方法会把这些字段清空），
+        // 免得 raw 里留下一个 null、记录时间变成“答单位那一刻”。这一问只是问了一句，
+        // 没有把这条变成另一次测量，写进库的还得是他量到的那一刻。
+        String raw = "老人答了单位：" + state.pendingRecordValueText + unit;
+        LocalDateTime at = state.pendingRecordAt == null ? clock.now() : state.pendingRecordAt;
+        HealthRecordParser.RecordIntent settled = new HealthRecordParser.RecordIntent(
+                HealthRecordParser.Kind.RECORD, item, state.pendingRecordValueNum,
+                state.pendingRecordValueText, unit, null);
+        return resumeRecords(state, settled, raw, "", at);
+    }
+
+    /**
+     * 项目认得出、话里却没有数（“我血压有点高”）时，先问一句数。
+     *
+     * <p>为什么不直接记：一条“血压 有点高”里没有一个数，量出来是多少没人知道，回看时
+     * 帮不上任何忙；为什么不丢掉：老人确实说了这么一句关于血压的话，静默扔掉跟骗他记下了
+     * 是一回事。所以先问一句——答得上就落一个实数，答不上来再按他说的这句记（见
+     * {@link #applyRecordValue}）。
+     *
+     * <p>走 {@code respondWithoutModel}：这一问和后头那排按钮是严丝合缝的一件事，
+     * 措辞被改写就可能问歪。
+     */
+    private AgentTurnResponse askRecordValue(ConversationState state, HealthRecordParser.RecordIntent intent,
+                                             String raw, String also, List<PendingRecord> rest, LocalDateTime at) {
+        state.pendingRecordItem = intent.item();
+        state.pendingRecordValueNum = null;
+        state.pendingRecordValueText = intent.valueText();
+        state.pendingRecordUnit = null;         // 只有说法的那条不挂单位，这一问之后也不挂
+        state.pendingRecordRaw = raw;
+        state.pendingRecordAt = at;
+        state.pendingRecordRest = rest == null ? List.of() : rest;
+        // 反问前正在办的流程（复诊办理、改期草稿）要记下来，答完还回去。与 askRecordConfirm 同一条
+        // 规矩：刚撤下来一张卡时要还的是那张卡弹出来之前的动作，不是 “RECORD_CARD” 这个空状态。
+        String previous = "RECORD_CARD".equals(state.pendingAction) ? state.recordReturnAction : state.pendingAction;
+        if (!"RECORD_VALUE".equals(previous)) state.recordReturnAction = previous;
+        state.pendingAction = "RECORD_VALUE";
+        return respondWithoutModel(state, "您说的是「" + spokenRecord(intent.item(), intent.valueText(), null)
+                        + "」，量出来是多少？" + also,
+                recordValueReplies(intent.valueText()));
+    }
+
+    /**
+     * “量出来是多少”那两个按钮：一个是他刚才那句话（点一下就是“没量过，就这么记”），
+     * 一个是先不记。点一下的成本远低于让老人再组织一句话。
+     */
+    private List<QuickReply> recordValueReplies(String valueText) {
+        String shown = valueText == null ? "" : "“" + valueText + "”";
+        return List.of(q("没量过，就记" + shown, "RECORD_VALUE", "没量过"),
+                q("先不用记", "RECORD_VALUE", "不用记"));
+    }
+
+    /**
+     * 老人对“量出来是多少”的回答。
+     *
+     * <p>三种答法都认：说了个数（“135”“135/85”）按那个数记；还是只说个说法（“就是有点高”）
+     * 或者明说没量过（“没量过”“记不清”）→ <b>不追第二遍</b>，就按他说的那句记成一条没有数值的记录；
+     * 说的完全是别的事 → 返回 null，这句话照常走下面的链路，不把老人卡在这一问上——
+     * 和“这个数不太对”“这是斤还是公斤”两条反问一个规矩。
+     */
+    private AgentTurnResponse applyRecordValue(ConversationState state, String answer) {
+        String item = state.pendingRecordItem;
+        if (item == null || state.pendingRecordValueText == null) {   // 状态不完整：清掉，别把人卡住
+            clearPendingRecord(state);
+            return null;
+        }
+        String value = answer == null ? "" : answer.trim();
+        // 先看“不记”再看别的：否则“不用记”会被当成别的意思
+        if (containsAny(value, RECORD_DROP_WORDS)) {
+            clearPendingRecord(state);
+            return memoHandoff(state, "好的，这条数值先不记了。");
+        }
+        String spoken = state.pendingRecordValueText;   // 他说过的那个说法，追的这一问就是冲着它来的
+        HealthRecordParser.RecordIntent restated = HealthRecordParser.detect(item + "是" + value);
+        if (restated != null && restated.kind() == HealthRecordParser.Kind.RECORD) {
+            if (restated.issue() == HealthRecordParser.Issue.NO_VALUE) {
+                return resumeRecords(state, spokenOnly(item, spoken), "老人说没有数：" + value, "", clock.now());
+            }
+            if (needsAQuestion(restated)) {
+                // 补的这个数还得问（量不出来）：接着问，其余几条照样等着
+                return askRecordConfirm(state, restated, value, "", state.pendingRecordRest, clock.now());
+            }
+            return resumeRecords(state, restated, "老人补了数值：" + value, "", clock.now());
+        }
+        if (containsAny(value, NO_NUMBER_WORDS)) {
+            return resumeRecords(state, spokenOnly(item, spoken), "老人说没有数：" + value, "", clock.now());
+        }
+        // 短促的应声（“嗯”“是这个”）不是别的意思，再问一遍，别当成换了话题
+        if (value.length() <= 4 && value.chars().noneMatch(Character::isDigit)) {
+            return respondWithoutModel(state, "您说的是「" + spokenRecord(item, spoken, null)
+                    + "」，量出来是多少？", recordValueReplies(spoken));
+        }
+        // 老人改说了别的事：这一问作废，让这句话照常走下面的链路
+        clearPendingRecord(state);
+        return null;
+    }
+
+    /** 老人嘴里那个单位词换算成库里存的单位：“斤”是斤，“公斤/千克”是 kg；都没说返回 null。 */
+    private String unitWord(String value) {
+        if (containsAny(value, "公斤", "千克")) return "kg";
+        return value.contains("斤") ? "斤" : null;
+    }
+
+    /** “这是斤还是公斤”的两个按钮：他说的那个数，两种单位各一个。 */
+    private List<QuickReply> recordUnitReplies(String valueText) {
+        return List.of(q(valueText + " 斤", "RECORD_UNIT", "斤"),
+                q(valueText + " 公斤", "RECORD_UNIT", "公斤"));
+    }
+
+    /**
+     * 老人说“照记”：就按他说的数写进去，他的数据他做主。
+     *
+     * <p>这句话里还报了别的几项时（“我身高180 体重190”），手上这条和其余几条一起接着办：
+     * 一条直写、其余几条上卡。
+     */
     private AgentTurnResponse recordPendingValue(ConversationState state) {
         HealthRecordParser.RecordIntent intent = new HealthRecordParser.RecordIntent(
                 HealthRecordParser.Kind.RECORD, state.pendingRecordItem, state.pendingRecordValueNum,
                 state.pendingRecordValueText, state.pendingRecordUnit, null);
-        String raw = "老人确认按原数记录：" + intent.item() + " " + intent.valueText() + " " + intent.unit();
-        clearPendingRecord(state);
-        return recordValue(state, intent, raw);
+        // 落库用的仍是他刚才那句话和那一刻：反问只是问了一句，没有把这条变成另一次测量。
+        // 原来这里现编一句“老人确认按原数记录：…”当原话，等于把他真正说的那句从记录里抹掉了。
+        String raw = state.pendingRecordRaw == null
+                ? intent.item() + " " + intent.valueText() + " " + intent.unit() : state.pendingRecordRaw;
+        LocalDateTime at = state.pendingRecordAt == null ? clock.now() : state.pendingRecordAt;
+        if (state.pendingRecordRest == null || state.pendingRecordRest.isEmpty()) {
+            clearPendingRecord(state);
+            return recordValue(state, intent, raw, at);
+        }
+        // 这一句里还有别的：他刚为这条表过态，其余几条里该问的接着问、剩下的上卡
+        return resumeRecords(state, intent, raw, "", at);
     }
 
     /** 老人要重测：暂存的这条留着，他接下来直接说个数就能对上项目。 */
@@ -4954,21 +7090,120 @@ public class FollowupAgentService {
                 recordConfirmReplies());
     }
 
+    /**
+     * 丢弃待记的那条数值（改口重说、跑题、或状态不完整时）。
+     *
+     * <p>清哪几个字段、阶段还回哪一页，都由执行器那一份 {@code clearDraft} 说了算：
+     * 确认卡那条路也要清同一批字段，两处各写一遍，早晚会漏掉其中一个——
+     * 而漏掉的偏偏就是「缺了凭据就不作数」的那几个。
+     */
     private void clearPendingRecord(ConversationState state) {
-        state.pendingRecordItem = null;
-        state.pendingRecordValueNum = null;
-        state.pendingRecordValueText = null;
-        state.pendingRecordUnit = null;
-        state.pendingAction = state.recordReturnAction == null ? "CREATE" : state.recordReturnAction;
-        state.recordReturnAction = null;
+        dispatcher.clearHealthRecordDraft(state);
     }
 
     private List<QuickReply> recordConfirmReplies() {
         return List.of(q("重新说一个", "RECORD_RETRY", ""), q("就按这个记下来", "RECORD_KEEP", ""));
     }
 
+    /**
+     * 老人报了个数、但没说清是哪一项（“我今天量了，是135”）时，让他点一下这是哪一项。
+     *
+     * <p>猜一个项目记下去是假记录（这一条落到记录页、还会跟着“发给女儿”出门），
+     * 直接回“没听准”又让他把整句话重说一遍——点一下的成本远低于重新组织一句话，
+     * 而且归属这一下就变成他自己定的了。
+     *
+     * <p>闸门用的是 {@link #dailyHealthContext}：手上那张健康记录卡还没点头时这一句<b>不问</b>。
+     * 那时他说“是135”更可能是对卡上那个数的回答，而不是新量的一次；此时再问“这是哪一项”
+     * 恰好问错——卡上已经写着是哪一项了。答不上的这一句照旧走原链路，不抢那张卡的话。
+     *
+     * @return 不在这个上下文里、或这句话根本不是“报了一个说不清项目的数”时返回 null，
+     *         由调用方放它走原来的链路
+     */
+    private AgentTurnResponse askWhichItem(ConversationState state, String value) {
+        HealthRecordParser.MeasurementPrompt prompt = HealthRecordParser.unknownMeasurement(value);
+        if (prompt == null || !dailyHealthContext(state)) return null;
+        String shown = prompt.value().stripTrailingZeros().toPlainString();
+        state.pendingRecordItem = null;             // 哪一项还没定，等他点
+        state.pendingRecordValueNum = prompt.value();
+        state.pendingRecordValueText = shown;
+        state.pendingRecordUnit = null;             // 项目都还不知道，单位无从谈起
+        state.pendingRecordRaw = prompt.raw();
+        // 时刻按他说的这一刻定死，不按他点按钮的那一刻：答话可能在几分钟以后，
+        // 而“什么时候量的”是这句话本身带着的事实（与确认卡那条同一个规矩）
+        state.pendingRecordAt = clock.now();
+        state.pendingRecordRest = List.of();
+        if (!"RECORD_ITEM".equals(state.pendingAction)) state.recordReturnAction = state.pendingAction;
+        state.pendingAction = "RECORD_ITEM";
+        // 走不经过模型的出口：这一轮什么都没写，交给模型改措辞就可能变成“已经给您记下了”
+        // （改写守卫会把这种话换成那句通用的“没听准”，连“点一下”也一起丢掉），
+        // 而这句话本身就是要和下面那排按钮严丝合缝的
+        return respondWithoutModel(state, "您说的「" + shown + "」，我还没听准是哪一项。"
+                + "点一下我就帮您记下来。", recordItemReplies());
+    }
+
+    /**
+     * 老人点/说出了这是哪一项：把刚才那个数按这一项记下来。
+     *
+     * <p>“其他”是他自己挑的归属，原话照存、数值留着；其余项目走和别处一样的解析
+     * （单位反问、离谱值反问都复用），所以点成“血糖”却给了 135 这种配不上的组合，
+     * 还是会先反问一句再决定——他点的只是“这是哪一项”，不是“别问了直接写”。
+     *
+     * <p>答的不是项目（说了别的事）时返回 null：草稿作废，这句话照常走下面的链路，
+     * 不把老人卡在这个提问上——和“这个数不太对”那条反问一个规矩。
+     */
+    private AgentTurnResponse applyRecordItem(ConversationState state, String answer) {
+        String value = answer == null ? "" : answer.trim();
+        if (containsAny(value, RECORD_DROP_WORDS)) {
+            String dropped = state.pendingRecordValueText;
+            clearPendingRecord(state);
+            return memoHandoff(state, dropped == null ? "好的，这条数值先不记了。"
+                    : "好的，这条数值（" + dropped + "）先不记了。");
+        }
+        if (state.pendingRecordValueText == null) {   // 草稿失效：清掉，别把老人卡在这个问题上
+            clearPendingRecord(state);
+            return memoHandoff(state, "刚才那个数作废了，请重新对我说一遍。");
+        }
+        String item = HealthRecordParser.matchItem(value);
+        if (item == null) {
+            // 短、又没有数字：多半是没点准（“这个”“嗯”）。再问一遍，不把草稿丢了——
+            // 丢了就得让他把“我今天量了，是135”整句重说一次。
+            if (value.length() <= 4 && value.chars().noneMatch(Character::isDigit)) {
+                return respondWithoutModel(state, "请点一下这是哪一项，也可以直接告诉我，比如说“血压”。",
+                        recordItemReplies());
+            }
+            clearPendingRecord(state);
+            return null;
+        }
+        String raw = state.pendingRecordRaw == null ? value : state.pendingRecordRaw;
+        LocalDateTime at = state.pendingRecordAt == null ? clock.now() : state.pendingRecordAt;
+        HealthRecordParser.RecordIntent intent;
+        if (HealthRecordParser.OTHER.equals(item)) {
+            intent = new HealthRecordParser.RecordIntent(HealthRecordParser.Kind.RECORD,
+                    HealthRecordParser.OTHER, state.pendingRecordValueNum, raw, "", null);
+        } else {
+            // 用他挑的项目 + 刚才那个数重跑一遍解析：单位怎么补、这个数配不配得上这一项，
+            // 仍旧只有那一个解析器说了算，不在这里另写一套判断
+            intent = HealthRecordParser.detect(item + "是" + state.pendingRecordValueText);
+        }
+        if (intent == null || intent.kind() != HealthRecordParser.Kind.RECORD) {
+            clearPendingRecord(state);
+            return memoHandoff(state, "这条没记上，请重新对我说一遍。");
+        }
+        if (intent.needsConfirm()) return askRecordConfirm(state, intent, raw, "", List.of(), at);
+        clearPendingRecord(state);
+        return recordValue(state, intent, raw, at);
+    }
+
+    /** 问“这是哪一项”时给老人点的那排按钮：他自己点一下，归属就是他自己定的。 */
+    private List<QuickReply> recordItemReplies() {
+        List<QuickReply> replies = new ArrayList<>();
+        for (String item : HealthRecordParser.itemChoices()) replies.add(q(item, "RECORD_ITEM", item));
+        replies.add(q("不用记", "RECORD_ITEM", "不用记"));
+        return replies;
+    }
+
     /** 回查最近的实测数值；一条都没有时教老人怎么上报。 */
-    private AgentTurnResponse healthRecordQuery(ConversationState state, String item) {
+    private AgentTurnResponse healthRecordQuery(ConversationState state, String item, String also) {
         List<HealthRecordStore.RecordView> rows = callTool(state, "healthRecord.query",
                 Map.of("item", item == null ? "全部" : item, "limit", HEALTH_QUERY_LIMIT),
                 () -> healthRecordTool.recent(state.id, state.userId, item, HEALTH_QUERY_LIMIT));
@@ -4976,7 +7211,7 @@ public class FollowupAgentService {
         List<QuickReply> replies = List.of(q("继续办理复诊", "CONTINUE", ""));
         if (rows.isEmpty()) {
             return respond(state, "还没有" + what + "的记录。量完直接告诉我就行，比如说“我的"
-                    + (item == null ? "血压是100" : item + "是100") + "”，我会帮您记下来。", replies);
+                    + (item == null ? "血压是100" : item + "是100") + "”，我会帮您记下来。" + also, replies);
         }
         StringBuilder text = new StringBuilder("您最近的" + what + "记录：");
         for (int index = 0; index < rows.size(); index++) {
@@ -4984,9 +7219,10 @@ public class FollowupAgentService {
             if (index > 0) text.append("；");
             text.append(row.recordedAt().format(MEMO_LABEL)).append(" ");
             if (item == null) text.append(row.item()).append(" ");
-            text.append(row.valueText()).append(" ").append(row.unit());
+            text.append(row.valueText());
+            if (row.unit() != null && !row.unit().isBlank()) text.append(" ").append(row.unit());
         }
-        return respond(state, text.append("。").toString(), replies);
+        return respond(state, text.append("。").append(also).toString(), replies);
     }
 
     /** 老人把“代约计划”改到新时间：先套用原安排进入改期草稿，确认后才变更原预约。 */
@@ -5024,15 +7260,8 @@ public class FollowupAgentService {
         return askDate(state, "原来的安排（" + managedShort(plan) + "）会保留到确认新方案后才变更。请问想改到哪一天复诊？");
     }
 
-    /** 老人改期成功后通知原安排者（kind=reschedule，消息里带新的时间）。 */
-    private String arrangerRescheduleMessage(ConversationState state) {
-        return "改期通知：" + elderName(state.userId) + "已将复诊改期至"
-                + state.selectedSlot.date().format(DATE_LABEL) + " " + state.selectedSlot.time().format(TIME_LABEL)
-                + "（" + state.hospital + " " + state.department + "）。相关提醒已按新安排更新。";
-    }
-
     private AgentTurnResponse cancelTask(ConversationState state) {
-        state.confirmationId = null;
+        confirmations.clear(state);
         if (state.appointmentId != null) {
             state.stage = ConversationState.Stage.CANCELLED;
             state.taskStatus = ConversationState.TaskStatus.CANCELLED;
@@ -5156,25 +7385,38 @@ public class FollowupAgentService {
         return respond(state, state.hospital + "目前可办理：" + names + "。请选择医生要求您复诊的科室。", choices);
     }
 
-    private AgentTurnResponse recommendHospitals(ConversationState state, String requestedDepartment) {
-        String department = requestedDepartment != null ? requestedDepartment : state.department;
+    /**
+     * 推荐医院。
+     *
+     * <p>{@code modelDriven} 为真时这条路是<b>只读</b>的：一个字段都不写。推荐只是建议，
+     * 老人点了「选择市第一医院」之后才由那一次的业务动作把医院写进草稿。不给模型留一条
+     * 「说是推荐、其实顺手把科室定了」的缝，规则才有可验证的边界。
+     *
+     * <p>不经过模型的按钮/规则流程（老人自己点了「推荐」）保持原样：那种调用里
+     * {@code facts.department()} 就是老人刚说的条件，按既有口径记进草稿。
+     */
+    private AgentTurnResponse recommendHospitals(ConversationState state, ExtractedFacts facts,
+                                                 boolean modelDriven) {
+        RecommendationPlan plan = prepareCandidates(state, facts, modelDriven);
+        if (plan.blocked() != null) return plan.blocked();
+        String department = plan.department();
+        List<HospitalProfile> rows = plan.kept();
         if (department == null) {
-            List<HospitalProfile> rows = hospitalCatalogTool.listHospitals(state.id);
             String summary = rows.stream().limit(3).map(this::hospitalSummary)
                     .collect(java.util.stream.Collectors.joining("；"));
             List<QuickReply> choices = rows.stream().limit(3)
                     .map(item -> q("了解" + item.name(), "SET_HOSPITAL", item.id())).toList();
-            return respond(state, "我不能判断哪家医院‘最好’，但可以根据数据库中的科室特色、适老服务和号源帮您筛选。"
+            return respond(state, plan.note()
+                    + "我不能判断哪家医院‘最好’，但可以根据数据库中的科室特色、适老服务和号源帮您筛选。"
                     + summary + "。请先告诉我医生要求复诊的科室。", choices);
         }
-        List<HospitalProfile> rows = hospitalCatalogTool.findHospitalsForDepartment(state.id, department);
-        if (rows.isEmpty()) {
-            return respond(state, "模拟数据库中暂时没有开设" + department + "的医院。您可以换一个科室，或联系人工帮助。",
-                    List.of(q("查看医院", "CHANGE_HOSPITAL", ""), q("联系人工", "CONTACT_HUMAN", "")));
+        // 模型发起的推荐轮到此为止：往下一行都不许写草稿。不经过模型的那条路里，科室是老人
+        // 自己说的条件，才按既有口径记下来——清掉日期、时段和候选号源，因为它们都是照着旧科室定的。
+        if (!modelDriven && !java.util.Objects.equals(state.department, department)) {
+            resetAfterDate(state);
+            state.department = department;
+            state.departmentId = null;
         }
-        if (!java.util.Objects.equals(state.department, department)) resetAfterDate(state);
-        state.department = department;
-        state.departmentId = null;
         List<String> reasons = new ArrayList<>();
         for (HospitalProfile item : rows.stream().limit(3).toList()) {
             DepartmentProfile departmentProfile = departmentCatalogTool
@@ -5190,8 +7432,158 @@ public class FollowupAgentService {
         String summary = String.join("。", reasons);
         List<QuickReply> choices = rows.stream().limit(3)
                 .map(item -> q("选择" + item.name(), "SET_HOSPITAL", item.id())).toList();
-        return respond(state, "根据“" + department + "”和模拟医院资料，我找到了以下选择。" + summary
+        return respond(state, plan.note() + "根据“" + department + "”和模拟医院资料，我找到了以下选择。" + summary
                 + "。这是办理信息筛选，不是医疗诊断，请选择您原就诊医院或医生建议的医院。", choices);
+    }
+
+    /**
+     * 本轮推荐的真实候选，以及算它的过程中必须当场说的两句话。
+     *
+     * @param kept          排除之后剩下的真实候选。模型给的结构化推荐只能从这里选——
+     *                      校验层和展示层用的是<b>同一份</b>，否则「模型推荐的」和「Java 会摆出来的」就是两批人。
+     * @param department    这一轮按哪个科室算的候选；为空表示还没说科室，按全院算
+     * @param excludedIds   被排除掉的医院 id：用来把「夹带被排除的那家」和「压根不在候选里」分开说
+     * @param excluded      老人原话里说要排除的目标，原样带回去给模型看它错在哪
+     * @param note          Java 必须说的一句理解说明（近似排除时才有），交付时要接在模型那句话前面
+     * @param blocked       非空表示这一轮到此为止，直接把这句话交给老人（认不准 / 没有候选了）
+     */
+    private record RecommendationPlan(List<HospitalProfile> kept, String department,
+                                      Set<String> excludedIds, List<String> excluded, String note,
+                                      AgentTurnResponse blocked) {
+        static RecommendationPlan blocked(AgentTurnResponse response) {
+            return new RecommendationPlan(List.of(), null, Set.of(), List.of(), "", response);
+        }
+    }
+
+    /**
+     * 算本轮推荐的真实候选：先定科室，再查目录，最后拿掉老人明确排除的。
+     *
+     * <p>规则路径（老人自己点了「推荐」）和模型路径（模型给结构化推荐）走的是<b>同一个方法</b>。
+     * 两条路各算各的候选，校验就成了一句空话——模型只需要推荐一批「另一套口径下的候选」，
+     * 逐条检查照样能过。
+     *
+     * <p>{@code modelDriven} 只决定一件事：Java 自己写的那些终结句（科室查不到、排除认不准、
+     * 没有候选了）走 {@code respond} 还是 {@code respondWithoutModel}。模型那条路上不能调用回答模型
+     * 润色——那些是安全措辞，改软了就等于把边界说模糊了。
+     */
+    private RecommendationPlan prepareCandidates(ConversationState state, ExtractedFacts facts,
+                                                 boolean modelDriven) {
+        String requestedDepartment = facts == null ? null : facts.department();
+        String department = requestedDepartment != null ? requestedDepartment : state.department;
+        // 老人这一轮明确说不要的医院：在生成推荐文字和快捷按钮之前就把它们拿掉。
+        List<String> excluded = facts == null ? List.of() : facts.excludedHospitals();
+        if (department == null) {
+            return finishCandidates(state, hospitalCatalogTool.listHospitals(state.id), null, excluded, modelDriven);
+        }
+        List<HospitalProfile> rows = hospitalCatalogTool.findHospitalsForDepartment(state.id, department);
+        if (rows.isEmpty()) {
+            List<QuickReply> choices = List.of(q("查看医院", "CHANGE_HOSPITAL", ""),
+                    q("联系人工", "CONTACT_HUMAN", ""));
+            String text = "模拟数据库中暂时没有开设" + department + "的医院。您可以换一个科室，或联系人工帮助。";
+            return RecommendationPlan.blocked(modelDriven
+                    ? respondWithoutModel(state, text, choices) : respond(state, text, choices));
+        }
+        return finishCandidates(state, rows, department, excluded, modelDriven);
+    }
+
+    private RecommendationPlan finishCandidates(ConversationState state, List<HospitalProfile> rows,
+                                                String department, List<String> excluded,
+                                                boolean modelDriven) {
+        ExclusionFilter filter = withExclusionsRemoved(state, rows, excluded, modelDriven);
+        if (filter.unclear() != null) {
+            return new RecommendationPlan(List.of(), department, Set.of(), List.copyOf(excluded), "",
+                    filter.unclear());
+        }
+        if (filter.kept().isEmpty()) {
+            return new RecommendationPlan(List.of(), department, filter.excludedIds(),
+                    List.copyOf(excluded), filter.note(),
+                    noCandidateLeftAfterExclusion(state, department, filter.note(), modelDriven));
+        }
+        return new RecommendationPlan(filter.kept(), department, filter.excludedIds(),
+                List.copyOf(excluded), filter.note(), null);
+    }
+
+    /**
+     * 过滤掉老人这一轮明确排除的医院：{@code note} 是一句要在回复里说的话（近似匹配时必须
+     * 说出来，让老人有机会纠正），{@code excludedIds} 是真正被拿掉的 id，
+     * {@code unclear} 非空表示有一个排除目标 Java 认不准，这一轮就不给推荐了。
+     */
+    private record ExclusionFilter(List<HospitalProfile> kept, Set<String> excludedIds, String note,
+                                   AgentTurnResponse unclear) {
+        static ExclusionFilter none(List<HospitalProfile> rows) {
+            return new ExclusionFilter(rows, Set.of(), "", null);
+        }
+    }
+
+    /**
+     * 把老人排除的医院从候选里拿掉 <b>它们和真实医院目录比对之后</b>。
+     *
+     * <p>这里是「当前明确排除」真正落地的地方：<b>在生成推荐文字和快捷按钮之前</b>过滤，
+     * 所以被排除的医院不可能从哪一句话或哪一个按钮里漏回来。
+     *
+     * <p>三种匹配结果三种处理，都不猜：
+     * <ul>
+     *   <li>精确命中：直接排除，不用多解释。</li>
+     *   <li>唯一近似（老人说「市一」）：仍然排除，但<b>必须把理解的结果说出来</b>，
+     *       他才有机会发现认错了。</li>
+     *   <li>对不上目录，或者对上了不止一家：这一轮不给推荐，直接说清是哪一步没认准。
+     *       不拿别的医院替它，也不假装已经排除了。</li>
+     * </ul>
+     */
+    private ExclusionFilter withExclusionsRemoved(ConversationState state, List<HospitalProfile> candidates,
+                                                  List<String> excluded, boolean modelDriven) {
+        if (excluded == null || excluded.isEmpty()) return ExclusionFilter.none(candidates);
+        List<HospitalProfile> catalog = hospitalCatalogTool.listHospitals(state.id);
+        Set<String> excludedIds = new LinkedHashSet<>();
+        StringBuilder note = new StringBuilder();
+        for (String raw : excluded) {
+            CatalogEntityResolver.Match match = entityResolver.hospital(raw, catalog);
+            if (match.type() == CatalogEntityResolver.MatchType.EXACT
+                    || match.type() == CatalogEntityResolver.MatchType.UNIQUE_APPROXIMATE) {
+                excludedIds.add(match.only().id());
+                if (match.type() == CatalogEntityResolver.MatchType.UNIQUE_APPROXIMATE) {
+                    note.append("您说的“").append(match.raw()).append("”我理解成“")
+                            .append(match.only().name()).append("”，已经不算在候选里。");
+                }
+            } else {
+                String reply = exclusionUnclearReply(match);
+                return new ExclusionFilter(candidates, Set.of(), "",
+                        modelDriven ? respondWithoutModel(state, reply, resumeReplies(state))
+                                : respond(state, reply, resumeReplies(state)));
+            }
+        }
+        List<HospitalProfile> kept = candidates.stream()
+                .filter(item -> !excludedIds.contains(item.id())).toList();
+        return new ExclusionFilter(kept, Set.copyOf(excludedIds), note.toString(), null);
+    }
+
+    /** 排除目标认不准时的回话：说清是哪一步没认准，不替老人挑一家来排除。 */
+    private String exclusionUnclearReply(CatalogEntityResolver.Match match) {
+        if (match.type() == CatalogEntityResolver.MatchType.AMBIGUOUS) {
+            String names = match.candidates().stream().map(CatalogEntityResolver.Candidate::name)
+                    .collect(java.util.stream.Collectors.joining("、"));
+            return "您说的“" + match.raw() + "”对上了不止一家医院：" + names
+                    + "。我没替您猜是哪一家，所以这一轮先不给推荐。请说全名或院区，我再按您排除的那家重新看。";
+        }
+        return "您说不要“" + match.raw() + "”，但我在可办理的医院里没找到这一家，"
+                + "所以不知道要排除的到底是哪一家。这一轮我先不给推荐，也不拿别的医院替它。"
+                + "请说完整的医院名称，或换个说法。";
+    }
+
+    /**
+     * 排除之后没有候选了：如实说明，请他换条件。
+     *
+     * <p><b>绝不把被排除的医院悄悄放回来。</b>「都被您排除了」和「您选一家吧」这两句话
+     * 只能出现一句，出现后者就等于推荐里又有了他刚说不要的那家。
+     */
+    private AgentTurnResponse noCandidateLeftAfterExclusion(ConversationState state, String department,
+                                                            String note, boolean modelDriven) {
+        String scope = department == null ? "可办理的医院" : "开设" + department + "的医院";
+        List<QuickReply> replies = resumeReplies(state);
+        String reply = note + "把您明确排除的医院去掉之后，" + scope + "里没有别家了。"
+                + "您可以说一家不排除的医院，或者换一个科室，我再看看。这一轮没有改动手上的预约。";
+        return modelDriven ? respondWithoutModel(state, reply, replies)
+                : respond(state, reply, replies);
     }
 
     private String hospitalSummary(HospitalProfile item) {
@@ -5218,13 +7610,15 @@ public class FollowupAgentService {
                 plan(state), null, null, traces.findByConversation(state.id)));
     }
 
-    private AgentTurnResponse respondWithPlan(ConversationState state, String reply, List<QuickReply> quickReplies) {
+    @Override
+    AgentTurnResponse respondWithPlan(ConversationState state, String reply, List<QuickReply> quickReplies) {
         return finish(state, new AgentTurnResponse(state.id, state.stage.name(), reply, quickReplies,
                 plan(state), null, null, traces.findByConversation(state.id)));
     }
 
-    private AgentTurnResponse respondWithoutModel(ConversationState state, String reply,
-                                                  List<QuickReply> quickReplies) {
+    @Override
+    AgentTurnResponse respondWithoutModel(ConversationState state, String reply,
+                                          List<QuickReply> quickReplies) {
         return respondWithoutModel(state, reply, quickReplies, null);
     }
 
@@ -5254,6 +7648,7 @@ public class FollowupAgentService {
 
     private AgentTurnResponse finish(ConversationState state, AgentTurnResponse response) {
         if (Boolean.TRUE.equals(deferFinalization.get())) return response;
+        response = confirmations.reconcile(state, response);
         turnProgress.mark(state.id, TurnProgress.Kind.ANSWERING);
         ReplyContext context = replyContextBuilder.build(state, response, knownFacts(state),
                 conversations.recentMessages(state.id));
@@ -5276,8 +7671,10 @@ public class FollowupAgentService {
         return speech;
     }
 
-    private AgentTurnResponse finishWithoutModel(ConversationState state, AgentTurnResponse response) {
+    @Override
+    AgentTurnResponse finishWithoutModel(ConversationState state, AgentTurnResponse response) {
         if (Boolean.TRUE.equals(deferFinalization.get())) return response;
+        response = confirmations.reconcile(state, response);
         AgentTurnResponse finalized = new AgentTurnResponse(response.conversationId(), response.stage(), response.reply(),
                 response.quickReplies(), response.plan(), response.confirmation(), response.result(),
                 response.toolTraces(), taskProgress(state), authoritativeSpeech(response, response.reply()),
@@ -5445,7 +7842,7 @@ public class FollowupAgentService {
         state.appointmentId = null;
         state.pendingAppointmentId = null;
         state.pendingAppointmentIds = List.of();
-        state.confirmationId = null;
+        confirmations.clear(state);
         state.originalAppointmentId = null;
         state.materialReminderDone = false;
         state.departureReminderDone = false;
@@ -5469,10 +7866,6 @@ public class FollowupAgentService {
         return slots.stream().map(slot -> q(slotLabel(slot), "SELECT_SLOT", slot.id())).toList();
     }
 
-    private QuickReply q(String label, String action, String value) {
-        return new QuickReply(label, action, value);
-    }
-
     private String acknowledgement(ExtractedFacts facts, String fallback) {
         String value = facts.acknowledgement();
         return value == null || value.isBlank() ? fallback : value + " " + fallback;
@@ -5494,24 +7887,38 @@ public class FollowupAgentService {
     private static final String MEMORY_PERIOD = "habit.period";
 
     /**
-     * 把这次办成的偏好记下来，下一段对话开始时就认得他。
+     * 把这次办成的事记下来，下一段对话里模型按需查得到。
      *
      * <p>只在确认门禁放行、预约真的写进库之后调用——记的是「实际发生的事」，
      * 不是老人在某一轮随口提过的想法。模型不参与、前端也不能调，它只是已确认动作的副产品。
      *
-     * <p>时段按号源的实际时间归纳成上午/下午。记「上午」而不是「9:30」：
-     * 号源是时刻，偏好是习惯，把时刻当成习惯下次会去推一个并不合适的具体时间。
+     * <p><b>措辞必须是中性的历史事实，不能写成「常去的医院是……」「习惯上午复诊」。</b>
+     * 这里记的是**一次**已确认的预约，一次不等于习惯；写成「常去」，模型下一轮就会拿它
+     * 去劝老人「您常去这家，还约这儿吧」——那句话没有任何事实支撑，而且它已经绕开了
+     * 「一次预约不能自动成为长期习惯」这条要求。要谈「常去」，只能由
+     * {@link ProfileQueryService} 在真的统计出足够多次数之后说出来。
+     *
+     * <p>时段按号源的实际时间归纳成上午/下午，而不是记具体时刻：号源是时刻，
+     * 把「9:30」当成结论下次会去推一个并不合适的具体时间。
+     *
+     * <p>{@code kind} 一律用 {@link MemoryStore#KIND_HISTORY}：这三条都是同一类东西——
+     * 系统从已确认预约里沉淀的历史信息，没有一条是老人明确要求的偏好。原来给时段标的
+     * {@code PREFERENCE} 与事实不符，会让读取侧的同一条记录有两个互相矛盾的标签。
      */
-    private void rememberBookingPreferences(ConversationState state) {
+    @Override
+    void rememberBookingPreferences(ConversationState state) {
         Slot slot = state.selectedSlot;
         if (slot == null) return;
-        memories.remember(state.userId, MEMORY_HOSPITAL, "HABIT",
-                "常去的医院是" + slot.hospitalName(), "CONFIRMED_BOOKING", state.id);
-        memories.remember(state.userId, MEMORY_DEPARTMENT, "HABIT",
-                "常去的科室是" + slot.department(), "CONFIRMED_BOOKING", state.id);
-        memories.remember(state.userId, MEMORY_PERIOD, "PREFERENCE",
-                "习惯" + (slot.time() != null && slot.time().getHour() < 12 ? "上午" : "下午") + "复诊",
-                "CONFIRMED_BOOKING", state.id);
+        memories.remember(state.userId, MEMORY_HOSPITAL, MemoryStore.KIND_HISTORY,
+                "最近一次确认预约的医院是" + slot.hospitalName(),
+                MemoryStore.SOURCE_CONFIRMED_BOOKING, state.id);
+        memories.remember(state.userId, MEMORY_DEPARTMENT, MemoryStore.KIND_HISTORY,
+                "最近一次确认预约的科室是" + slot.department(),
+                MemoryStore.SOURCE_CONFIRMED_BOOKING, state.id);
+        memories.remember(state.userId, MEMORY_PERIOD, MemoryStore.KIND_HISTORY,
+                "最近一次确认预约的时段是"
+                        + (slot.time() != null && slot.time().getHour() < 12 ? "上午" : "下午"),
+                MemoryStore.SOURCE_CONFIRMED_BOOKING, state.id);
     }
 
     private String knownFacts(ConversationState state) {
@@ -5545,21 +7952,12 @@ public class FollowupAgentService {
                 "；预约草稿缺失字段=" + draftMissingFields(state) +
                 "；时段偏好=" + valueOrPending(state.timePreference) +
                 "；数据库可用号源=" + state.alternatives.stream().map(this::slotLabel).toList() +
-                "；当前推荐号源=" + slotLabel(state.recommendedSlot) +
-                memoryNote(state);
-    }
-
-    /**
-     * 长期记忆拼成的一小段。没有记忆时是空串——那时提示词与没有这个功能时逐字相同，
-     * 老会话和既有测试都不会因为多出一个空段而漂移。
-     *
-     * <p>措辞上明确它是「上次办过的事」，不是「这次已经定好的事」：模型看到这段只该少问一句，
-     * 不该替老人做主。真正写库仍然只能由确认门禁放行。
-     */
-    private String memoryNote(ConversationState state) {
-        String digest = memories.digest(state.userId);
-        return digest.isEmpty() ? ""
-                : "；这位老人以前办过的复诊情况（仅供参考，不要当成这次已经定好的安排，拿它少问一句就好）=" + digest;
+                "；当前推荐号源=" + slotLabel(state.recommendedSlot);
+        // 这里<b>不</b>再拼长期记忆。原来这里挂过一句 memories.digest(state.userId)，
+        // 它把全部 active 记忆（不分来源）原样塞进每一轮提示词：一条系统自己归纳的
+        // 「常去的医院是市一院」到了模型眼里和老人亲口说的话没有区别，来源分类在上游
+        // 分得再干净也没有用。画像现在统一走 profile.memorySummary 按需查——
+        // 查不到就没有，查到了也带着来源与更新时间。默认上下文里一个字的记忆都没有。
     }
 
     /** 「常去的医院」那句记忆的开头。写在这里就必须和 {@link #rememberBookingPreferences} 的写法一致。 */
@@ -5706,10 +8104,12 @@ public class FollowupAgentService {
 
     private TaskProgress taskProgress(ConversationState state) {
         boolean active = taskInProgress(state);
+        // 日期用 DATE_LABEL（2026年9月15日），与 plan.date / result.date 及全站其他地方一致。
+        // 老人端助手页把这一行原样当「当前复诊办理」的摘要显示，ISO 写法（2026-09-15）太像编号。
         String summary = state.hospital == null ? "复诊办理尚未选择医院"
                 : state.department == null ? state.hospital + " · 待选择科室"
                 : state.date == null ? state.hospital + " · " + state.department + " · 待选择日期"
-                : state.hospital + " · " + state.department + " · " + state.date;
+                : state.hospital + " · " + state.department + " · " + state.date.format(DATE_LABEL);
         return new TaskProgress(active, state.taskStatus.name(), state.stage.name(), summary, missingField(state));
     }
 
@@ -5805,5 +8205,45 @@ public class FollowupAgentService {
         // 一天里坐了多位不同医生的号，只给「日期 + 时刻」分不出是谁，必须带上医生。
         if (slot.doctorName() == null || slot.doctorName().isBlank()) return base;
         return base + " " + slot.doctorName() + (slot.doctorTitle() == null ? "" : slot.doctorTitle());
+    }
+
+    /**
+     * 这个号源是不是已经过去了。
+     *
+     * <p>按业务时区判断，不用服务器默认时区：开发容器是 UTC，北京时间凌晨那八小时
+     * 服务器眼里的「现在」还停在昨天，会把刚过去的时段算成还没到。
+     *
+     * <p>号源查询本身就只返回此刻之后的时段，所以这里只兜「草稿或确认卡生成之后时间又过去了」
+     * 这一种情况——它恰恰是最容易漏的：确认卡上没有时间闸门，老人停多久都行。
+     *
+     * <p>「正好等于此刻」算已过去：号源查询的口径是 {@code appointment_time > 当前时间}，
+     * 差一毫秒都算过点。这里跟它对齐，否则 09:00 整点确认时能约到一条查询永远查不出来的时段。
+     */
+    private boolean slotAlreadyPassed(Slot slot) {
+        return slot != null && !LocalDateTime.of(slot.date(), slot.time()).isAfter(clock.now());
+    }
+
+    /**
+     * 这次确认是不是「照草稿开新预约」（建新预约或改期）。
+     *
+     * <p>取消类 pendingAction 一律不算——取消针对的是库里已有的预约，草稿里那份 selectedSlot
+     * 只是上次办理留下的残留，过期与否都不该拦取消。
+     */
+    private boolean booksFromDraft(ConversationState state) {
+        return state.pendingAction == null || "CREATE".equals(state.pendingAction);
+    }
+
+    /**
+     * 时间已经过去的时段一律作废，退回重选日期。
+     *
+     * <p>只清「时间」这一格不够用：真正过去的是那一天里的时段，重新问一次日期最省事，
+     * 也跟「日期已经过去」那条既有处理保持一致（{@code querySlots} 就是这么做的）。
+     * 医院、科室、陪同、出行这些已经问过的信息都留着，老人不用重说一遍。
+     */
+    @Override
+    AgentTurnResponse reaskAfterPassedSlot(ConversationState state) {
+        String passed = slotLabel(state.selectedSlot);
+        resetAfterDate(state);
+        return askDate(state, "您选的" + passed + "已经过去了，这个时间不能再约，请重新选择复诊日期。");
     }
 }

@@ -98,7 +98,7 @@ class DemoScenarioTests {
         jdbc.update("INSERT INTO health_records(id,user_id,item,value_num,value_text,unit,recorded_at)"
                 + " VALUES (?,?,?,?,?,?,?)", "h-demo", "user-001", "血压", 138, "138/86", "mmHg", now);
         jdbc.update("INSERT INTO care_notifications(id,caregiver_id,elder_user_id,content,kind,created_at)"
-                + " VALUES (?,?,?,?,?,?)", "n-demo", "care-001", "user-001", "已为您约好复诊", "BOOKING", now);
+                + " VALUES (?,?,?,?,?,?)", "n-demo", "user-f001", "user-001", "已为您约好复诊", "BOOKING", now);
         jdbc.update("INSERT INTO conversation_attachments(conversation_id,kind,data_url,created_at)"
                 + " VALUES (?,?,?,?)", "c-demo", "USER_IMAGE", "data:image/jpeg;base64,AAAA", now);
         jdbc.update("INSERT INTO vision_results(conversation_id,description,created_at) VALUES (?,?,?)",

@@ -24,7 +24,7 @@ public class H2FacilityGuideTool implements FacilityGuideTool {
         List<FacilityGuide> rows = jdbc.query("""
                 SELECT hospital_id,department_id,building_name,entrance_name,floor_name,room_name,
                        check_in_point,landmark,accessible_route_hint,help_desk,verified_at
-                FROM clinic_locations
+                FROM clinics
                 WHERE enabled=TRUE AND ((? IS NOT NULL AND id=?)
                    OR (? IS NULL AND hospital_id=? AND department_id=?))
                 ORDER BY id LIMIT 1

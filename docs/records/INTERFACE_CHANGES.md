@@ -1,11 +1,46 @@
 # 接口变更记录
 
+## 2026-09-16 APPOINTMENT_SLOTS 医院与科室改为外键引用
+
+- `appointment_slots` 移除 `hospital_name`；`hospital_id` 更名为 `hospital`，`department` 由中文科室名改存 `departments.id`。两列都加了外键：`FOREIGN KEY (hospital) REFERENCES hospitals(id)`、`FOREIGN KEY (department) REFERENCES departments(id)`。
+- 旧库升级沿用 FAMILY_CONTACTS 那次的「临时兼容列」写法：先补出 `hospital_id`/`hospital_name`，把医院编号搬进 `hospital`、按「同院同名」把中文科室名折算成 `departments.id`，最后删掉两个旧列。每条 UPDATE 只处理尚未迁移的行，重复启动不会二次改写，新库和旧库共用同一份脚本。
+- 折算不到的号源（科室已被删除或改过名）在没有预约引用时会被清掉；仍被预约引用的保留，让外键把启动拦下来报错，而不是静默抹掉一条真实预约对应的号源。
+- **HTTP 接口和前端类型都没有变**：医院名、科室名改由查询 JOIN `hospitals`/`departments` 取回，`Slot`、`AppointmentView`、`AppointmentSummary`、`AppointmentTravelGuide` 等对外字段的名称、顺序、取值全部保持原样。`appointment.querySlots` 等工具的入参仍是中文科室名，调用方无需调整，前端 9 个文件零改动。
+- 本次把「按中文科室名查号源」改成先 JOIN 再按 `d.name` 过滤，索引效果不如直接比编号；演示数据量（576 行）下无实际影响，记录在此以备后续优化时参考。
+- 同步更新 `docs/14-database-table-data.md`（字段定义与 576 行快照已按新列标注）、`docs/06-mock-data-design.md`；`data.sql` 的 `clinic_location_id` 映射改为 `'loc-' || department` 直接拼接。
+- 容器内验证尚未执行：按用户要求未在宿主机构建。后续可在开发容器内执行 `mvn -f backend/pom.xml test -Dagent.model.enabled=false`，并确认 `appointment_slots` 已无 `hospital_id`/`hospital_name` 列、两个外键存在、号源科室值形如 `d001`。
+
+## 2026-09-16 CLINIC_LOCATIONS 表更名为 CLINICS
+
+- `schema.sql` 把 `clinic_locations` 更名为 `clinics`，列定义、约束和 6 条诊室数据不变。`appointment_slots.clinic_location_id` 是**列名**，不在本次改名范围，保持原样。
+- 旧库升级在建表前执行 `DROP TABLE IF EXISTS clinic_locations`：改名后该表已无外键与代码引用，数据由 `data.sql` 的 `MERGE INTO clinics` 按 id 全量重建，因此直接删旧表，不留两张同义表。对新建库和重复启动均为空操作，语句只认旧表名，不会误删已建好的 `clinics`。
+- 查询侧只有 `H2FacilityGuideTool` 的 SQL 换表名。`hospital.locationGuide` 工具的入参、出参、HTTP 接口和前端类型均未变动，前端无需改动。
+- 升级影响：旧表中 id 不在 `loc-d001`~`loc-d006` 范围内的自定义诊室会被删除；若 `appointment_slots.clinic_location_id` 引用了这些 id，升级后该预约查院内指引会报「这条预约还没有配置院内位置指引」。演示种子数据不涉及这种情况。
+- 同步更新 `docs/06-mock-data-design.md`、`docs/14-database-table-data.md`、`docs/设计思路报告.md` 与快照导出脚本 `docs/tools/export_h2_snapshot.py`。表名变更的历史记录不改写。
+- 容器内验证尚未执行：按用户要求未在宿主机构建。后续可在开发容器内执行 `mvn -f backend/pom.xml test -Dagent.model.enabled=false`，并确认启动日志里 schema 初始化成功、`clinics` 有 6 行。
+
+## 2026-09-16 FAMILY_CONTACTS 用户关联
+
+- `user_id` 改为 `"USER"`；移除 `name/relationship/phone`；新增 `contact`。`"USER"` 与 `contact` 均为非空的 `users.id` 外键，`id` 保留以兼容历史通知引用。
+- 旧表升级通过复制 owner 到 `"USER"` 完成列改名，并根据已有照护关系和姓名唯一匹配联系人用户。无法唯一匹配时在删除旧资料前停止启动；需先为对应记录填写有效 contact 后重启，不能猜测联系人身份。
+- 旧手机号在无冲突且目标 users.phone 为空时迁移；演示联系人 family-001 关联 user-f001，演示号码仅补空值。
+- 联系人查询从 users 读取姓名、号码，从 care_relations 读取称谓，缺失称谓显示“家属”。资料、通知和健康报告查询同步调整；HTTP 响应结构和前端类型保持兼容。
+- 新增旧表升级、重复初始化、关联外键测试，并调整健康报告测试数据。已执行静态差异检查；按用户要求未启动 Docker，容器测试未执行，实际数据库尚未迁移。
+
+## 2026-09-16 USERS 手机号码及字段调整
+
+- `schema.sql` 对新旧库统一移除 `home_longitude`、`home_latitude`，移除 `family_member` 及其外键，新增 `phone VARCHAR(32)` 保存手机号码，允许 NULL，不设置唯一约束，不填充虚构号码；不改变原有照护授权关系。
+- 初始化数据不再写家庭经纬度；路线起点改为 `travel_routes.polyline` 首点，无坐标时报配置错误。
+- HTTP 接口及前端类型、调用方式不变，未对外新增手机号码编辑接口。
+- 新增 `UserSchemaTests`，覆盖列变更、手机号码读写与空值、旧外键移除、迁移重复执行及路线起点。
+- 容器内验证尚未执行：按用户要求不启动 Docker。后续如需验证，可在开发容器内执行 `mvn -f backend/pom.xml test -Dagent.model.enabled=false`。
+
 任何前后端共享字段、接口路径、枚举或日期格式变化都记录在这里。
 
 ## 2026-09-14 照护端号源选项带上医生与号别；推荐去重上移为共享纯函数
 
 - 代约「可约时段」接口（`GET /api/caregivers/{cid}/elders/{uid}/book/windows`，序列化 `CareBookingService.DateWindow`）的 `slots[]` **追加 4 个字段**：`doctorName`、`doctorTitle`、`slotType`、`feeCents`。原来只有 `{slotId, time}`。追加可选字段属兼容变更，旧客户端忽略即可。
-- **为什么必须改**：一个上午时段里会有多位医生出诊（当时的排法下上午 09:00 有两条：1 专家 + 1 普通；DEC-026 改成「每格 1 位医生」后同一时刻回到只有一条，但一天 4 格里坐的仍是 4 位不同医生）。只给 `time` 时，页面上会出现无法区分「是谁的号」的时段按钮，家属分不清点哪个、也不知道约的是谁。号别与挂号费都取自这条号源本身，**不按医生职称推**；展示口径复用 `doctorLine()`（`frontend/lib/appointment-display.ts`），输出「医生 · 职称 · 号别 · 挂号费」。
+- **为什么必须改**：一个上午时段里会有多位医生出诊（当时的排法下上午 09:00 有两条：1 专家 + 1 普通；DEC-038 改成「每格 1 位医生」后同一时刻回到只有一条，但一天 4 格里坐的仍是 4 位不同医生）。只给 `time` 时，页面上会出现无法区分「是谁的号」的时段按钮，家属分不清点哪个、也不知道约的是谁。号别与挂号费都取自这条号源本身，**不按医生职称推**；展示口径复用 `doctorLine()`（`frontend/lib/appointment-display.ts`），输出「医生 · 职称 · 号别 · 挂号费」。
 - 4 个字段**均可为 `null`**：加医生维度之前生成的旧号源就是 `null`。前端对这类记录显示「医生信息未记录」，**不替它编一位医生**（与 `appointmentNarration` 既有的「不虚构」约定一致）。
 - 前端 `BookingSlotOption`（`frontend/types/domain.ts`）同步加这 4 个字段（类型均为 `| null`）。
 - `slotType` 仍是**封闭枚举** `NORMAL`=普通号 / `EXPERT`=专家号，前端遇未知值**原样显示**（不是显示成空白）；`feeCents` 仍**以分为单位**（普通号 2500 = ¥25、专家号 4000 = ¥40）。
@@ -14,13 +49,31 @@
 
 ## 2026-09-13 号源加医生维度：id 拼法变更 + 列表接口多 4 个字段（阶段 1）
 
-- **号源 id 拼法变更（破坏性，仅对前端约定而言）**：从 `r-<科室id>-<日期>-<时刻>` 改成 **`r-<医生id>-<日期>-<时刻>`**，如 `r-doc-d001-01-20260916-0900`。HTTP 路径与响应结构都没变，但**任何按 id 前缀找号源的地方都要一起核**：回归用例（`DemoSeed`）、演示场景重置、回滚重放。前端一贯只回传后端给的原值，所以前端无需改。理由与取舍见 DEC-021；拼法唯一出处是 `RollingAppointmentSlotInitializer.slotId()`，`DemoSeed.slot()` 调用它而不是另写一份。
+- **号源 id 拼法变更（破坏性，仅对前端约定而言）**：从 `r-<科室id>-<日期>-<时刻>` 改成 **`r-<医生id>-<日期>-<时刻>`**，如 `r-doc-d001-01-20260916-0900`。HTTP 路径与响应结构都没变，但**任何按 id 前缀找号源的地方都要一起核**：回归用例（`DemoSeed`）、演示场景重置、回滚重放。前端一贯只回传后端给的原值，所以前端无需改。理由与取舍见 DEC-033；拼法唯一出处是 `RollingAppointmentSlotInitializer.slotId()`，`DemoSeed.slot()` 调用它而不是另写一份。
 - 号源列表接口（`ToolModels.Slot` 序列化出来的那些查询）**追加 4 个可选字段**：`doctorId`、`doctorName`、`doctorTitle`、`slotType`，外加 `feeCents`。追加可选字段属兼容变更，旧客户端忽略即可。
 - 预约列表接口（`GET /api/users/{userId}/appointments`，由 `AppointmentRecordStore.AppointmentView` 序列化）**追加 4 个可选字段**：`doctorName`、`doctorTitle`、`slotType`、`feeCents`。值来自写预约时落下的**医生快照**，不是读取时回连号源。
 - `slotType` 是**封闭枚举**：`NORMAL`=普通号 / `EXPERT`=专家号。**前端必须给未知值兜底**——原样显示那个值，不是显示成空白。展示口径收在纯函数 `doctorLine()`（`frontend/lib/appointment-display.ts`），输出「医生 · 职称 · 号别 · 挂号费」。
 - `feeCents` 是**分**（整数存储，避免浮点误差）：普通号 2500（¥25）、专家号 4000（¥40）。可为 `null`（老数据没有）。
-- **老数据一律可为 `null`**：本次删除了全部无 `doctor_id` 的旧号源（DEC-021），但**被预约挂着的旧号源保留**，5 条既有预约记录的四个新列仍是 `NULL`。前端对这类记录如实显示「医生信息未记录」，**不替它编一位医生**（与 `appointmentNarration` 既有的「不虚构」约定一致）。
+- **老数据一律可为 `null`**：本次删除了全部无 `doctor_id` 的旧号源（DEC-033），但**被预约挂着的旧号源保留**，5 条既有预约记录的四个新列仍是 `NULL`。前端对这类记录如实显示「医生信息未记录」，**不替它编一位医生**（与 `appointmentNarration` 既有的「不虚构」约定一致）。
 - 兼容性：不破坏旧客户端。所有新增字段均可选且可为 `null`；接口路径、请求体、`AgentTurnResponse` 结构均未变动。本阶段不改任何交互，不新增路由、动作或界面。
+
+## 2026-09-13 统一业务时间（内部改动）
+
+- 所有 HTTP 路径、请求体、响应字段、枚举与日期格式**一个都没变**。`AgentTurnResponse` 的 11 个规范字段原样不动，前端无需同步任何类型。
+- 变的是**每轮提示词的内容**（模型可见，不是接口）：新增【本轮运行信息】给出当前日期（含星期与 ISO 写法）、现在时间、时区名，以及【相对日期怎么算】一节（相对日期由模型按这个基准推算；算出来已经过去时用 `ASK_USER` 复述后请老人确认，不许自己往后推年份）。模型据此输出的 `facts.date` 仍是 `YYYY-MM-DD`，与既有契约一致。旧模型/规则回退路径不读这段文本，行为不变。
+- 行为变化（不涉及字段）：今天已经过去的预约时段不再出现在可选号源里，也不会被写进预约——包括「确认卡生成之后时间才走过去」的情况，这时确认会被拒回重选日期（`stage=ASK_DATE`，回复文案说明该时段已经过去）。**等于此刻的时段同样算过去**，与号源查询的 `appointment_time > 当前时间` 严格互补；这道门**只约束创建/改期**，取消已有预约（`CANCEL_EXISTING` / `CANCEL_MANAGED`）不受影响——办完预约的会话仍留着草稿里那份 `selectedSlot`，拿它拦取消会让老人先重选日期才能取消。
+- 内部 API（不涉及 HTTP）：`MemoParser` 新增接收业务时间锚点的重载（`detect(msg, now)`、`pastWeekdayDate(value, today)`、`resolveRemindAt(..., now)`、`resolveRepeatAnchor(..., today)`、`resolveDay(value, today)`），生产路径由 `FollowupAgentService` 传入 `BusinessClock` 的 `now()`/`today()`；旧的无参重载全部保留、语义不变，仅作单元测试兜底。`DemoScenarioService` 的构造参数新增一个 `BusinessClock`（Spring 注入，无测试直接 new）。两者都不出现在任何 HTTP 契约里。
+- 「只写月日、已过去的日期」不再自动顺延到明年（`RuleFactExtractor`）：同一句「3月5日」在 9 月问会得到今年的 3 月 5 日，由上层请老人重新说，而不是替他定到明年。这是口径收紧，不是格式变化。
+- 新增后端配置 `business.time.zone`（环境变量 `BUSINESS_TIME_ZONE`，默认 `Asia/Shanghai`），并已加进 `compose.yml` 与 `.env.example`。`HEALTH_REPORT_WEEKLY_ZONE` 仍可单独覆盖周报时区，默认跟着它走。配成不存在的时区会在启动时失败。
+- 兼容性：不破坏旧客户端。旧前端不感知时区与提示词变化；接口契约与响应结构完全一致。
+
+## 2026-09-13 老人端界面调整（未提交）
+
+- 唯一的后端字段变化：`task.summary` 里的日期从 ISO 改成 `DATE_LABEL`（`市第一医院 · 心内科 · 2026年9月15日`）。`missingField` 与 `task` 的其余字段、以及所有 HTTP 路径、枚举、请求体均不变。
+- 前端把「恢复办理」的入口从办理卡收敛到助手页顶部操作区：卡里只剩「取消本次办理」，那颗按钮发的是既有的 `CANCEL_TASK` 动作，**没有新增动作类型，也没有新的写接口**。顶部操作区的「继续办理 / 预约复诊」仍是既有的 `CONTINUE`。
+- 预约记录页的三段分组（即将到来 / 过去的 / 已取消的）与默认只摆三条，是**纯前端展示**：数据来源仍是一次 `GET /api/users/{userId}/appointments`，不新增查询参数与接口。
+- 朗读设置从助手页移到「我的」：写的还是既有的语音偏好接口，字段不变；助手页、事项页、地图页读的是同一份 `voicePreference`。
+- 兼容性：不破坏旧客户端。旧前端忽略 `task.summary` 的日期写法即可；后端不依赖任何前端字段。
 
 ## 2026-09-12 取消预约的自然语言确认与批量确认（内部接口）
 
@@ -199,3 +252,16 @@
 - 自由语言意图新增 `REMIND_ELDER`（给长辈留提醒，区别于本人记账的 `MANAGE_MEMO`）。
 - 结构化动作新增 `QUERY_CARE_TIMELINE`、`QUERY_CARE_NOTIFICATIONS`；代约确认后返回 `result` 卡（归属与陪同人取自代约记录）。
 - 兼容性：未传 `actorId` 的旧请求字段与行为完全不变。
+
+## 2026-09-13 工具契约强类型与通用澄清能力
+
+**对外 HTTP 契约没有变**：没有新增/删除/改名任何端点，`AgentTurnResponse` 的 12 个字段一个没动，澄清复用既有的 `SELECT_APPOINTMENT_TO_CANCEL` 快捷操作与既有 4 字段 `ToolTrace` 结构。下面记的是内部契约与前端标签的变化。
+
+- **模型可见的工具说明变了（这是本次最实质的对外变化）**：每个工具的参数声明从「一串参数名」升级成带类型/必填/枚举/字段组合约束的结构。模型看到的 JSON 里因此出现 `"type": "enum"`（附 `enum` 取值表）、`"required": true`、以及 `REQUIRES_ALL` / `AT_LEAST_ONE` 两类组合约束；每个工具的参数名去重（已有断言钉住）。**同时是收紧**：`interaction.requestConfirmation` 刻意不声明 `appointmentId`，模型看不到、也填不了这个字段。
+- **新增内部工具 `interaction.askClarification`**（风险等级新设 `CLARIFICATION_ONLY`）：参数 `question` 可选、`candidateTool` 必填且**只能取枚举值 `appointment.queryMine`**。它不建卡、不发 `confirmationId`、不改 `stage`。这是「澄清」成为独立第三条通道的接口形态，说明见 DEC-021。
+- **新增内部工具结果类型 `ToolOutcome.Kind`**（七种：`SUCCESS`、`NO_RESULT`、`MISSING_INFO`、`NEEDS_CLARIFICATION`、`NEEDS_CONFIRMATION`、`STATE_CHANGED`、`FAILURE`）。它只进模型侧的工具循环证据，**不进 HTTP 响应**；`toolTraces` 的四个字段保持原样。
+- **`toolTraces` 里会出现新的 `toolName` 取值**：`interaction.askClarification`（另有既有的 `interaction.requestConfirmation`、`interaction.respondConfirmation` 两条一直在用）。前端若按未知工具名兜底展示，不会白屏——本次仍补齐了三条的中文说明。
+- **前端新增三个中文标签**（`frontend/features/assistant/tool-trace-describe.ts`，纯展示）：`interaction.requestConfirmation` → 「取消预约 · 生成确认卡」，备注按 `scope` 渲染 `ALL` / `DATE_RANGE`（带方向）/ `SINGLE_FILTER`（逐条列出条件）/ `AMBIGUOUS`；`interaction.respondConfirmation` → 「取消预约 · 处理确认卡」，`decision=DENY` 时备注「老人选择保留，没有执行取消」；`interaction.askClarification` → 按 `outcome` 区分「没有查到可以取消的预约」与「已列出 N 条真实候选，等老人选择」。
+- **参数非法时的用户可见行为**：不再落进「没查到」，而是分成「说不清」（请老人补充，并摆出真实候选）与「没得取消」（如实说没有、不摆按钮）两种话术。`DATE_RANGE` 却没给方向、`scope` 取值不在枚举里，都属于前者。
+- **接口文档**：`05-api-contracts.md` 新增「工具契约与通用澄清（2026-09-13）」一节，把上面这些落在对外文档里。
+- 兼容性：外部请求/响应结构与字段零变化，旧前端、旧脚本、旧会话 id 一律照常；变化集中在模型可见的工具说明与 `toolTraces` 的内容。

@@ -1,19 +1,31 @@
 -- 基础模拟数据只负责补齐，不清空预约、会话或工具记录。
 -- 需要重新录制 Demo 时，应使用单独的重置功能，而不是随后端启动自动删除。
 
--- 必须写明列名：users 还有 home_longitude / home_latitude 两列（见 schema.sql 的 ALTER），
--- 不写列名的话这里的 4 个值对不上整表列数，MERGE 会直接报错。
+-- 明确列名，保留已有 phone；未提供手机号码时该字段为 NULL。
 MERGE INTO users (id,name,home_address,preferred_transport) KEY(id) VALUES
 ('user-001','王阿姨','幸福小区（模拟）','家属开车'),
 ('user-f001','小丽',NULL,NULL),
 ('user-v001','李阿姨',NULL,NULL),
 ('user-002','张伯伯','幸福小区（模拟）','公交');
 
-UPDATE users SET home_longitude=116.365300,home_latitude=39.921900 WHERE id='user-001';
 
 INSERT INTO user_preferences(user_id,auto_speak_enabled,speech_rate,speech_volume,updated_at)
 SELECT 'user-001',FALSE,0.9,1.0,CURRENT_TIMESTAMP
 WHERE NOT EXISTS (SELECT 1 FROM user_preferences WHERE user_id='user-001');
+
+-- 王阿姨的健康档案（模拟数据）。只在"从来没人填过"时种一次：data.sql 每次启动都会跑，
+-- 无条件 UPDATE 会把家人后来填/改的内容冲掉，所以拿 health_profile_updated_by 当"动过没有"
+-- 的标记（保存时一定会写它）——家人哪怕把内容全清空，重启也不会又给他填回去。
+--
+-- 这里故意不写 health_profile_updated_at：容器是 UTC，界面上显示的时间却一律是北京时间
+-- （备忘、健康记录都走 MemoParser 那个钟），在 SQL 里算不出北京时间，写 CURRENT_TIMESTAMP
+-- 会让这张卡片上的时间比旁边的记录早 8 小时。留空即"不知道具体几点填的"，卡片上就只说
+-- "最近由小丽填写"；等谁真的在页面上改一次，时间会由 HealthProfileStore 按北京时间的钟补上。
+UPDATE users SET allergies='青霉素过敏（做皮试时发现的）；吃海鲜会起疹子',
+                 medical_history='高血压（2019年确诊，长期服药控制）；2型糖尿病（2021年确诊）',
+                 height_cm=158, weight_kg=61.5,
+                 health_profile_updated_by='小丽'
+WHERE id='user-001' AND health_profile_updated_by IS NULL;
 
 MERGE INTO hospitals (id,name,address,hospital_level,description,specialty_tags,elderly_services,enabled) KEY(id) VALUES
 ('h001','市第一医院（模拟）','健康路1号（模拟）','三级甲等','以心血管、神经系统疾病和老年慢病复诊服务为特色。','心血管,神经内科,老年慢病管理','老年服务窗口,轮椅通道,志愿者引导',TRUE),
@@ -106,7 +118,7 @@ MERGE INTO doctors (id,hospital_id,department_id,name,title,good_at,introduction
 ('doc-d012-03','h002','d012','段明远','主治医师','幽门螺杆菌复查、肝功能随访','消化内科门诊医师，负责幽门螺杆菌根除后的复查与肝功能随访。','NORMAL',TRUE),
 ('doc-d012-04','h002','d012','万淑英','副主任医师','慢性肝病、胃肠道早筛','消化内科副主任医师，擅长慢性肝病随访与胃肠肿瘤的早期筛查建议。','EXPERT',TRUE);
 
-MERGE INTO clinic_locations (id,hospital_id,department_id,building_name,entrance_name,floor_name,room_name,check_in_point,landmark,accessible_route_hint,help_desk,verified_at,enabled) KEY(id) VALUES
+MERGE INTO clinics (id,hospital_id,department_id,building_name,entrance_name,floor_name,room_name,check_in_point,landmark,accessible_route_hint,help_desk,verified_at,enabled) KEY(id) VALUES
 ('loc-d001','h001','d001','门诊楼','南门','三层','308诊室','门诊楼一层自助机或人工窗口','出电梯后向右，经过心电检查区','从南门进入，沿无障碍通道到一层大厅，乘无障碍电梯到三层，出电梯后向右前往308诊室。','三层心内科护士站',CURRENT_TIMESTAMP,TRUE),
 ('loc-d002','h001','d002','门诊楼','南门','四层','412诊室','门诊楼一层自助机或人工窗口','出电梯后沿蓝色神经内科标识前行','从南门进入，沿无障碍通道到一层大厅，乘无障碍电梯到四层，按蓝色标识前往412诊室。','四层神经内科护士站',CURRENT_TIMESTAMP,TRUE),
 ('loc-d003','h002','d003','门诊楼','东门','二层','216诊室','门诊楼一层服务台旁报到机','二层电梯口左侧','从东门进入后向服务台确认，乘无障碍电梯到二层，出电梯左转前往216诊室。','二层内分泌科护士站',CURRENT_TIMESTAMP,TRUE),
@@ -129,25 +141,31 @@ DELETE FROM appointment_slots
 WHERE id LIKE 'slot-%'
   AND NOT EXISTS (SELECT 1 FROM appointments a WHERE a.slot_id = appointment_slots.id);
 
-MERGE INTO family_contacts KEY(id) VALUES
-('family-001','user-001','小丽','女儿','13800001234');
+-- 原联系人演示号码归入对应用户，只补空值，不覆盖用户已修改的号码。
+UPDATE users SET phone='13800001234' WHERE id='user-f001' AND phone IS NULL;
+MERGE INTO family_contacts (id,"USER",contact) KEY(id) VALUES
+('family-001','user-001','user-f001');
 
 MERGE INTO care_relations KEY(id) VALUES
 ('rel-f001','user-f001','user-001','FAMILY','女儿'),
 ('rel-v001','user-v001','user-001','VOLUNTEER','社区志愿者'),
 ('rel-v002','user-v001','user-002','VOLUNTEER','社区志愿者');
 
-MERGE INTO material_templates KEY(id) VALUES
-('m001','通用','身份证',TRUE,1),
-('m002','通用','医保卡或电子医保凭证',TRUE,2),
-('m003','通用','上次就诊病历',TRUE,3),
-('m004','通用','既往检查报告',TRUE,4),
-('m005','通用','正在使用的药物清单',FALSE,5),
-('m006','心内科','血压和心率记录',FALSE,10),
-('m007','内分泌科','近期血糖记录',FALSE,10),
-('m008','内分泌科','最近一次化验单',FALSE,11);
+-- department_id 为空 = 通用；同一科室名在两家医院各有一行，所以按科室编号分别种。
+MERGE INTO material_templates (id,department_id,material_name,required,sort_order) KEY(id) VALUES
+('m001',NULL,'身份证',TRUE,1),
+('m002',NULL,'医保卡或电子医保凭证',TRUE,2),
+('m003',NULL,'上次就诊病历',TRUE,3),
+('m004',NULL,'既往检查报告',TRUE,4),
+('m005',NULL,'正在使用的药物清单',FALSE,5),
+('m006','d001','血压和心率记录',FALSE,10),
+('m006-d006','d006','血压和心率记录',FALSE,10),
+('m007','d003','近期血糖记录',FALSE,10),
+('m007-d005','d005','近期血糖记录',FALSE,10),
+('m008','d003','最近一次化验单',FALSE,11),
+('m008-d005','d005','最近一次化验单',FALSE,11);
 
-MERGE INTO care_guide_articles KEY(id) VALUES
+MERGE INTO care_guide_articles (id,topic,title,content,keywords,hospital_id,department_id,sort_order,enabled) KEY(id) VALUES
 ('guide-process','PROCESS','复诊预约的一般流程',
  '先确认医生要求复诊的医院、科室和日期，再查询模拟号源并选择时间。提交预约、创建提醒和通知家属前都要由本人明确确认。预约完成后按事项卡核对时间、材料和出发建议。',
  '复诊,预约,办理,流程,怎么做',NULL,NULL,1,TRUE),
@@ -161,27 +179,16 @@ MERGE INTO care_guide_articles KEY(id) VALUES
  '需要改期或取消已确认预约时，应先查询本人预约并再次确认，系统不会根据一句模糊表达直接执行。可能迟到时，请尽快联系医院确认是否还能报到。',
  '改期,取消,退掉,撤销,迟到,预约',NULL,NULL,4,TRUE);
 
--- 号源按「医院 + 科室名」回填诊室。⚠️ 这条 UPDATE 跑在号源生成器之前，所以**当次启动新生成的
--- 号源拿不到 loc-*，要下次启动才回填**——这是既有行为（不是本次引入的），本次不顺手修。
-UPDATE appointment_slots SET clinic_location_id=CASE
-  WHEN hospital_id='h001' AND department='心内科' THEN 'loc-d001'
-  WHEN hospital_id='h001' AND department='神经内科' THEN 'loc-d002'
-  WHEN hospital_id='h001' AND department='内分泌科' THEN 'loc-d005'
-  WHEN hospital_id='h002' AND department='内分泌科' THEN 'loc-d003'
-  WHEN hospital_id='h002' AND department='骨科' THEN 'loc-d004'
-  WHEN hospital_id='h002' AND department='心内科' THEN 'loc-d006'
-  WHEN hospital_id='h001' AND department='骨科' THEN 'loc-d007'
-  WHEN hospital_id='h001' AND department='呼吸内科' THEN 'loc-d008'
-  WHEN hospital_id='h001' AND department='消化内科' THEN 'loc-d009'
-  WHEN hospital_id='h002' AND department='神经内科' THEN 'loc-d010'
-  WHEN hospital_id='h002' AND department='呼吸内科' THEN 'loc-d011'
-  WHEN hospital_id='h002' AND department='消化内科' THEN 'loc-d012'
-  ELSE clinic_location_id END;
+-- 诊室与科室一一对应，编号形如 loc-<科室编号>。此处 department 已经是 departments.id，
+-- 直接拼出来即可，不必再按「医院 + 中文科室名」逐条比对。
+-- 用 EXISTS 而不是写死 d001~d012：以后加科室只要 data.sql 里补上 loc-*，回填自动跟上。
+UPDATE appointment_slots SET clinic_location_id='loc-' || department
+WHERE EXISTS (SELECT 1 FROM clinics c WHERE c.id='loc-' || appointment_slots.department);
 
-MERGE INTO travel_routes (id,origin,destination,transport,duration_minutes,distance_meters,route_steps,polyline,route_source) KEY(id) VALUES
-('route-001','幸福小区（模拟）','健康路1号（模拟）','家属开车',30,8700,'从幸福小区东门出发|沿幸福路向南行驶|在健康路口左转|从市第一医院门诊楼南门进入','116.365300,39.921900;116.374800,39.918300;116.386500,39.913600;116.397428,39.909230','SIMULATED'),
-('route-002','幸福小区（模拟）','健康路1号（模拟）','打车',35,9100,'在幸福小区东门上车|沿幸福路和健康路行驶|在市第一医院门诊楼南门下车','116.365300,39.921900;116.377200,39.919100;116.389300,39.912800;116.397428,39.909230','SIMULATED'),
-('route-003','幸福小区（模拟）','健康路1号（模拟）','公交',50,10200,'步行约6分钟到幸福小区公交站|乘坐12路公交车|在市第一医院南门站下车|步行约3分钟到门诊楼南门','116.365300,39.921900;116.370600,39.919900;116.383100,39.914600;116.397428,39.909230','SIMULATED'),
-('route-004','幸福小区（模拟）','人民路88号（模拟）','家属开车',25,7600,'从幸福小区东门出发|沿人民路向东行驶|从市人民医院门诊楼东门进入','116.365300,39.921900;116.389900,39.916500;116.412600,39.909800;116.430200,39.905600','SIMULATED'),
-('route-005','幸福小区（模拟）','人民路88号（模拟）','打车',30,8000,'在幸福小区东门上车|沿人民路行驶|在市人民医院门诊楼东门下车','116.365300,39.921900;116.392600,39.915200;116.416800,39.908700;116.430200,39.905600','SIMULATED'),
-('route-006','幸福小区（模拟）','人民路88号（模拟）','公交',45,9400,'步行约5分钟到幸福小区公交站|乘坐8路公交车|在市人民医院东门站下车|步行约4分钟到门诊楼东门','116.365300,39.921900;116.378600,39.918700;116.405500,39.911200;116.430200,39.905600','SIMULATED');
+MERGE INTO travel_routes (id,hospital_id,origin,transport,duration_minutes,distance_meters,route_steps,polyline,route_source) KEY(id) VALUES
+('route-001','h001','幸福小区（模拟）','家属开车',30,8700,'从幸福小区东门出发|沿幸福路向南行驶|在健康路口左转|从市第一医院门诊楼南门进入','116.365300,39.921900;116.374800,39.918300;116.386500,39.913600;116.397428,39.909230','SIMULATED'),
+('route-002','h001','幸福小区（模拟）','打车',35,9100,'在幸福小区东门上车|沿幸福路和健康路行驶|在市第一医院门诊楼南门下车','116.365300,39.921900;116.377200,39.919100;116.389300,39.912800;116.397428,39.909230','SIMULATED'),
+('route-003','h001','幸福小区（模拟）','公交',50,10200,'步行约6分钟到幸福小区公交站|乘坐12路公交车|在市第一医院南门站下车|步行约3分钟到门诊楼南门','116.365300,39.921900;116.370600,39.919900;116.383100,39.914600;116.397428,39.909230','SIMULATED'),
+('route-004','h002','幸福小区（模拟）','家属开车',25,7600,'从幸福小区东门出发|沿人民路向东行驶|从市人民医院门诊楼东门进入','116.365300,39.921900;116.389900,39.916500;116.412600,39.909800;116.430200,39.905600','SIMULATED'),
+('route-005','h002','幸福小区（模拟）','打车',30,8000,'在幸福小区东门上车|沿人民路行驶|在市人民医院门诊楼东门下车','116.365300,39.921900;116.392600,39.915200;116.416800,39.908700;116.430200,39.905600','SIMULATED'),
+('route-006','h002','幸福小区（模拟）','公交',45,9400,'步行约5分钟到幸福小区公交站|乘坐8路公交车|在市人民医院东门站下车|步行约4分钟到门诊楼东门','116.365300,39.921900;116.378600,39.918700;116.405500,39.911200;116.430200,39.905600','SIMULATED');

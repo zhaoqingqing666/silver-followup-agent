@@ -90,16 +90,6 @@ function isAvailable(): boolean {
   return getChineseVoice() !== null;
 }
 
-function pause(): void {
-  if (!isSupported()) return;
-  try { window.speechSynthesis.pause(); } catch { /* 忽略 */ }
-}
-
-function resume(): void {
-  if (!isSupported()) return;
-  try { window.speechSynthesis.resume(); } catch { /* 忽略 */ }
-}
-
 function cancel(): void {
   if (!isSupported()) return;
   try { window.speechSynthesis.cancel(); } catch { /* 忽略 */ }
@@ -141,8 +131,6 @@ function speak(text: string, options: LocalSpeakOptions = {}): SpeechSynthesisUt
 
 export const LocalSpeechService = {
   speak,
-  pause,
-  resume,
   cancel,
   isSupported,
   isAvailable,

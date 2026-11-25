@@ -1,0 +1,101 @@
+%%{init: {"flowchart": {"curve": "basis", "nodeSpacing": 28, "rankSpacing": 48}, "themeVariables": {"fontFamily": "Microsoft YaHei, Noto Sans CJK SC, sans-serif"}}}%%
+flowchart LR
+    subgraph CLIENT["用户与交互层"]
+        direction TB
+        ELDER["老人本人"] --> EUI["老人端适老界面"]
+        FAMILY["家属"] --> CUI["协同照护端"]
+        VOLUNTEER["志愿者"] --> CUI
+        ENTRY["文字 · 语音 · 按钮<br/>确认卡 · 材料图片"]
+        EUI --> ENTRY
+        CUI --> ENTRY
+    end
+
+    subgraph ACCESS["接口、身份与安全"]
+        direction TB
+        API["AgentController<br/>会话 / 消息 / 图片 / 动作 / 确认接口"]
+        ID["会话双轴身份核验<br/>actorUserId：谁在操作<br/>userId：服务哪位老人"]
+        REL[("care_relations<br/>照护关系")]
+        SAFE["SafetyGuard<br/>MedicalBoundaryRules<br/>权限 · 医疗边界 · 紧急表达"]
+        REL --> ID
+    end
+
+    subgraph CORE["Java 会话编排与受控智能体运行时"]
+        direction TB
+        SERVICE["FollowupAgentService<br/>恢复会话 · 推进阶段 · 组合响应"]
+        STORE[("ConversationStore<br/>会话快照 · 历史 · 身份 · 确认状态")]
+        RUNTIME["AgentRuntime<br/>控制规划、调用、续跑、停止与降级"]
+        MODEL["ConversationPlanner / 单一主模型<br/>理解意图 · 抽取事实 · 自然补问 · 提议工具"]
+        FALLBACK["RuleConversationPlanner<br/>仅在模型不可用或失败时降级"]
+        REGISTRY["ToolRegistry<br/>模型可见工具声明"]
+        POLICY["ToolPolicy<br/>角色与风险权限"]
+        CONTRACT["ToolContract<br/>类型 · 必填 · 枚举 · 字段组合"]
+        VALIDATE["ActionValidator / AgentOrchestrator<br/>回答安全与业务路线审核"]
+        LIMIT["有界工具循环<br/>最多 3 轮；最多 3 个互不依赖的只读工具<br/>工具名＋参数阻止重复调用"]
+
+        SERVICE <--> STORE
+        RUNTIME <--> MODEL
+        FALLBACK -. "模型失败才启用" .-> RUNTIME
+        RUNTIME --> REGISTRY --> POLICY --> CONTRACT --> VALIDATE --> LIMIT
+        LIMIT --> RUNTIME
+    end
+
+    ACTION{"通过校验的<br/>结构化动作"}
+
+    subgraph READPATH["只读与澄清通道"]
+        direction TB
+        READ["模型可见只读工具<br/>医院 · 科室 · 号源 · 预约<br/>日程 · 材料 · 路线 · 画像 · 药品等"]
+        CLARIFY["ClarificationInteractionTool<br/>从数据库取得真实候选<br/>只澄清，不签发凭据、不写库"]
+    end
+
+    subgraph WRITEPATH["确认与写操作通道"]
+        direction TB
+        PLAN["Java 形成待确认方案<br/>完整复述操作、对象与影响范围"]
+        ISSUE["ConfirmationService.issue<br/>签发 confirmationId<br/>冻结 Kind、完整 targetIds 与必要草稿"]
+        CARD["结构化确认卡<br/>用户明确确认、拒绝或改口"]
+        CONSUME["ConfirmationService.consume<br/>校验当前凭据并单次消费"]
+        DISPATCH["ConfirmationDispatcher<br/>只按签发时冻结的 Kind 分派"]
+        EXEC["真实执行器<br/>BookingExecutor · CaregiverBookingExecutor<br/>CancellationExecutor · ManagedCancelExecutor · MemoExecutor"]
+        RETIRE["拒绝 / 改口 / 目标变化<br/>旧凭据立即失效，不写数据库"]
+
+        PLAN --> ISSUE --> CARD
+        CONSUME -->|凭据有效| DISPATCH --> EXEC
+        CARD -. "拒绝或内容变化" .-> RETIRE
+    end
+
+    DB[("H2 模拟数据库：最终权威事实<br/>用户 · 照护关系 · 会话 · 医院 · 科室 · 号源 · 预约<br/>日程 · 材料 · 路线 · 提醒 · 通知 · 健康记录 · 工具日志")]
+    RESPONSE["统一结构化响应<br/>回答 · 候选按钮 · 任务进度<br/>确认卡 · 导航指令 · 工具轨迹"]
+
+    ENTRY --> API
+    API --> SERVICE
+    SERVICE --> ID
+    ID --> SAFE
+    SAFE --> RUNTIME
+    LIMIT --> ACTION
+    ACTION -->|只读查询| READ
+    ACTION -->|对象不唯一| CLARIFY
+    ACTION -->|需要业务流程或写操作| PLAN
+
+    READ -->|参数化查询| DB
+    CLARIFY -->|查询真实候选| DB
+    DB -->|查询结果作为工具观察| SERVICE
+
+    CARD -->|出站展示| RESPONSE
+    RESPONSE -. "用户决定仍经同一接口返回" .-> API
+    SERVICE -->|确认请求携带 confirmationId| CONSUME
+    EXEC -->|事务写入| DB
+    DB -->|回读真实执行结果| SERVICE
+    RETIRE --> SERVICE
+    SERVICE --> RESPONSE
+    RESPONSE --> EUI
+    RESPONSE --> CUI
+
+    classDef user fill:#f5f0ff,stroke:#8a6bc2,color:#21183a,stroke-width:1.4px;
+    classDef control fill:#eef5ff,stroke:#477db3,color:#172c42,stroke-width:1.4px;
+    classDef guard fill:#fff2f2,stroke:#be5b5b,color:#482020,stroke-width:1.4px;
+    classDef tool fill:#eff9f4,stroke:#3b8d6f,color:#183c30,stroke-width:1.4px;
+    classDef data fill:#f2f4f7,stroke:#596d7d,color:#23313d,stroke-width:1.8px;
+    class ELDER,FAMILY,VOLUNTEER,EUI,CUI,ENTRY user;
+    class API,SERVICE,STORE,RUNTIME,MODEL,FALLBACK,REGISTRY,LIMIT,RESPONSE control;
+    class ID,SAFE,POLICY,CONTRACT,VALIDATE,ACTION,PLAN,ISSUE,CARD,CONSUME,DISPATCH,EXEC,RETIRE guard;
+    class READ,CLARIFY tool;
+    class REL,DB data;

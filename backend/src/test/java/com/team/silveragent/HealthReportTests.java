@@ -22,7 +22,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 @SpringBootTest(properties = {
         "spring.datasource.url=jdbc:h2:mem:silver-agent-report;DB_CLOSE_DELAY=-1",
-        "agent.llm.enabled=false",
+        "agent.model.enabled=false",
         // 测试自己调 sendWeekly 验去重，不要启动补发插进来抢跑
         "health-report.weekly.enabled=false"})
 class HealthReportTests {
@@ -38,10 +38,23 @@ class HealthReportTests {
         jdbc.update("DELETE FROM family_notifications");
     }
 
-    /** 记一条实测值；daysAgo>0 表示那是几天前量的（用来验时间窗）。 */
+    /**
+     * 记一条实测值；daysAgo>0 表示那是几天前量的（用来验时间窗）。
+     *
+     * <p>daysAgo=0 也刻意往前挪一分钟：汇总的窗口上界是「现在」，而 H2 的 TIMESTAMP 按微秒
+     * 四舍五入，测试若把记录种在「此刻」，存进去的值可能比窗口上界大 1 微秒而被排除。
+     * 真实使用里写入和生成报告不会挨得这么近，这是测试夹具自己的边界问题。
+     */
     private void seed(String item, String valueNum, String valueText, String unit, int daysAgo) {
         records.create("user-001", item, valueNum == null ? null : new BigDecimal(valueNum), valueText, unit,
-                "测试", "conv-seed", MemoParser.nowInDemoZone().minusDays(daysAgo));
+                "测试", "conv-seed", MemoParser.nowInDemoZone().minusDays(daysAgo).minusMinutes(1));
+    }
+
+    /** 从对话里报一个数并点头确认（实测数值要过确认卡才落库）。 */
+    private void reportInChat(String conversationId, String sentence) {
+        AgentTurnResponse ask = service.chat(conversationId, sentence);
+        assertThat(ask.confirmation()).as(ask.reply()).isNotNull();
+        service.confirm(conversationId, true, ask.confirmation().confirmationId());
     }
 
     private int notificationCount() {
@@ -50,6 +63,31 @@ class HealthReportTests {
 
     private String notificationContent() {
         return jdbc.queryForObject("SELECT content FROM family_notifications", String.class);
+    }
+
+    @Test
+    void aHalfBloodPressureReadingIsNotCountedAsSystolic() {
+        // 只说了一半的“低压95”：解析器把“低压”两个字标在值前面（见 DIASTOLIC_MARK），
+        // 汇总里不能把它当收缩压——那会算出“平均 117/86”这种谁也没量到过的血压发给家属。
+        seed("血压", "138", "138/86", "mmHg", 1);
+        seed("血压", "95", "低压95", "mmHg", 1);
+
+        HealthReportService.Report report =
+                reports.summarize("user-001", HealthReportParser.Window.WEEK, "血压", "健康记录");
+
+        // 收缩压只有 138 这一次；舒张压是 86 和 95 的平均（90.5 → 91）
+        assertThat(report.text()).contains("平均 138/91");
+        assertThat(report.text()).doesNotContain("117");
+    }
+
+    @Test
+    void aWindowWithOnlyDiastolicReadingsIsLabelledInsteadOfReportedAsSystolic() {
+        seed("血压", "95", "低压95", "mmHg", 1);
+
+        String text = reports.summarize("user-001", HealthReportParser.Window.WEEK, "血压", "健康记录").text();
+
+        // 直接报“95 mmHg”会被当成收缩压（那是个低到危险的值），标出这是低压
+        assertThat(text).contains("低压 95");
     }
 
     @Test
@@ -109,6 +147,64 @@ class HealthReportTests {
     }
 
     @Test
+    void weightSaidInJinIsNotAveragedTogetherWithKilograms() {
+        // 190 斤和 95 公斤是同一个重量，只是老人换了个说法
+        seed("体重", "190", "190", "斤", 0);
+        seed("体重", "95", "95", "kg", 1);
+
+        HealthReportService.Report report = reports.summarize("user-001", HealthReportParser.Window.WEEK, "体重", "健康记录");
+
+        assertThat(report.text()).contains("体重 2 次，平均 95 kg");
+        // 142 是 190 和 95 直接平均出来的数——没人量到过它，不能发到家属手上
+        assertThat(report.text()).doesNotContain("142");
+    }
+
+    @Test
+    void theOtherBucketIsListedByItsOwnWordsInsteadOfAveraged() {
+        // 「其他」是认不出项目的兜底桶：尿酸、步数、身高都落在这里，彼此没有量纲关系。
+        // 而且解析器给「其他」存的单位是空串，算出来的数连个量纲都挂不上。
+        seed("其他", "5000", "我今天走了5000步", "", 1);
+        seed("其他", "420", "我尿酸420", "", 1);
+        seed("血压", "138", "138/86", "mmHg", 1);
+
+        HealthReportService.Report report = reports.summarize("user-001", HealthReportParser.Window.WEEK, null, "健康记录");
+
+        // 列原话，家属自己看得懂；“平均 2710”是“5000 步”和“尿酸 420”凑出来的，谁也没量到过
+        assertThat(report.text()).contains("其他 2 次：", "我今天走了5000步", "我尿酸420");
+        assertThat(report.text()).doesNotContain("2710", "最高", "平均");
+        // 正经项目照旧走平均，别被这一条带歪
+        assertThat(report.text()).contains("血压 1 次，138/86 mmHg");
+    }
+
+    @Test
+    void aLongOtherBucketStillLeavesRoomForTheRealItems() {
+        // 一条原话最长能到 60 字，一个月攒下来能把整条消息顶过 family_notifications.content
+        // 的 500 字上限——那样连结尾的“等 N 项未列出”都送不出去，所以「其他」自己先收口
+        for (int index = 0; index < 12; index++) {
+            seed("其他", String.valueOf(100 + index),
+                    "我今天感觉还可以就是腿有点酸走了" + (100 + index) + "步不想再出门了", "", 1);
+        }
+        seed("血压", "138", "138/86", "mmHg", 1);
+
+        HealthReportService.Report report = reports.summarize("user-001", HealthReportParser.Window.WEEK, null, "健康记录");
+
+        assertThat(report.text()).contains("其他 12 次（只列最近", "血压 1 次，138/86 mmHg");
+        assertThat(report.text().length()).isLessThan(500);
+    }
+
+    @Test
+    void aReadingWithoutAUnitDoesNotStripTheUnitFromTheWholeLine() {
+        // 最新那条是口语条（“我血压有点高”）：没有数，也没有单位
+        seed("血压", "138", "138/86", "mmHg", 1);
+        seed("血压", null, "有点高", "", 0);
+
+        HealthReportService.Report report = reports.summarize("user-001", HealthReportParser.Window.WEEK, "血压", "健康记录");
+
+        // 单位取自那条真量过的；拿最新那条（没单位）去定，整行的 mmHg 就没了
+        assertThat(report.text()).contains("血压 2 次（另有 1 次未写数值），138/86 mmHg");
+    }
+
+    @Test
     void recordsOlderThanTheWindowAreLeftOut() {
         seed("血压", "138", "138/86", "mmHg", 0);
         seed("血压", "190", "190/100", "mmHg", 40);   // 40 天前，最近一周里没有它
@@ -154,8 +250,8 @@ class HealthReportTests {
             assertThat(result.reason()).contains("家属联系人");
             assertThat(notificationCount()).isZero();
         } finally {
-            jdbc.update("INSERT INTO family_contacts(id,user_id,name,relationship,phone)"
-                    + " VALUES ('family-001','user-001','小丽','女儿','13800001234')");
+            jdbc.update("INSERT INTO family_contacts(id,\"USER\",contact)"
+                    + " VALUES ('family-001','user-001','user-f001')");
         }
     }
 
@@ -176,8 +272,8 @@ class HealthReportTests {
     @Test
     void theAssistantSendsItOnOneSentence() {
         AgentTurnResponse start = service.start("user-001");
-        service.chat(start.conversationId(), "我的血压是138/86");
-        service.chat(start.conversationId(), "血糖6.4");
+        reportInChat(start.conversationId(), "我的血压是138/86");
+        reportInChat(start.conversationId(), "血糖6.4");
 
         AgentTurnResponse reply = service.chat(start.conversationId(), "把这个月的血压发给女儿");
 
@@ -192,7 +288,7 @@ class HealthReportTests {
     @Test
     void theAssistantSaysWhichWindowItAssumed() {
         AgentTurnResponse start = service.start("user-001");
-        service.chat(start.conversationId(), "血糖6.4");
+        reportInChat(start.conversationId(), "血糖6.4");
 
         AgentTurnResponse reply = service.chat(start.conversationId(), "把健康记录发给家属");
 

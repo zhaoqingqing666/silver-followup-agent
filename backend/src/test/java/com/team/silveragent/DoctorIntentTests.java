@@ -86,7 +86,7 @@ class DoctorIntentTests {
         LocalDate day = DemoSeed.checkupDay();
         List<String> expertSlots = jdbc.queryForList("""
                 SELECT id FROM appointment_slots
-                WHERE hospital_id='h001' AND department='心内科'
+                WHERE hospital='h001' AND department='d001'
                   AND appointment_date=? AND slot_type='EXPERT' AND available=TRUE
                 """, String.class, java.sql.Date.valueOf(day));
         assertThat(expertSlots).as("体检日专家格有 09:00 / 14:00 两条，必然查得到").isNotEmpty();

@@ -78,7 +78,7 @@ class DoctorSlotModelTests {
         List<String> incomplete = jdbc.query("""
                 SELECT id FROM appointment_slots
                 WHERE id LIKE 'r-%'
-                  AND (doctor_id IS NULL OR slot_type IS NULL OR department_id IS NULL OR fee_cents IS NULL)
+                  AND (doctor_id IS NULL OR slot_type IS NULL OR department IS NULL OR fee_cents IS NULL)
                 """, (rs, row) -> rs.getString(1));
 
         assertThat(incomplete)
@@ -114,15 +114,15 @@ class DoctorSlotModelTests {
      */
     @Test
     void everyMorningHasExactlyOneExpertAndOneNormal() {
-        // 必须按 department_id 分组，不能按 department（科室**名字**）：「心内科」「内分泌科」
-        // 在两家医院各有一份同名科室，按名字分组会把两家并成一组，上午就有 2 专家 2 普通。
+        // 必须按科室编号分组：合并后的 appointment_slots.department 存的就是 departments.id，
+        // 「心内科」「内分泌科」在两家医院各有一份同名科室，按**名字**分组会把两家并成一组。
         List<String> wrong = jdbc.query("""
-                SELECT s.department_id, s.department, s.appointment_date,
+                SELECT s.department, s.department, s.appointment_date,
                        SUM(CASE WHEN s.slot_type='EXPERT' THEN 1 ELSE 0 END) AS experts,
                        SUM(CASE WHEN s.slot_type='NORMAL' THEN 1 ELSE 0 END) AS normals
                 FROM appointment_slots s
                 WHERE s.id LIKE 'r-%' AND s.doctor_id IS NOT NULL AND s.appointment_time < ?
-                GROUP BY s.department_id, s.department, s.appointment_date
+                GROUP BY s.department, s.department, s.appointment_date
                 HAVING SUM(CASE WHEN s.slot_type='EXPERT' THEN 1 ELSE 0 END) <> 1
                     OR SUM(CASE WHEN s.slot_type='NORMAL' THEN 1 ELSE 0 END) <> 1
                 """, (rs, row) -> rs.getString(1) + "·" + rs.getString(2) + " " + rs.getDate(3)
@@ -143,12 +143,12 @@ class DoctorSlotModelTests {
      */
     @Test
     void theAfternoonNeverHasMoreThanTwoSlotsAtTheSameMoment() {
-        // 同样按 department_id 分组：同名科室在两院各一份，按名字分组会把下午的号源并成双份。
+        // 同样按科室编号分组：同名科室在两院各一份，按名字分组会把下午的号源并成双份。
         List<String> tooMany = jdbc.query("""
-                SELECT s.department_id, s.department, s.appointment_date, s.appointment_time, COUNT(*) AS n
+                SELECT s.department, s.department, s.appointment_date, s.appointment_time, COUNT(*) AS n
                 FROM appointment_slots s
                 WHERE s.id LIKE 'r-%' AND s.doctor_id IS NOT NULL AND s.appointment_time >= ?
-                GROUP BY s.department_id, s.department, s.appointment_date, s.appointment_time
+                GROUP BY s.department, s.department, s.appointment_date, s.appointment_time
                 HAVING COUNT(*) > 2
                 """, (rs, row) -> rs.getString(1) + "·" + rs.getString(2) + " " + rs.getDate(3) + " "
                 + rs.getTime(4) + " 共 " + rs.getInt(5) + " 条",
@@ -248,9 +248,9 @@ class DoctorSlotModelTests {
     void legacySlotsWithoutADoctorAreCleared() {
         jdbc.update("""
                 INSERT INTO appointment_slots
-                    (id,hospital_id,hospital_name,department,appointment_date,appointment_time,available)
-                VALUES (?,?,?,?,?,?,TRUE)
-                """, LEGACY_PREFIX + "orphan", "h001", "市第一医院（模拟）", "心内科",
+                    (id,hospital,department,appointment_date,appointment_time,available)
+                VALUES (?,?,?,?,?,TRUE)
+                """, LEGACY_PREFIX + "orphan", "h001", "d001",
                 DemoSeed.checkupDay(), DemoSeed.MORNING);
 
         assertThat(slotExists(LEGACY_PREFIX + "orphan")).as("前提：这条旧号源确实插进去了").isTrue();
@@ -273,9 +273,9 @@ class DoctorSlotModelTests {
         String legacySlotId = LEGACY_PREFIX + "in-use";
         jdbc.update("""
                 INSERT INTO appointment_slots
-                    (id,hospital_id,hospital_name,department,appointment_date,appointment_time,available)
-                VALUES (?,?,?,?,?,?,FALSE)
-                """, legacySlotId, "h001", "市第一医院（模拟）", "心内科",
+                    (id,hospital,department,appointment_date,appointment_time,available)
+                VALUES (?,?,?,?,?,FALSE)
+                """, legacySlotId, "h001", "d001",
                 DemoSeed.checkupDay(), DemoSeed.MORNING);
         jdbc.update("""
                 INSERT INTO appointments(id,slot_id,user_id,status,created_at)
@@ -411,12 +411,12 @@ class DoctorSlotModelTests {
             Integer expertCapacity = jdbc.queryForObject("""
                     SELECT COALESCE(SUM(capacity),0) FROM appointment_slots
                     WHERE id LIKE 'r-%' AND doctor_id IS NOT NULL
-                      AND department_id = ? AND slot_type = 'EXPERT'
+                      AND department = ? AND slot_type = 'EXPERT'
                     """, Integer.class, departmentId);
             Integer normalCapacity = jdbc.queryForObject("""
                     SELECT COALESCE(SUM(capacity),0) FROM appointment_slots
                     WHERE id LIKE 'r-%' AND doctor_id IS NOT NULL
-                      AND department_id = ? AND slot_type = 'NORMAL'
+                      AND department = ? AND slot_type = 'NORMAL'
                     """, Integer.class, departmentId);
 
             assertThat(normalCapacity)

@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { LoaderCircle, Play, Volume2, VolumeX } from 'lucide-react';
 import { onPlaybackChange, speakText, stopPlayback } from '@/lib/tts-player';
-import type { ChatMessage } from '@/types/domain';
+import type { ChatMessage, VoicePreference } from '@/types/domain';
 
 /** 录音时长显示：只认有效秒数，拿不到就不显示，
  *  免得 MediaRecorder 的 WebM 报 Infinity 时给老人看到 "Infinitys" 这种字 */
@@ -67,7 +67,15 @@ function VoiceBubble({ message }: { message: ChatMessage }) {
   </>;
 }
 
-export function ChatBubble({ message }: { message: ChatMessage }) {
+export function ChatBubble({ message, voicePreference }: {
+  message: ChatMessage;
+  /**
+   * 手动点喇叭念一条时也要用老人调好的语速和音量。
+   * 不传就会退回 localStorage 里那份兜底值（默认 1.0×），和「我的」页显示的语速对不上——
+   * 同一个偏好，只有一个来源。
+   */
+  voicePreference?: VoicePreference;
+}) {
   const [playing, setPlaying] = useState(false);
   const [loading, setLoading] = useState(false);
   // 这条消息在全局播放器里的唯一标识：播放状态变化时据此判断"是不是本气泡在播"
@@ -87,7 +95,9 @@ export function ChatBubble({ message }: { message: ChatMessage }) {
     setLoading(true);
     try {
       // 本地优先：浏览器中文语音直接播；不支持/没中文语音才回退云端
-      await speakText(key, message.text);
+      await speakText(key, message.text, {
+        rate: voicePreference?.speechRate, volume: voicePreference?.speechVolume,
+      });
     } finally { setLoading(false); }
   };
 

@@ -35,14 +35,17 @@ public class AppointmentRecordStore {
 
     public List<AppointmentView> allFor(String userId) {
         List<AppointmentView> rows = jdbc.query("""
-                SELECT a.id,s.hospital_name,s.department,s.appointment_date,s.appointment_time,
+                SELECT a.id,h.name,d.name,s.appointment_date,s.appointment_time,
                        a.departure_time,a.transport,a.reminder_status,a.family_status,a.materials,
                        a.status,a.created_at,a.arranged_by,a.accompanied_by,
                        (SELECT r.relationship FROM care_relations r
                         WHERE r.caregiver_id=a.arranged_by AND r.elder_user_id=a.user_id) AS arr_rel,
                        arr.name AS arr_name,
                        a.doctor_name,a.doctor_title,a.slot_type,a.fee_cents
-                FROM appointments a JOIN appointment_slots s ON s.id=a.slot_id
+                FROM appointments a
+                JOIN appointment_slots s ON s.id=a.slot_id
+                JOIN hospitals h ON h.id=s.hospital
+                JOIN departments d ON d.id=s.department
                 LEFT JOIN users arr ON arr.id=a.arranged_by
                 WHERE a.user_id=?
                 ORDER BY a.created_at DESC
@@ -67,17 +70,21 @@ public class AppointmentRecordStore {
         return rows.stream().map(row -> new AppointmentView(
                 row.appointmentId(), row.hospital(), row.department(), row.date(), row.time(),
                 row.departureAt(), row.transport(), row.reminderStatus(), row.familyStatus(),
-                row.materials(), requiredMaterials(row.department()), row.status(), row.createdAt(),
+                row.materials(), requiredMaterials(row.hospital(), row.department()), row.status(), row.createdAt(),
                 row.arrangedBy(), row.arrangedLabel(), row.accompaniedBy(),
                 row.doctorName(), row.doctorTitle(), row.slotType(), row.feeCents())).toList();
     }
 
-    private List<String> requiredMaterials(String department) {
+    private List<String> requiredMaterials(String hospital, String department) {
         return jdbc.query("""
                 SELECT material_name FROM material_templates
-                WHERE (department='通用' OR department=?) AND required=TRUE
+                WHERE (department_id IS NULL
+                       OR department_id=(
+                            SELECT MIN(d.id) FROM departments d JOIN hospitals h ON h.id=d.hospital_id
+                            WHERE d.name=? AND h.name=?))
+                  AND required=TRUE
                 ORDER BY sort_order
-                """, (rs, row) -> rs.getString(1), department);
+                """, (rs, row) -> rs.getString(1), department, hospital);
     }
 
     private List<String> splitMaterials(String value) {

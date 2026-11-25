@@ -67,11 +67,11 @@ class DepartmentScheduleAndCapacityTests {
     @Test
     void everyOpenDayHasFourSlotsFromFourDifferentDoctors() {
         List<String> wrong = jdbc.query("""
-                SELECT s.department_id, s.department, s.appointment_date,
+                SELECT s.department, s.department, s.appointment_date,
                        COUNT(*) AS slots, COUNT(DISTINCT s.doctor_id) AS doctors
                 FROM appointment_slots s
                 WHERE s.id LIKE 'r-%' AND s.doctor_id IS NOT NULL
-                GROUP BY s.department_id, s.department, s.appointment_date
+                GROUP BY s.department, s.department, s.appointment_date
                 HAVING COUNT(*) <> 4 OR COUNT(DISTINCT s.doctor_id) <> 4
                 """, (rs, row) -> rs.getString(1) + "·" + rs.getString(2) + " " + rs.getDate(3)
                 + "（号源 " + rs.getInt(4) + " 条 / 医生 " + rs.getInt(5) + " 位）");
@@ -110,7 +110,7 @@ class DepartmentScheduleAndCapacityTests {
         for (String departmentId : enabledDepartmentIds()) {
             List<String> expertDoctors = jdbc.query("""
                     SELECT DISTINCT doctor_id FROM appointment_slots
-                    WHERE id LIKE 'r-%' AND slot_type='EXPERT' AND department_id=?
+                    WHERE id LIKE 'r-%' AND slot_type='EXPERT' AND department=?
                     ORDER BY doctor_id
                     """, (rs, row) -> rs.getString(1), departmentId);
 
@@ -120,7 +120,7 @@ class DepartmentScheduleAndCapacityTests {
 
             Integer morningExpertDoctors = jdbc.queryForObject("""
                     SELECT COUNT(DISTINCT doctor_id) FROM appointment_slots
-                    WHERE id LIKE 'r-%' AND slot_type='EXPERT' AND department_id=? AND appointment_time=?
+                    WHERE id LIKE 'r-%' AND slot_type='EXPERT' AND department=? AND appointment_time=?
                     """, Integer.class, departmentId, Time.valueOf(MORNING_EXPERT));
             assertThat(morningExpertDoctors)
                     .as("科室 %s 的 09:00 专家格要由两位主任轮流坐，才算真的对调", departmentId)
@@ -165,13 +165,15 @@ class DepartmentScheduleAndCapacityTests {
         assertThat(availableOf(slot)).as("还剩名额，查询侧照旧看得见它").isTrue();
 
         // 把剩下的名额约满（用不同的就诊人 / 会话，走的都是真实提交路径）。
-        for (int i = 2; i <= capacity; i++) {
-            appointments.submit("t-capacity-" + i, slot, "user-00" + i);
+        // 就诊人必须先在 users 里：appointments.user_id 是指向 users 的真外键。
+        List<String> otherElders = List.of("user-002", "user-v001");
+        for (int i = 0; i < capacity - 1; i++) {
+            appointments.submit("t-capacity-" + (i + 2), slot, otherElders.get(i));
         }
         assertThat(bookedOf(slot)).isEqualTo(capacity);
         assertThat(availableOf(slot)).as("约满之后就从查询侧消失了").isFalse();
 
-        assertThatThrownBy(() -> appointments.submit("t-capacity-full", slot, "user-009"))
+        assertThatThrownBy(() -> appointments.submit("t-capacity-full", slot, "user-f001"))
                 .as("满员之后再提交要被拒绝")
                 .isInstanceOf(IllegalStateException.class);
 

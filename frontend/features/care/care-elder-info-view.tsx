@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { CalendarDays, ChevronRight, History, Home, LoaderCircle, Phone, RefreshCw, UserRound } from 'lucide-react';
+import { CalendarDays, ChevronRight, History, Home, LoaderCircle, NotebookPen, Phone, RefreshCw, UserRound } from 'lucide-react';
 import { PageHeader } from '@/components/common/page-header';
 import { getUserProfile } from '@/lib/appointment-api';
 import type { CareElder, UserProfile } from '@/types/domain';
@@ -11,10 +11,17 @@ interface CareElderInfoProps {
   onBack: () => void;
   onOpenTimeline: () => void;
   onOpenAppointments: () => void;
+  onOpenHealthProfile: () => void;
 }
 
-/** 照护者只读查看某位长辈的资料与联系人（不提供编辑）。 */
-export function CareElderInfoView({ elder, onBack, onOpenTimeline, onOpenAppointments }: CareElderInfoProps) {
+/**
+ * 照护者查看某位长辈的资料与联系人。
+ *
+ * 这一页本身不提供编辑（资料是登记好的），唯一的例外是健康档案——过敏史、既往病史、
+ * 身高体重这些医生每次都会问，家属比老人自己更清楚，所以给一个能填的入口。档案不在这
+ * 一页上铺开：四段字摆下来会把地址和联系人挤下去，所以只留一个按钮，点进去才是那一页。
+ */
+export function CareElderInfoView({ elder, onBack, onOpenTimeline, onOpenAppointments, onOpenHealthProfile }: CareElderInfoProps) {
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -94,6 +101,11 @@ export function CareElderInfoView({ elder, onBack, onOpenTimeline, onOpenAppoint
             <button type="button" onClick={onOpenTimeline} className="flex min-h-14 items-center gap-3 rounded-2xl border bg-card px-5 text-left text-lg font-bold shadow-sm active:scale-[0.99]">
               <span className="grid size-10 shrink-0 place-items-center rounded-xl bg-secondary text-primary"><History className="size-5" /></span>
               <span className="min-w-0 flex-1">查看就诊动态</span>
+              <ChevronRight className="size-5 text-muted-foreground" />
+            </button>
+            <button type="button" onClick={onOpenHealthProfile} className="flex min-h-14 items-center gap-3 rounded-2xl border bg-card px-5 text-left text-lg font-bold shadow-sm active:scale-[0.99]">
+              <span className="grid size-10 shrink-0 place-items-center rounded-xl bg-secondary text-primary"><NotebookPen className="size-5" /></span>
+              <span className="min-w-0 flex-1">健康档案</span>
               <ChevronRight className="size-5 text-muted-foreground" />
             </button>
           </div>

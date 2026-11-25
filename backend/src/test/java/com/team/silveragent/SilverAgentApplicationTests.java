@@ -1,6 +1,6 @@
 package com.team.silveragent;
 
-import com.team.silveragent.application.BusinessClock;
+import com.team.silveragent.application.time.BusinessClock;
 import com.team.silveragent.application.FollowupAgentService;
 import com.team.silveragent.application.travel.TravelGuideService;
 import com.team.silveragent.agent.RuleFactExtractor;
@@ -131,7 +131,8 @@ class SilverAgentApplicationTests {
         LocalDate today = clock.today();
         slotTodayAt(LocalTime.of(9, 0));
         slotTodayAt(LocalTime.of(15, 30));
-        doReturn(LocalTime.of(15, 0)).when(clock).now();
+        // BusinessClock 的 now() 现在返回 LocalDateTime（不再是旧的 LocalTime 别名），两条都要钉住。
+        doReturn(LocalDateTime.of(today, LocalTime.of(15, 0))).when(clock).now();
         doReturn(LocalDateTime.of(today, LocalTime.of(15, 0))).when(clock).nowDateTime();
 
         String id = service.start().conversationId();
@@ -153,7 +154,7 @@ class SilverAgentApplicationTests {
     @Test void aWholeDayThatAlreadyPassedIsExplainedWithTheElapsedTimes() {
         LocalDate today = clock.today();
         slotTodayAt(LocalTime.of(9, 0));
-        doReturn(LocalTime.of(20, 0)).when(clock).now();
+        doReturn(LocalDateTime.of(today, LocalTime.of(20, 0))).when(clock).now();
         doReturn(LocalDateTime.of(today, LocalTime.of(20, 0))).when(clock).nowDateTime();
 
         String id = service.start().conversationId();
@@ -172,12 +173,12 @@ class SilverAgentApplicationTests {
         String id = TODAY_SLOT_PREFIX + time.toString().replace(":", "");
         jdbc.update("""
                 INSERT INTO appointment_slots
-                    (id,hospital_id,hospital_name,department,appointment_date,appointment_time,
-                     available,doctor_id,slot_type,department_id,fee_cents,capacity,booked)
-                SELECT ?,?,?,?,?,?,TRUE,?,?,?,?,?,0
+                    (id,hospital,department,appointment_date,appointment_time,
+                     available,doctor_id,slot_type,fee_cents,capacity,booked)
+                SELECT ?,?,?,?,?,TRUE,?,?,?,?,0
                 WHERE NOT EXISTS (SELECT 1 FROM appointment_slots WHERE id=?)
-                """, id, "h001", "市第一医院（模拟）", "心内科", clock.today(), time,
-                "doc-d001-01", RollingAppointmentSlotInitializer.SLOT_TYPE_EXPERT, DemoSeed.CARDIOLOGY,
+                """, id, "h001", DemoSeed.CARDIOLOGY, clock.today(), time,
+                "doc-d001-01", RollingAppointmentSlotInitializer.SLOT_TYPE_EXPERT,
                 RollingAppointmentSlotInitializer.EXPERT_FEE_CENTS,
                 RollingAppointmentSlotInitializer.EXPERT_CAPACITY, id);
     }

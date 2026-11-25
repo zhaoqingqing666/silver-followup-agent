@@ -41,7 +41,7 @@ export function MemoListView({ page, onBack, onGoAssistant }: {
   onGoAssistant: () => void;
 }) {
   const copy = COPY[page];
-  const { rows: fetched, loaded, hasMore, loading, loadMore, reload } = usePagedList<HealthMemo>(
+  const { rows: fetched, loaded, error, hasMore, loading, loadMore, reload } = usePagedList<HealthMemo>(
       (offset, limit) => (page === 'reminders'
           ? getMemosByKind('timed')          // 一次拿全，不分页
           : getMemosByKind('standing', limit, offset)),
@@ -62,7 +62,17 @@ export function MemoListView({ page, onBack, onGoAssistant }: {
           <h2 className="text-xl font-bold">{copy.title}</h2>
           <span className="text-sm text-muted-foreground">{rows.length > 0 ? `共${rows.length}条` : copy.subtitle}</span>
         </div>
-        {loaded && rows.length === 0 ? (
+        {/* 读不到 ≠ 一条都没有：后端没起或网络断了的时候，下面那张空态大卡会理直气壮地
+            说「还没有到点提醒，跟助手说一句…」，老人就会以为自己的提醒丢了 */}
+        {loaded && error && (
+          <section className="rounded-3xl border bg-card p-6 text-center shadow-sm">
+            <p className="text-lg">{error}</p>
+            <button onClick={reload} className="mt-4 inline-flex min-h-12 items-center justify-center gap-2 rounded-2xl bg-primary px-5 font-bold text-white">
+              重新读取
+            </button>
+          </section>
+        )}
+        {loaded && !error && (rows.length === 0 ? (
           <button onClick={onGoAssistant} className="w-full rounded-3xl border border-dashed border-[#dba976] bg-[#fffaf3] p-6 text-center shadow-sm">
             <NotebookPen className="mx-auto size-9 text-primary" aria-hidden="true" />
             <strong className="mt-3 block text-xl">{copy.emptyTitle}</strong>
@@ -84,7 +94,7 @@ export function MemoListView({ page, onBack, onGoAssistant }: {
           <ul className="space-y-3">
             {rows.map(memo => <MemoCard key={memo.id} memo={memo} onChanged={reload} />)}
           </ul>
-        )}
+        ))}
       </div>
     </main>
   );

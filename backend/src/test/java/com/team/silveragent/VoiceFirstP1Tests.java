@@ -66,11 +66,11 @@ class VoiceFirstP1Tests {
                              "replyDraft":null,"dialogueMode":"FOLLOWUP_FLOW","facts":{}}
                             """;
                 }
-                if (latest.contains("NO_SLOT")) {
+                if (latest.contains("没有可预约时段")) {
                     return """
                             {"actionType":"ANSWER","intent":"QUERY_NEARBY_SLOTS","toolName":null,
                              "arguments":{},
-                             "replyDraft":"%s暂时没有号。我已经查看真实号源，附近日期还有可选时间，请从下面选择。",
+                             "replyDraft":"%s暂时没有号。您可以换一天或换一家医院，我按您说的再查。",
                              "dialogueMode":"FOLLOWUP_FLOW","facts":{}}
                             """.formatted(EMPTY_DAY_TEXT);
                 }
@@ -241,7 +241,7 @@ class VoiceFirstP1Tests {
         assertThat(record.reply()).as("查自己记过的数不该被当成问诊").doesNotContain("不能诊断");
     }
 
-    @Test void noSlotToolResultReturnsToTheSameModelAndKeepsRealChoices() {
+    @Test void noSlotToolResultReturnsToTheSameModelAndLeavesTheDraftAlone() {
         String id = service.start().conversationId();
         action(id, "SET_HOSPITAL", "h001");
         action(id, "SET_DEPARTMENT", "d001");
@@ -250,11 +250,13 @@ class VoiceFirstP1Tests {
         AgentTurnResponse result = service.chat(id, "帮我查" + EMPTY_DAY_TEXT + "的号");
 
         assertThat(gateway.calls.get()).as("一次规划加一次工具结果续跑").isEqualTo(2);
-        assertThat(result.stage()).isEqualTo("NO_SLOT");
-        assertThat(result.reply()).contains(EMPTY_DAY_TEXT + "暂时没有号", "真实号源", "附近日期");
-        assertThat(result.quickReplies()).anyMatch(item -> item.action().equals("SELECT_SLOT"));
         assertThat(result.toolTraces()).anyMatch(item -> item.toolName().equals("appointment.querySlots"));
-        assertThat(result.toolTraces()).anyMatch(item -> item.toolName().equals("appointment.queryAlternatives"));
+        AgentTurnResponse.ToolTrace trace = result.toolTraces().stream()
+                .filter(item -> "appointment.querySlots".equals(item.toolName()))
+                .reduce((first, second) -> second).orElseThrow();
+        assertThat(trace.parameters()).as("查的就是参数点名的那一天").contains(EMPTY_DAY);
+        assertThat(result.reply()).as("同一个模型拿着真实的无号结果作答").contains(EMPTY_DAY_TEXT + "暂时没有号");
+        assertThat(result.plan().date()).as("只是查号：草稿的日期保持为空").isEqualTo("待确认");
     }
 
     @Test void modelCanChainTwoReadToolsBeforeOneFinalAnswer() {

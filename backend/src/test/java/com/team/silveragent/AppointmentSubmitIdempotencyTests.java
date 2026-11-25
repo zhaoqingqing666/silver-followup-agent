@@ -242,12 +242,12 @@ class AppointmentSubmitIdempotencyTests {
         String id = MANUAL_SLOT_PREFIX + DemoSeed.checkupDay() + "-0900";
         jdbc.update("""
                 INSERT INTO appointment_slots
-                    (id,hospital_id,hospital_name,department,appointment_date,appointment_time,
-                     available,doctor_id,slot_type,department_id,fee_cents,capacity,booked)
-                SELECT ?,?,?,?,?,?,TRUE,?,?,?,?,?,0
+                    (id,hospital,department,appointment_date,appointment_time,
+                     available,doctor_id,slot_type,fee_cents,capacity,booked)
+                SELECT ?,?,?,?,?,TRUE,?,?,?,?,0
                 WHERE NOT EXISTS (SELECT 1 FROM appointment_slots WHERE id=?)
-                """, id, "h001", "市第一医院（模拟）", "心内科", DemoSeed.checkupDay(), DemoSeed.MORNING,
-                "doc-d001-01", RollingAppointmentSlotInitializer.SLOT_TYPE_EXPERT, DemoSeed.CARDIOLOGY,
+                """, id, "h001", DemoSeed.CARDIOLOGY, DemoSeed.checkupDay(), DemoSeed.MORNING,
+                "doc-d001-01", RollingAppointmentSlotInitializer.SLOT_TYPE_EXPERT,
                 RollingAppointmentSlotInitializer.EXPERT_FEE_CENTS,
                 RollingAppointmentSlotInitializer.EXPERT_CAPACITY, id);
         return id;
@@ -263,12 +263,12 @@ class AppointmentSubmitIdempotencyTests {
         String id = MANUAL_SLOT_PREFIX + DemoSeed.checkupDay() + "-0900-ortho";
         jdbc.update("""
                 INSERT INTO appointment_slots
-                    (id,hospital_id,hospital_name,department,appointment_date,appointment_time,
-                     available,doctor_id,slot_type,department_id,fee_cents,capacity,booked)
-                SELECT ?,?,?,?,?,?,TRUE,?,?,?,?,?,0
+                    (id,hospital,department,appointment_date,appointment_time,
+                     available,doctor_id,slot_type,fee_cents,capacity,booked)
+                SELECT ?,?,?,?,?,TRUE,?,?,?,?,0
                 WHERE NOT EXISTS (SELECT 1 FROM appointment_slots WHERE id=?)
-                """, id, "h001", "市第一医院（模拟）", "骨科", DemoSeed.checkupDay(), DemoSeed.MORNING,
-                "doc-d007-02", RollingAppointmentSlotInitializer.SLOT_TYPE_NORMAL, "d007",
+                """, id, "h001", "d007", DemoSeed.checkupDay(), DemoSeed.MORNING,
+                "doc-d007-02", RollingAppointmentSlotInitializer.SLOT_TYPE_NORMAL,
                 RollingAppointmentSlotInitializer.NORMAL_FEE_CENTS,
                 RollingAppointmentSlotInitializer.NORMAL_CAPACITY, id);
         return id;

@@ -45,10 +45,10 @@ public class H2MaterialPreparationTool implements MaterialPreparationTool {
     @Override
     @Transactional
     public List<AppointmentMaterial> initialize(String conversationId, String appointmentId,
-                                                String department, List<String> materialNames) {
+                                                String hospital, String department, List<String> materialNames) {
         if (materialNames == null || materialNames.isEmpty()) return List.of();
         for (String materialName : materialNames) {
-            TemplateRow template = findTemplate(department, materialName);
+            TemplateRow template = findTemplate(hospital, department, materialName);
             String code = template == null ? slug(materialName) : template.id();
             boolean required = template != null && template.required();
             jdbc.update("""
@@ -81,11 +81,14 @@ public class H2MaterialPreparationTool implements MaterialPreparationTool {
         if (legacyMaterials.isEmpty()) {
             legacyMaterials = jdbc.query("""
                     SELECT material_name FROM material_templates
-                    WHERE department='通用' OR department=?
+                    WHERE department_id IS NULL
+                       OR department_id=(
+                            SELECT MIN(d.id) FROM departments d JOIN hospitals h ON h.id=d.hospital_id
+                            WHERE d.name=? AND h.name=?)
                     ORDER BY required DESC,sort_order
-                    """, (rs, row) -> rs.getString(1), source.department());
+                    """, (rs, row) -> rs.getString(1), source.department(), source.hospital());
         }
-        return initialize(null, appointmentId, source.department(), legacyMaterials);
+        return initialize(null, appointmentId, source.hospital(), source.department(), legacyMaterials);
     }
 
     @Override
@@ -174,10 +177,13 @@ public class H2MaterialPreparationTool implements MaterialPreparationTool {
 
     private AppointmentSource requireAppointment(String userId, String appointmentId) {
         List<AppointmentSource> rows = jdbc.query("""
-                SELECT s.department,a.materials
-                FROM appointments a JOIN appointment_slots s ON s.id=a.slot_id
+                SELECT h.name,d.name,a.materials
+                FROM appointments a
+                JOIN appointment_slots s ON s.id=a.slot_id
+                JOIN hospitals h ON h.id=s.hospital
+                JOIN departments d ON d.id=s.department
                 WHERE a.id=? AND a.user_id=?
-                """, (rs, row) -> new AppointmentSource(rs.getString(1), rs.getString(2)),
+                """, (rs, row) -> new AppointmentSource(rs.getString(1), rs.getString(2), rs.getString(3)),
                 appointmentId, userId);
         if (rows.isEmpty()) throw new IllegalArgumentException("没有找到这条预约记录");
         return rows.get(0);
@@ -199,13 +205,18 @@ public class H2MaterialPreparationTool implements MaterialPreparationTool {
                 rs.getString(8), rs.getTimestamp(9).toLocalDateTime());
     }
 
-    private TemplateRow findTemplate(String department, String materialName) {
+    private TemplateRow findTemplate(String hospital, String department, String materialName) {
+        // 通用模板与科室模板重名时优先科室模板：通用那份只是兜底。
         List<TemplateRow> rows = jdbc.query("""
                 SELECT id,required FROM material_templates
-                WHERE material_name=? AND (department='通用' OR department=?)
-                ORDER BY CASE WHEN department=? THEN 0 ELSE 1 END
+                WHERE material_name=?
+                  AND (department_id IS NULL
+                       OR department_id=(
+                            SELECT MIN(d.id) FROM departments d JOIN hospitals h ON h.id=d.hospital_id
+                            WHERE d.name=? AND (? IS NULL OR h.name=?)))
+                ORDER BY CASE WHEN department_id IS NULL THEN 1 ELSE 0 END
                 """, (rs, row) -> new TemplateRow(rs.getString(1), rs.getBoolean(2)),
-                materialName, department, department);
+                materialName, department, hospital, hospital);
         return rows.isEmpty() ? null : rows.get(0);
     }
 
@@ -219,5 +230,5 @@ public class H2MaterialPreparationTool implements MaterialPreparationTool {
     }
 
     private record TemplateRow(String id, boolean required) { }
-    private record AppointmentSource(String department, String materials) { }
+    private record AppointmentSource(String hospital, String department, String materials) { }
 }

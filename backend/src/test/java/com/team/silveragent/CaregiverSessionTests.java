@@ -2,6 +2,7 @@ package com.team.silveragent;
 
 import com.team.silveragent.application.AppointmentRecordStore;
 import com.team.silveragent.application.care.CareBookingService;
+import com.team.silveragent.application.care.CareService;
 import com.team.silveragent.application.FollowupAgentService;
 import com.team.silveragent.domain.model.AgentTurnResponse;
 import com.team.silveragent.support.DemoSeed;
@@ -11,7 +12,10 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 
+import java.sql.Timestamp;
+import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -25,11 +29,12 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 @SpringBootTest(properties = {
         "spring.datasource.url=jdbc:h2:mem:silver-agent-caregiver;DB_CLOSE_DELAY=-1",
-        "agent.llm.enabled=false"})
+        "agent.model.enabled=false"})
 class CaregiverSessionTests {
 
     @Autowired FollowupAgentService service;
     @Autowired CareBookingService booking;
+    @Autowired CareService care;
     @Autowired JdbcTemplate jdbc;
 
     /** 演示用的日期与号源都跟着今天走，别再写死（见 DemoSeed）。 */
@@ -194,7 +199,7 @@ class CaregiverSessionTests {
     @Test
     void caregiverReminderLandsInTheEldersMemosAndNamesTheSender() {
         AgentTurnResponse start = service.start("user-001", "user-f001");
-        AgentTurnResponse reply = service.chat(start.conversationId(), "提醒我妈明天上午带身份证");
+        AgentTurnResponse reply = service.chat(start.conversationId(), "提醒我妈明天上午八点带身份证");
 
         assertThat(reply.reply()).contains("王阿姨");
         String text = jdbc.queryForObject("SELECT text FROM memos WHERE user_id='user-001'", String.class);
@@ -202,6 +207,162 @@ class CaregiverSessionTests {
         // 反向也要留痕，操作者能在自己的协同通知里看到发过什么。
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM care_notifications WHERE caregiver_id='user-f001'",
                 Integer.class)).isEqualTo(1);
+    }
+
+    /**
+     * 家属只说了时段（“上午”）、没说几点：跟老人端同一套判据，<b>反问，什么都不留</b>。
+     *
+     * <p>以前这种句子是按 08:00 落库的——家属听到“已经给王阿姨留好提醒”就当留好了，
+     * 而他说的“上午”未必是八点，等长辈那天上午没被叫起来，两边都查不出错在哪。
+     * 上午只说清了一半，跟“这周”没说哪天是同一种缺，都先问再留。
+     */
+    @Test
+    void caregiverReminderWithOnlyAPeriodWordIsAskedInsteadOfGuessed() {
+        AgentTurnResponse start = service.start("user-001", "user-f001");
+        AgentTurnResponse reply = service.chat(start.conversationId(), "提醒我妈明天上午带身份证");
+
+        assertThat(reply.reply()).as(reply.reply()).contains("几点");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM memos WHERE user_id='user-001'",
+                Integer.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM care_notifications WHERE caregiver_id='user-f001'",
+                Integer.class)).isZero();
+    }
+
+    /**
+     * 家属一句话里说了两件事（两个时间点）：跟老人端同一套判据，<b>反问，什么都不留</b>。
+     *
+     * <p>这里比老人端还多一层：“已经给王阿姨留好提醒”这句话家属是当<b>回执</b>看的，听了就放心了。
+     * 所以不光库里不能有备忘，协同通知也不能发——留一条通知，等于给一件没发生的事开了收据。
+     */
+    @Test
+    void caregiverSentenceWithTwoMomentsIsAskedBackAndLeavesNothing() {
+        AgentTurnResponse start = service.start("user-001", "user-f001");
+        AgentTurnResponse reply = service.chat(start.conversationId(),
+                "提醒我妈明天上午八点吃药，后天下午三点复查");
+
+        assertThat(reply.reply()).contains("一件一件说").contains("先没有给王阿姨留");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM memos WHERE user_id='user-001'",
+                Integer.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM care_notifications WHERE caregiver_id='user-f001'",
+                Integer.class)).isZero();
+    }
+
+    /**
+     * 一句话说了三天：给长辈留<b>三条</b>，每条只说自己那天，回读念的是中文日期。
+     *
+     * <p>前半句以前就有了（只留第一天，长辈会以为后面几天也设好了，到点却不响）；
+     * 这一版补的是正文和回读：整段原句抄进每一条会让周三那条说自己周一，
+     * 而回读里贴 {@code LocalDate.toString()} 出来的“2026-09-21T08:00”，家属得自己换算才敢核对。
+     */
+    @Test
+    void caregiverMultiDayReminderLeavesOneMemoPerDayWithReadableReadback() {
+        AgentTurnResponse start = service.start("user-001", "user-f001");
+        AgentTurnResponse reply = service.chat(start.conversationId(),
+                "提醒我妈下周周一周二周三早上八点量血压");
+
+        assertThat(reply.reply()).as(reply.reply()).contains("已经给王阿姨留好提醒");
+        // 回读念得出、核得对：中文日期 + 星期几，不是 2026-09-21T08:00 这种生日期
+        assertThat(reply.reply()).doesNotContain("2026-").contains("（周");
+
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                "SELECT text, remind_at FROM memos WHERE user_id='user-001' ORDER BY remind_at");
+        assertThat(rows).hasSize(3);
+        // 每条正文都长这样：抬头写明是谁留的（关系 + 名字）、“我妈”这个称呼摘掉、
+        // 不残留星期串（带上就是那条在说别人那天的事）
+        assertThat(rows).allSatisfy(row -> assertThat((String) row.get("text"))
+                .isEqualTo("「女儿 小丽」提醒：量血压"));
+        List<Object> ats = rows.stream().map(row -> row.get("remind_at")).toList();
+        assertThat(ats.get(1)).isEqualTo(java.sql.Timestamp.valueOf(
+                ((java.sql.Timestamp) ats.get(0)).toLocalDateTime().plusDays(1)));
+        assertThat(ats.get(2)).isEqualTo(java.sql.Timestamp.valueOf(
+                ((java.sql.Timestamp) ats.get(0)).toLocalDateTime().plusDays(2)));
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM care_notifications WHERE caregiver_id='user-f001'",
+                Integer.class)).isEqualTo(1);
+    }
+
+    /**
+     * 只说了“这周”，没说哪天、也没说几点：<b>先问清楚再留</b>，问的时候一条都不许写。
+     *
+     * <p>以前这条路是直接落库的：存下来的是一条“这周量血压”，没有提醒时间——
+     * 家属听到的是“已经给王阿姨留好提醒”，长辈那边到哪天都不响，还说不出哪里错了。
+     * 补答齐了之后仍然要落成<b>家属留的</b>那条（抬头写是谁留的、回一条协同通知），
+     * 不能因为多问了一轮就退回老人端的口吻。
+     */
+    @Test
+    void caregiverReminderWithNoDayOrClockIsAskedBeforeAnythingIsWritten() {
+        AgentTurnResponse start = service.start("user-001", "user-f001");
+        AgentTurnResponse askDay = service.chat(start.conversationId(), "提醒我妈这周量血压");
+
+        assertThat(askDay.reply()).as(askDay.reply()).contains("哪一天");
+        assertThat(memoCount()).isZero();
+        assertThat(careNotificationCount()).isZero();
+
+        AgentTurnResponse askClock = service.chat(start.conversationId(), "下周三");
+        assertThat(askClock.reply()).as(askClock.reply()).contains("几点");
+        assertThat(memoCount()).isZero();
+
+        AgentTurnResponse done = service.chat(start.conversationId(), "早上八点");
+
+        assertThat(done.reply()).as(done.reply())
+                .contains("已经给王阿姨留好提醒").doesNotContain("2026-");
+        assertThat(jdbc.queryForObject("SELECT text FROM memos WHERE user_id='user-001'", String.class))
+                .contains("小丽", "量血压");
+        assertThat(jdbc.queryForObject("SELECT repeat_rule FROM memos WHERE user_id='user-001'", String.class))
+                .isNull();
+        assertThat(careNotificationCount()).isEqualTo(1);
+    }
+
+    /**
+     * “每周提醒我妈量血压”少了周几：先问周几，再问几点，最后存成<b>重复</b>提醒。
+     *
+     * <p>不追问的两层错都在这一条里：一是静默落一条永远不到点的备忘，
+     * 二是就算补上钟点，重复规则也丢了——长辈以为是每周，其实只响一次。
+     */
+    @Test
+    void caregiverWeeklyReminderAsksForTheWeekdayAndKeepsTheRepeatRule() {
+        AgentTurnResponse start = service.start("user-001", "user-f001");
+        AgentTurnResponse askWeekday = service.chat(start.conversationId(), "提醒我妈每周量血压");
+
+        assertThat(askWeekday.reply()).as(askWeekday.reply()).contains("每周几");
+        assertThat(memoCount()).isZero();
+
+        AgentTurnResponse askClock = service.chat(start.conversationId(), "每周三");
+        assertThat(askClock.reply()).as(askClock.reply()).contains("几点");
+
+        AgentTurnResponse done = service.chat(start.conversationId(), "早上八点");
+
+        assertThat(done.reply()).as(done.reply()).contains("每周三");
+        assertThat(jdbc.queryForObject("SELECT repeat_rule FROM memos WHERE user_id='user-001'", String.class))
+                .isEqualTo("WEEKLY");
+        assertThat(jdbc.queryForObject("SELECT text FROM memos WHERE user_id='user-001'", String.class))
+                .contains("小丽", "量血压");
+        assertThat(careNotificationCount()).isEqualTo(1);
+    }
+
+    private int memoCount() {
+        return jdbc.queryForObject("SELECT COUNT(*) FROM memos WHERE user_id='user-001'", Integer.class);
+    }
+
+    /**
+     * 解析器认不出的说法（“提醒姥姥量血压”）：正文取的是原句，指令词也跟着留在里面。
+     *
+     * <p>于是长辈以前看到的是“「女儿 小丽」提醒：<b>提醒</b>姥姥量血压”，一句里两个“提醒”，
+     * 还带着“姥姥”这个称呼。摘称呼那一步顺手把指令词也摘了——这些都是“他在叫谁/在下什么指令”，
+     * 不是事项本身。
+     */
+    @Test
+    void caregiverPhraseTheParserCannotParseStillLosesItsCommandWord() {
+        AgentTurnResponse start = service.start("user-001", "user-f001");
+        AgentTurnResponse reply = service.chat(start.conversationId(), "提醒姥姥量血压");
+
+        assertThat(reply.reply()).as(reply.reply()).contains("已经给王阿姨留好提醒").contains("量血压");
+        assertThat(jdbc.queryForObject("SELECT text FROM memos WHERE user_id='user-001'", String.class))
+                .isEqualTo("「女儿 小丽」提醒：量血压");
+    }
+
+    private int careNotificationCount() {
+        return jdbc.queryForObject("SELECT COUNT(*) FROM care_notifications WHERE caregiver_id='user-f001'",
+                Integer.class);
     }
 
     /**
@@ -237,5 +398,33 @@ class CaregiverSessionTests {
         AgentTurnResponse caregiver = service.start("user-001", "user-f001");
         AgentTurnResponse timeline = service.act(caregiver.conversationId(), "QUERY_CARE_TIMELINE", "", "最近的复诊动态");
         assertThat(timeline.reply()).contains("王阿姨");
+    }
+
+    /**
+     * 同一次工具调用，成了和没成在家属那条时间线上是两件事。只按工具名取标签，
+     * 「复诊提醒没建成」会被显示成绿色的「已创建复诊提醒」——家属据此以为提醒已经建好了。
+     */
+    @Test
+    void timelineTellsAFailedToolCallApartFromASuccessfulOne() {
+        jdbc.update("INSERT INTO conversation_sessions(id,user_id,stage,state_json,updated_at) VALUES (?,?,?,?,?)",
+                "conv-elder-001", "user-001", "IDLE", "{}", Timestamp.valueOf(LocalDateTime.now()));
+        logTool("schedule.createReminder", true);
+        logTool("schedule.createReminder", false);
+
+        List<CareService.TimelineEvent> events = care.timeline("user-f001", "user-001");
+
+        assertThat(events).anyMatch(item ->
+                item.title().equals("已创建复诊提醒") && item.tone().equals("success"));
+        assertThat(events).anyMatch(item ->
+                item.title().equals("复诊提醒未创建") && item.tone().equals("danger"));
+        // 失败的那条不能再落进成功的说法里
+        assertThat(events.stream().filter(item -> item.title().contains("已创建复诊提醒"))).hasSize(1);
+    }
+
+    private void logTool(String name, boolean success) {
+        jdbc.update("""
+                INSERT INTO tool_call_logs(conversation_id,tool_name,request_json,response_json,success,created_at)
+                VALUES (?,?,?,?,?,?)
+                """, "conv-elder-001", name, "{}", "{}", success, Timestamp.valueOf(LocalDateTime.now()));
     }
 }

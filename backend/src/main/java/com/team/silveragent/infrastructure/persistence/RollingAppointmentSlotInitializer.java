@@ -1,6 +1,6 @@
 package com.team.silveragent.infrastructure.persistence;
 
-import com.team.silveragent.application.BusinessClock;
+import com.team.silveragent.application.time.BusinessClock;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -95,9 +95,11 @@ public class RollingAppointmentSlotInitializer implements ApplicationRunner {
     public static final int MAX_DOCTORS_PER_DEPARTMENT = 4;
 
     private final JdbcTemplate jdbc;
+    private final BusinessClock clock;
 
-    public RollingAppointmentSlotInitializer(JdbcTemplate jdbc) {
+    public RollingAppointmentSlotInitializer(JdbcTemplate jdbc, BusinessClock clock) {
         this.jdbc = jdbc;
+        this.clock = clock;
     }
 
     /**
@@ -247,19 +249,21 @@ public class RollingAppointmentSlotInitializer implements ApplicationRunner {
 
     /** 幂等：已经对得上的号源不会重复插入，场景重置可以直接再调一次。 */
     public void seed() {
+        // 已经对不上当前排班的旧号源整批清掉重建（周末一律不放也是这条规则的一部分），
+        // 有预约挂着的那几条除外——理由见 removeStaleGeneratedSlots 的注释。
         removeStaleGeneratedSlots();
 
         List<DepartmentSeed> departments = jdbc.query("""
-                SELECT d.id, d.hospital_id, h.name, d.name
+                SELECT d.id, d.hospital_id
                 FROM departments d
                 JOIN hospitals h ON h.id = d.hospital_id
                 WHERE d.enabled = TRUE AND h.enabled = TRUE
                 """, (rs, rowNum) -> new DepartmentSeed(
-                rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4)));
+                rs.getString(1), rs.getString(2)));
 
-        // 「今天」取业务时区（BusinessClock），不是 JVM 默认时区：播种窗口的起点必须和
-        // 查号链路的「今天」同一天，否则容器没配时区时会出现「今天还没播种」这种自相矛盾的状态。
-        LocalDate start = BusinessClock.demoToday();
+        // 号源从「业务时区的今天」开始铺。用服务器默认时区的话，UTC 容器里北京时间凌晨那八小时
+        // 铺出来的第一天是昨天，老人一进页面看到的「今天」根本没有号。
+        LocalDate start = clock.today();
         LocalDate end = start.plusMonths(1);
         for (DepartmentSeed department : departments) {
             Map<Integer, DoctorSeed> doctors = doctorsOf(department.id());
@@ -369,13 +373,13 @@ public class RollingAppointmentSlotInitializer implements ApplicationRunner {
         // 用「医院+科室+日期+时刻」判重的话，同一时段的第二位医生会被当成已存在而整批漏掉。
         jdbc.update("""
                 INSERT INTO appointment_slots
-                    (id, hospital_id, hospital_name, department, appointment_date, appointment_time,
-                     available, doctor_id, slot_type, department_id, fee_cents, capacity, booked)
-                SELECT ?, ?, ?, ?, ?, ?, TRUE, ?, ?, ?, ?, ?, 0
+                    (id, hospital, department, appointment_date, appointment_time,
+                     available, doctor_id, slot_type, fee_cents, capacity, booked)
+                SELECT ?, ?, ?, ?, ?, TRUE, ?, ?, ?, ?, 0
                 WHERE NOT EXISTS (SELECT 1 FROM appointment_slots WHERE id = ?)
                 """,
-                id, department.hospitalId(), department.hospitalName(), department.name(), date, time,
-                doctor.id(), doctor.slotType(), department.id(), feeCentsFor(doctor.slotType()),
+                id, department.hospitalId(), department.id(), date, time,
+                doctor.id(), doctor.slotType(), feeCentsFor(doctor.slotType()),
                 capacityFor(doctor.slotType()), id);
     }
 
@@ -389,7 +393,7 @@ public class RollingAppointmentSlotInitializer implements ApplicationRunner {
         return SLOT_TYPE_EXPERT.equals(slotType) ? EXPERT_CAPACITY : NORMAL_CAPACITY;
     }
 
-    private record DepartmentSeed(String id, String hospitalId, String hospitalName, String name) {
+    private record DepartmentSeed(String id, String hospitalId) {
     }
 
     private record DoctorSeed(String id, String name, String title, String slotType) {
