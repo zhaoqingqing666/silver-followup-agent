@@ -17,21 +17,80 @@ interface HomeViewProps {
 
 const DUE_WINDOW_MS = 6 * 60 * 60 * 1000; // 到点后 6 小时内仍提醒（不提前弹）
 
-/** 重复备忘“今天的到点”：每天=今天那一刻；每周=本周同星期几；每月=本月同号（本月没有这天则为 null）。 */
-function nextOccurrence(remindAt: string, repeatRule: HealthMemo['repeatRule'], now: Date): Date | null {
-  const at = new Date(remindAt);
-  if (!repeatRule) return at;
-  const hours = at.getHours();
-  const minutes = at.getMinutes();
-  if (repeatRule === 'DAILY') {
-    return new Date(now.getFullYear(), now.getMonth(), now.getDate(), hours, minutes);
+/**
+ * 重复备忘到点时的那个钟点。后端存的/传的是不带时区的墙上时间，
+ * `new Date(...)` 按本地时区解释，取出来的时分正好就是串里写的那个，不用另外换算。
+ */
+function clockOf(anchor: Date): { hours: number; minutes: number } {
+  return { hours: anchor.getHours(), minutes: anchor.getMinutes() };
+}
+
+/**
+ * 重复备忘在 now 之前**最近的那一次到点**；锚点本身还没到过就是 null。
+ *
+ * <p>只能从锚点**朝后**推，一步都不能往前推：
+ * <ul>
+ *   <li>往前推会凭空造出一次没发生过的到点。一条“每天早上八点”是下午记下的，后端把锚点
+ *       存成**明早**八点（见 MemoParser.remindAtOf），退回一天就是今天早上八点——那是这条
+ *       备忘还没被说出口的时刻，横幅会当场弹出来，可它明早才第一次到点。</li>
+ *   <li>不推、直接拿锚点当“最近一次”也不行：锚点只存**第一次**那个时间（见 MemoStore 类注释），
+ *       “每天八点”设在上周的话锚点早过去了，今天早上八点那次就永远算不出来，
+ *       到点后 6 小时内的提醒也就哑了。</li>
+ * </ul>
+ *
+ * <p>每月按“几号”找，和后端 MemoStore.nextOccurrence 同一套：绝不让它落到别的号上。
+ */
+function occurrenceOnOrBefore(anchor: Date, repeatRule: HealthMemo['repeatRule'], now: number): Date | null {
+  if (!repeatRule) return anchor.getTime() <= now ? anchor : null;
+  const { hours, minutes } = clockOf(anchor);
+  if (repeatRule === 'MONTHLY') {
+    const dayOfMonth = anchor.getDate();
+    const month = new Date(anchor.getFullYear(), anchor.getMonth(), 1);
+    let found: Date | null = null;
+    // 最多往后找 100 个月（八年多），防的是数据异常时死循环；正常一两次就找到
+    for (let step = 0; step < 100; step++) {
+      const candidate = new Date(month.getFullYear(), month.getMonth(), dayOfMonth, hours, minutes);
+      // 这个月没有这一号（比如 2 月 30 号）时 Date 会溢出到下个月，用 getDate() 认出来跳过
+      if (candidate.getDate() === dayOfMonth) {
+        // 月份是往后走的，第一个超了的之后都不可能再回到 now 以内
+        if (candidate.getTime() > now) break;
+        found = candidate;
+      }
+      month.setMonth(month.getMonth() + 1);
+    }
+    return found;
   }
-  if (repeatRule === 'WEEKLY') {
-    const delta = (at.getDay() - now.getDay() + 7) % 7;
-    return new Date(now.getFullYear(), now.getMonth(), now.getDate() + delta, hours, minutes);
+  const periodDays = repeatRule === 'WEEKLY' ? 7 : 1;
+  let found = new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate(), hours, minutes);
+  if (found.getTime() > now) return null;   // 锚点还没到过点，没有“最近一次”
+  for (let step = 0; step < 4000; step++) {
+    const next = new Date(found.getFullYear(), found.getMonth(), found.getDate() + periodDays, hours, minutes);
+    if (next.getTime() > now) break;
+    found = next;
   }
-  const monthly = new Date(now.getFullYear(), now.getMonth(), at.getDate(), hours, minutes);
-  return monthly.getDate() === at.getDate() ? monthly : null;
+  return found;
+}
+
+/** 重复备忘的下一次到点（严格晚于 now）；锚点本身还没到点就是锚点。 */
+function occurrenceAfter(anchor: Date, repeatRule: HealthMemo['repeatRule'], now: number): Date | null {
+  if (!repeatRule) return anchor.getTime() > now ? anchor : null;
+  const { hours, minutes } = clockOf(anchor);
+  if (repeatRule === 'MONTHLY') {
+    const dayOfMonth = anchor.getDate();
+    const month = new Date(anchor.getFullYear(), anchor.getMonth(), 1);
+    for (let step = 0; step < 1200; step++) {
+      const candidate = new Date(month.getFullYear(), month.getMonth(), dayOfMonth, hours, minutes);
+      if (candidate.getDate() === dayOfMonth && candidate.getTime() > now) return candidate;
+      month.setMonth(month.getMonth() + 1);
+    }
+    return null;
+  }
+  const periodDays = repeatRule === 'WEEKLY' ? 7 : 1;
+  const day = new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate(), hours, minutes);
+  for (let step = 0; step < 4000 && day.getTime() <= now; step++) {
+    day.setDate(day.getDate() + periodDays);
+  }
+  return day.getTime() > now ? day : null;
 }
 
 /**
@@ -40,24 +99,16 @@ function nextOccurrence(remindAt: string, repeatRule: HealthMemo['repeatRule'], 
  * <p>不能直接拿 remindAt 比大小——重复备忘存的是第一次说的那个时间（锚点），
  * 比如“每天八点”是上周设的，锚点早就过去了，可它下一次其实是明天早上。
  *
- * <p>还没到点的，用那个时刻；已经到点但还在提醒窗口内的，也算（到点横幅正在提醒的
- * 就是这一条，一条提醒不该在首页出现两种说法）；过窗口太久的，重复的往后推一个周期，
- * 一次性的没有下回了，排到最后——它该在提醒页里躺着，不该占着首页。
+ * <p>还没到点的，用下一次到点；已经到点但还在提醒窗口内的，就算那一次（到点横幅
+ * 正在提醒的就是这一条，一条提醒不该在首页出现两种说法）；过窗口太久的，重复的
+ * 往后推，一次性的没有下回了，排到最后——它该在提醒页里躺着，不该占着首页。
  */
-function nearestDueAt(memo: HealthMemo, now: Date): number {
-  const occurrence = nextOccurrence(memo.remindAt as string, memo.repeatRule, now);
-  if (!occurrence) return Number.MAX_SAFE_INTEGER; // 本月没有这一号（例如每月31号）
-  const at = occurrence.getTime();
-  if (at - now.getTime() > -DUE_WINDOW_MS) return at; // 将来到点，或刚过点还能提醒
-  if (!memo.repeatRule) return Number.MAX_SAFE_INTEGER; // 一次性且早过期
-  const advanced = new Date(at);
-  // 最多推 24 个周期（每月一次 = 两年）就够；防的是数据异常时死循环
-  for (let step = 0; step < 24 && advanced.getTime() <= now.getTime(); step++) {
-    if (memo.repeatRule === 'DAILY') advanced.setDate(advanced.getDate() + 1);
-    else if (memo.repeatRule === 'WEEKLY') advanced.setDate(advanced.getDate() + 7);
-    else advanced.setMonth(advanced.getMonth() + 1);
-  }
-  return advanced.getTime();
+function nearestDueAt(memo: HealthMemo, now: number): number {
+  const anchor = new Date(memo.remindAt as string);
+  const current = occurrenceOnOrBefore(anchor, memo.repeatRule, now);
+  if (current && now - current.getTime() <= DUE_WINDOW_MS) return current.getTime();
+  const next = occurrenceAfter(anchor, memo.repeatRule, now);
+  return next ? next.getTime() : Number.MAX_SAFE_INTEGER;
 }
 
 /**
@@ -139,23 +190,19 @@ export function HomeView({ onNavigate, onOpenTravel, onOpenPage }: HomeViewProps
 
   // 拿回来的本来就是“有提醒的”那一类
   const timed = memos;
-  const current = new Date(now);
   // 首页只摆一条：最接近到点的那条，其余的点“全部提醒”进去看
   const nearest = timed.length === 0 ? null
-    : [...timed].sort((left, right) => nearestDueAt(left, current) - nearestDueAt(right, current))[0];
+    : [...timed].sort((left, right) => nearestDueAt(left, now) - nearestDueAt(right, now))[0];
 
   // 到点横幅：只提醒已经到点的（不提前弹），到点后 6 小时内仍提醒，取最早一条。
-  // 每天/每周/每月的重复备忘按“今天的到点”算，所以到点了每天都还会弹出来。
+  // 每天/每周/每月的重复备忘按“这一轮已经到过的那个点”算，所以到点了每天都还会弹出来。
   const banner = dismissedKeys === null ? null : (() => {
     const due = memos
       .filter(memo => memo.remindAt)
-      .map(memo => ({ memo, occurrence: nextOccurrence(memo.remindAt as string, memo.repeatRule, current) }))
-      .filter((item): item is { memo: HealthMemo; occurrence: Date } => item.occurrence != null)
-      .map(item => ({ memo: item.memo, at: item.occurrence.getTime() }))
-      .filter(item => {
-        const diff = item.at - now;
-        return diff <= 0 && diff > -DUE_WINDOW_MS;
-      })
+      .map(memo => ({ memo, at: occurrenceOnOrBefore(new Date(memo.remindAt as string), memo.repeatRule, now) }))
+      .filter((item): item is { memo: HealthMemo; at: Date } => item.at != null)
+      .map(item => ({ memo: item.memo, at: item.at.getTime() }))
+      .filter(item => now - item.at <= DUE_WINDOW_MS)
       .filter(item => !dismissedKeys.has(dismissKey(item.memo.id, item.at)))
       .sort((left, right) => left.at - right.at)[0];
     return due ?? null;

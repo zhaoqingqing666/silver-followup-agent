@@ -26,6 +26,14 @@ v0.2 已落地的增量能力：会话身份拆成“数据轴（服务谁）”
 
 2026-09-12 的增量是**纯结构**、不含新能力：`application/` 下 30 个类原来平铺在一个包里，现按业务域分成 `care/ health/ memo/ longterm/ preference/ travel/ demo/` 七个子包，编排簇因包级私有字段仍留在根包。对外接口、字段与行为一律未变（317 项测试、前端零改动）。真实布局见第八节 8.1。
 
+2026-09-13 的增量是**工具契约强类型化 + 通用澄清能力**（先接预约取消一条链路）：工具的参数声明从「一串参数名」升级成带类型/必填/枚举/字段组合约束的强类型声明，判罚集中在 `ToolContract` 一处，工具结果分成七种情形（成功 / 无结果 / 缺少信息 / 需要澄清 / 需要确认 / 状态变化 / 失败）；新增 `interaction.askClarification`——**模型自己措辞问一句，候选只能是 Java 从数据库查出来的真行**，这一轮不建卡、不发凭据、不执行任何事（澄清是独立于确认的第三条通道，见 7.5 节）。同时堵住一个洞：模型给出合法工具调用时，Java 不再用原句里的关键词覆盖它的意图。只读工具数不变（17 个），后端自动测试 389 项，0 失败 0 错误。决定见 DEC-020 / DEC-021。
+
+2026-09-13 的第二段增量是**确认与执行的架构整理**（8.3 的第一步，分 4A / 4B 两小步做）：抽出 `ConfirmationService`（凭据的签发/校验/消费/废止/出站对账）与 `CancellationExecutor`（取消族的执行），`respondConfirmation` 的参数校验改由 `ToolContract` 一处判罚、且**查完只回绝不回退**，`AgentRuntime.Outcome.acceptedToolCall()` 改名为 `hasContractCheckedToolCall()`。`confirmationId`、范围修订、批量原子取消、归属校验、重复确认防重**五条行为保持不变**；第六件事——**会话恢复**——被评审改掉了：原先一次批量取消重启后只剩一条目标，现在"一份授权＝凭据＋动作类型＋完整目标集合"三样一起进快照，恢复出来的目标集合与签发时逐条相同；**还原不出完整目标集合的旧快照整份作废、请老人重新确认，绝不按剩下的一部分执行**。动作类型也改成签发时定死，认不出来一律 fail closed（不设默认值）。授权一致性的收尾（评审第二轮）：**补发只在类型与目标集合逐项相同时复用原 `confirmationId`**，任何一处不同都换一把新的、旧的连同它的范围一起作废；`issue`/`ensureIssued` 的 `kind` 与 `targetIds` 都不许传 `null`（`null` 在这套字段里已定死是"旧快照缺字段"，不能再拿来当"没有目标"，空目标必须显式传 `List.of()`）。后端全量 438 项，0 失败 0 错误（新增 `ConfirmationServiceTests` 28 项、`CancellationExecutorTests` 8 项、`ConversationRecoveryTests` 2 项——后者走真实库验证恢复与旧快照失效，`CancelScopeTests` 与 `AgentRuntimeRoutingTests` 各补端到端回归；收尾那一轮按评审要求只跑了确认卡相关的五个类 61 项）。决定与那次评审修订见 DEC-022。
+
+2026-09-13 的第二段收尾（**4B**）把「确认通过之后」剩下的三类业务执行从 `FollowupAgentService.confirm()` 里搬了出去：`ConfirmationDispatcher` 统一持有五个执行器并按**签发时冻结的 `PendingOperation.Kind`** 分派，`BookingExecutor` / `MemoExecutor` / `ManagedCancelExecutor` / `CaregiverBookingExecutor` 各管一种业务写操作（`CANCEL_APPOINTMENTS` 仍归 4A 的 `CancellationExecutor`），执行器回调编排层的那二十几个收尾动作走包级私有的抽象类 `ConfirmationSupport`（**抽象类而非接口**：接口方法隐式 public，会把包级私有的方法顺带顶成对外 API；support 按方法参数传给分派器而不进构造器，否则 Support 的实现就是 `FollowupAgentService` 本人，Spring 直接循环依赖）。`confirm()` 至此只做统一确认流程，**不再按 `pendingAction`、`appointmentId` 或其他可变会话字段重推授权类型与目标范围**；四个 `Kind` 各有归口、任意 `Kind` 都不会误落到 `BOOKING` 那条路上。执行器**不复制数据库安全校验**（归属、当前状态、事务原子性仍由现有业务工具负责），每个只处理一种写操作，没有「大而全执行器」。用户可见行为逐项保持：预约确认时仍重新检查号源与时段、原有提醒/材料/出发建议/家属通知不变、备忘的确认与拒绝不变、代约取消的归属校验与通知不变、`confirmationId` 仍只能消费一次、旧凭据与类型不可信的恢复状态继续 fail closed。后端全量 **462 项，0 失败 0 错误**（新增 `ConfirmationDispatcherTests` 10 项、`ConfirmationDispatchFlowTests` 6 项、`ManagedCancelExecutorTests` 4 项；专项先跑 160 项全绿）。决定见 DEC-023。
+
+2026-09-13 的 **4B 修复轮**解决的是 4B 首轮评审驳回的同一类缝——**授权冻住了，执行却在出口按可变状态或"再查一遍当前对象"重新决定动谁**，即"老人对着卡上的 A 点头、执行的是 B"。四处收口：① `PendingOperation.Kind` 从**四个拆成六个**（本人自办与代他人办理各成一类：`BOOKING` / `BOOKING_CAREGIVER` / `CANCEL_APPOINTMENTS` / `CANCEL_APPOINTMENTS_CAREGIVER` / `CANCEL_MANAGED` / `MEMO`），`ConfirmationDispatcher` 的路由判据**只剩 `Kind` 一个**，`caregiving()` 在分派里不再出现；② 目标条数在**签发与执行两侧成对**校验——`CANCEL_MANAGED` 与 `CANCEL_APPOINTMENTS_CAREGIVER` 必须**恰好一条**，执行侧 `singleTarget()` 在不为一条时返回 `null` 并立即收场，**不静默取第一条**；③ 要取消的对象在签发时冻进 `targetIds`（`confirmManagedCancelCard` 写入查到的 `plan.appointmentId()`），执行时不再现找"当前预约"，按 id 的查询降级为**只取展示与通知字段**，归属/存在性/可否取消仍由权威业务层（`appointmentTool.cancel` 的 `id + user_id + status='CONFIRMED'`）判，原目标失效就什么都不取消、回一句"原预约保留"；照护端新增按明确 id 的事务入口 `CareBookingService.cancelAppointment(caregiverId, elderUserId, appointmentId)`（继续校验照护关系与预约归属、保留原有协同通知，`cancelUpcoming` 因为照护端的"取消当前预约"入口仍在用而保留）；④ 授权三样之外，**这一类动作执行时要用的草稿也随凭据一起存、一起回**——`ConversationStore.Snapshot` 增加 `pendingMemoText / pendingMemoAt / pendingMemoRepeat / pendingMemoDay / memoReturnStage / memoNeedsApproval` 六个字段，`payloadIntact` 在**读回凭据与签发凭据**两处都做判断，**旧快照缺草稿时整份作废、请他重说，绝不写一条残缺的备忘**。另外堵住 `MemoExecutor.write` 的异常出口：写库异常收进统一 `toolError`，不再穿过 `confirm()` 变成 HTTP 500；失败后凭据**已消费**、不会重复写库，页面也不会再留一张实际已作废的确认卡。用户可见行为逐项保持不变（预约确认仍重查号源、提醒/材料/出发建议/家属通知不变、备忘确认与拒绝不变、本人取消仍是整批原子、`confirmationId` 仍只能消费一次、公开接口与 `AgentTurnResponse` 字段零改动）。后端全量 **477 项，0 失败 0 错误**（新增 `MemoConfirmationRecoveryTests` 2 项——走真实库验快照恢复与旧快照失效、`MemoToolFailureTests` 2 项——走 HTTP 验失败收场；`ConfirmationDispatchFlowTests` 6 → 11 项、`ManagedCancelExecutorTests` 4 → 7 项、`ConfirmationDispatcherTests` 10 → 11 项、`ConfirmationServiceTests` 28 → 30 项；上述八类再加 `CancelScopeTests` 6 项，专项 79 项全绿）。决定见 DEC-024。
+
 ## 一 大模型和智能体不是同一个东西
 
 ### 1.1 大模型是什么
@@ -116,6 +124,25 @@ sequenceDiagram
 ```
 
 模型看到的不是 Java 源代码，而是这种稳定的工具契约。
+
+**（2026-09-13 更新）上面是示意形态，本仓库落地的声明是强类型的、由一处声明出来：**每个参数带 `name / type / required / values / description`（类型有 `string / date / time / enum / boolean`），另加「哪几个字段要一起给」的组合约束。真正的样子：
+
+```json
+{
+  "name": "interaction.requestConfirmation",
+  "description": "…",
+  "risk": "CONFIRMATION_ONLY",
+  "arguments": [
+    { "name": "scope", "type": "enum", "required": true, "values": ["ALL", "DATE_RANGE", "SINGLE_FILTER", "AMBIGUOUS"] },
+    { "name": "date", "type": "date", "required": false }
+  ],
+  "constraints": [
+    { "kind": "REQUIRES_ALL", "field": "scope", "fieldValues": ["DATE_RANGE"], "fields": ["date", "direction"] }
+  ]
+}
+```
+
+要点有三：**声明在 `ToolRegistry` 一处**（模型看到的说明就是这份声明的投影，不存在「文档说有、代码里没有」的漂移）；**判罚在 `ToolContract` 一处**（五种判罚：工具不存在、缺必填、格式不对、取值不在枚举、字段组合不满足）；**通过后参数被规范化**（只保留声明过的字段、空串算没给、枚举转大写、宽松日期时段写法收下后统一）。**不声明就等于模型看不见**——`interaction.requestConfirmation` 因此刻意不声明 `appointmentId`，避免模型指定取消哪一条、绕开 Java 的候选匹配。完整决定见 DEC-020。
 
 ### 2.3 模型输出的工具调用是什么
 
@@ -489,6 +516,7 @@ PROPOSE_WORKFLOW_ACTION  提议修改草稿或进入需要确认的业务动作
 | --- | --- | --- | --- |
 | L0 | 普通交流 | 可以直接生成建议回复 | 检查长度、医疗边界和敏感承诺 |
 | L1 | 只读查询 | 可以自主提出工具调用 | 校验工具、参数、状态、次数后自动执行 |
+| L1.5 | 澄清追问 | 可以提出「这件事该怎么办」并自己措辞 | Java 摆出**数据库里的真实候选**，不建卡、不发凭据、不执行任何事 |
 | L2 | 办理草稿修改 | 可以提出修改医院、日期、偏好等语义动作 | Java更新状态并清除受影响的派生结果 |
 | L3 | 有副作用的业务动作 | 只能提出意图，不能直接执行 | Java生成计划和确认卡，确认后执行 |
 | L4 | 禁止能力 | 不允许提出或执行 | Java拒绝并给出安全说明或人工帮助 |
@@ -506,6 +534,7 @@ PROPOSE_WORKFLOW_ACTION  提议修改草稿或进入需要确认的业务动作
 | 检查日程冲突 | 中 | 是 | 校验当前选定时段后执行 | 否 |
 | 计算出发建议 | 低 | 是 | 使用真实模拟地址和时段执行 | 否 |
 | 修改未提交草稿 | 中 | 是 | 由状态机应用并使旧结果失效 | 通常否 |
+| 摆出真实候选请老人选（澄清） | 低 | 是，候选只能是 Java 查出来的真行 | 只摆候选与提问，不执行、不发凭据 | 否（澄清本身不是执行授权） |
 | 提交预约 | 高 | 只能提出 | 不自动执行 | 是 |
 | 修改或取消已确认预约 | 高 | 只能提出 | 不自动执行 | 是 |
 | 创建日程和出发提醒 | 高 | 只能提出 | 不自动执行 | 是 |
@@ -527,17 +556,26 @@ PROPOSE_WORKFLOW_ACTION  提议修改草稿或进入需要确认的业务动作
 
 `ToolRegistry` 按当前会话的操作者身份（`AgentRole`）过滤模型可见的工具清单：老人本人看不到只给照护者用的 `care.timeline` 和 `care.notifications`，家属/志愿者则两条都能看见。过滤只影响模型“想得到什么”，不构成安全边界——模型仍可能吐出一个它看不见的工具名，所以 `ToolPolicy` 在执行前会按角色再判一次，两道都通过才执行。身份与角色的完整说明见第十四节。
 
+### 7.5 为什么澄清必须是一条独立的通道
+
+「这件事我判断不了，先问老人一句，并把真实候选摆出来让他点」最省事的实现是复用确认卡：同一张卡、同一个 `confirmationId`、同一个「确认办理」按钮。**这条路必须堵死**，否则「模型问了一句话」就变成了「一次执行授权」——老人点的是他以为的「选这条」，实际按下去的是「就这样办」。
+
+因此 `ToolPolicy` 把风险判成**三条互不相通的通道**：只读走 `evaluate`（`READ_ONLY`）、确认走 `evaluateConfirmation`（`CONFIRMATION_ONLY`）、澄清走 `evaluateClarification`（`CLARIFICATION_ONLY`）。澄清工具的风险等级是 `CLARIFICATION_ONLY`，只有 `evaluateClarification` 认它——**它不是「走了发凭据那条路但被拦住」，而是那条路上压根没有它的分支**。
+
+随之而来的是三条可见的后果，都在链路上钉住了：澄清轮**不发 `confirmationId`、不建卡、不进 `AWAITING_CONFIRMATION`**；候选**只能来自数据库**（最多 4 条真行，模型编不出来）；澄清完老人直接说「确认」也**不构成授权**（凭据仍是空的，那句话只能被判成「确认已失效」）。模型可以写那句问话，但要过结构门（≤80 字、不含数字、不含完成态字样、得是问句），过不了就用 Java 固定的那句。`candidateTool` 是个**枚举**而不是自由填写的工具名——要接第二条链路，得先把枚举扩上。完整决定见 DEC-021。
+
 ## 八 Java 中控结构：现状与拆分方向
 
-### 8.1 当前实际结构（2026-09-12）
+### 8.1 当前实际结构（2026-09-13）
 
-`application/` 共 9408 行、30 个类：
+`application/` 共 11720 行、43 个类：
 
 ```text
 application/
-├─ （根包）编排、门禁、状态、进度 —— 15 个类
-│  ├─ FollowupAgentService.java    4883 行 —— 补问、选时段、查冲突、准备确认、
-│  │                               执行与结果组合全在这一个类里，占本层 52%
+├─ （根包）编排、门禁、状态、进度、确认与执行 —— 27 个类（下列 24 个）
+│  ├─ FollowupAgentService.java    5173 行 —— 补问、选时段、查冲突、
+│  │                               结果组合全在这一个类里，占本层 44%
+│  │                               （确认后的三类业务执行已搬出，见下）
 │  ├─ AgentRuntime.java            模型调用与同轮只读工具循环
 │  ├─ AgentOrchestrator.java       意图到路线
 │  ├─ AgentTurn 相关的状态与存储：
@@ -552,6 +590,29 @@ application/
 │  ├─ CatalogEntityResolver.java   医院/科室口语名归一
 │  ├─ DialogueService.java         对话状态与任务状态的分离
 │  ├─ ReplyContextBuilder.java     组装权威回答上下文
+│  ├─ ConfirmationService.java     417 行 —— 确认凭据的唯一出处：签发/校验/消费/
+│  │                               废止/出站对账。一份授权＝凭据＋动作类型＋完整目标
+│  │                               集合，三样一起进 ConversationState 与快照、一起清；
+│  │                               补发只在类型与目标集合逐项相同时复用原凭据，否则换新的。
+│  │                               另有两道护栏：目标条数按 Kind 穷举三分（恰好一条 /
+│  │                               至少一条 / 不许有），执行所需的草稿缺失时整份不可信
+│  │                               （`PendingOperation` 是它的嵌套 record，见 DEC-022/024）
+│  ├─ ConfirmationDispatcher.java  142 行 —— 「确认通过之后轮到谁」：只认签发时
+│  │                               冻结的 PendingOperation.Kind，六个取值各有执行器；
+│  │                               `caregiving()` 在这里不再出现，文件里一行
+│  │                               业务写操作都没有（见 DEC-023/024）
+│  ├─ CancellationExecutor.java    94 行 —— 取消族的执行：整批交给那条事务、
+│  │                               收拾会话手里的预约号、决定停在哪一页
+│  ├─ BookingExecutor.java         129 行 —— 开新预约 + 拒绝
+│  ├─ MemoExecutor.java            96 行 —— 备忘的确认 / 拒绝 / 不经卡的直写；
+│  │                               写库异常收进统一 toolError，绝不穿成 HTTP 500
+│  ├─ ManagedCancelExecutor.java   98 行 —— 代约取消 + 通知安排者：只动凭据里
+│  │                               冻结的那一条，查不到就什么都不取消、绝不顶替
+│  ├─ CaregiverBookingExecutor.java 137 行 —— 代他人办理的开单与取消（取消走
+│  │                               CareBookingService 按明确 appointmentId 的事务入口）
+│  ├─ ConfirmationSupport.java     105 行 —— 包级私有抽象类：执行器回调编排层
+│  │                               的那二十几个收尾动作。抽象类而非接口，是为了
+│  │                               不把包级私有的方法顶成 public（见 DEC-023）
 │  └─ AppointmentRecordStore.java  模拟预约记录读写
 ├─ care/         CareService、CareBookingService、CareCatalogRepository
 ├─ demo/         DemoScenario、DemoScenarioService
@@ -566,7 +627,8 @@ application/
 要点两条：
 
 - **编排簇刻意留在根包。** `ConversationState` 的字段与嵌套枚举、以及 `ToolPolicy`/`AgentRuntime`/`SafetyGuard`/`ActionValidator` 等 11 个类都是**包级私有**，彼此互相引用。把它们拆进不同子包就得逐个提成 `public`——那是放宽封装，不是整理结构。所以「拆到哪一层」是从可见性算出来的，不是按目录好看定的。
-- **`FollowupAgentService` 4883 行的问题没有解决。** 分包只把它的邻居归了位，它自己一行没动。这是下一步要做的事（见 8.3）。
+- **`FollowupAgentService` 还有 5185 行，问题没有解决。** 分包只把它的邻居归了位。2026-09-13 的第四阶段走了两步，都是按 8.3 的方向、都只抽**边界**不抽体积：4A 抽出**确认凭据**（`ConfirmationService`，417 行）与**取消族的执行**（`CancellationExecutor`，94 行）；4B 再抽出**其余三类执行的归口**——`ConfirmationDispatcher` 分派、`BookingExecutor` / `MemoExecutor` / `ManagedCancelExecutor` / `CaregiverBookingExecutor` 各管一种业务写操作，以及给它们回调编排层用的端口 `ConfirmationSupport`。八个新类全是包级私有的根包邻居（可见性理由同上）。当天随后的**修复轮**只改了这些类的内部判据与四个签发点，没有再挪边界，所以行数基本不变、`FollowupAgentService` 从 5173 微涨到 5185。
+- **4B 之后 `confirm()` 只剩统一确认流程**：校验会话与 `confirmationId` → 取签发时冻结的 `PendingOperation` → 处理拒绝 → 单次消费凭据 → 按 `Kind` 分派 → 汇总结果与出站对账。它不再按 `pendingAction`、`appointmentId` 这类可变字段重推「这一次执行什么」——**授权在签发时就冻住了，执行依据只能是那一份**。行数从 5327 只降到 5185（本层占比 47% → 44%），**这一步降的是耦合，不是体积**。
 
 取舍理由见 `04-architecture-and-modules.md`「当前实际分包」与 DEC-018。
 
@@ -598,13 +660,13 @@ application/
    └─ ResponseComposer.java        模型回答和模板回退
 ```
 
-**这棵树里的 `AgentTurnCoordinator`、`FollowupWorkflow`、`MissingFieldChecker`、`PlanService`、`ConfirmationService`、`ToolExecutor`、`ToolResult`、`ResponseComposer` 八个类都不存在**，其余几个类也确实不在这些包下（例如 `AgentRuntime` 和 `ToolPolicy` 都在根包）。不要把它当成现状。
+**这棵树里的 `AgentTurnCoordinator`、`FollowupWorkflow`、`MissingFieldChecker`、`PlanService`、`ToolExecutor`、`ToolResult`、`ResponseComposer` 七个类都不存在**（`ConfirmationService` 在 2026-09-13 建了，但落在**根包**、不在 `workflow/` 下——理由同上），其余几个类也确实不在这些包下（例如 `AgentRuntime` 和 `ToolPolicy` 都在根包）。不要把它当成现状。
 
 上面那个 `runtime/ policy/ workflow/ tool/` 的方案后来没被采纳：这一层只有 30 个类、业务也单一，按技术分层会把同一件事的代码拆到三四个包里，改一处要跨包跳。实际改成了按**业务域**分（`care/ health/ memo/ longterm/ preference/ travel/ demo/`），理由见 DEC-018。
 
 ### 8.3 下一步：把 `FollowupAgentService` 按业务拆开
 
-真正要拆的是那个 4883 行的类，不是目录。方向与 8.2 的技术分层不同——按**业务**拆开：预约办理、材料、备忘、健康、出行各成一块。这件事**还没做**，原因是拆分边界取决于前端需要什么形状的接口，而前端那波改造还没定形；现在切容易划错。
+真正要拆的是那个 5173 行的类，不是目录。方向与 8.2 的技术分层不同——按**业务**拆开：预约办理、材料、备忘、健康、出行各成一块。**这件事只做了一部分**：确认之后的三类业务执行（预约 / 备忘 / 代约取消）已于 4B 搬进各自的执行器，其余分支仍在原类里。剩下的部分之所以还没做，是因为拆分边界取决于前端需要什么形状的接口，而前端那波改造还没定形；现在切容易划错。
 
 下表描述的是**拆分完成后**各模块应有的职责分工，不是现状：
 
@@ -614,7 +676,11 @@ application/
 | `AgentRuntime` | 模型调用、工具循环、次数和超时 | 不直接写 H2 业务逻辑 |
 | `ToolPolicy` | 根据工具风险和阶段允许或拒绝 | 不生成自然语言回复 |
 | `FollowupWorkflow`（待建） | 状态转移、依赖失效、异常恢复 | 不选择模型厂商 |
-| `ConfirmationService`（待建） | 生成、绑定、消费和废止确认凭据 | 不根据一句模糊语言直接执行 |
+| `ConfirmationService`（**2026-09-13 已建**，在根包） | 生成、绑定、消费和废止确认凭据，连同这次授权执行哪一类动作、对哪几条对象、以及**这一类动作执行时要用到的草稿**；签发的卡必须带上执行所需的一切（缺草稿就当场拒绝签发，读回来的旧快照缺草稿就整份作废） | 不根据一句模糊语言直接执行；也不执行业务动作（那是执行器的事），也不决定「执行不了时改说什么」；**不在确认时重新推导授权范围**——授权在签发时就冻住了；**不拿另一个谓词的反面兜底判目标条数**（三类动作按「要不要求目标」穷举，见 DEC-024） |
+| `CancellationExecutor`（2026-09-13 已建） | 把确认下来的那批目标**原样**交给预约工具那条事务，收拾会话手里已经消失的预约号，决定停在哪一页 | **不重做归属校验、不自己保证批量原子性**——那条 SQL 自带 `user_id` 与 `status='CONFIRMED'` 且跑在一个事务里，见 DEC-022 |
+| `ConfirmationDispatcher`（2026-09-13 4B 已建） | 按签发时冻结的 `PendingOperation.Kind` 决定这一次轮到哪个执行器（**六个取值，路由判据只有它一个**）；保留原本的分发次序（备忘与代约取消连「拒绝」一起接管，预约那条的过期时段检查排在写库之前） | **一行业务写操作都没有**，也不拼业务话术（取消那两条的措辞留在编排层）；**不按 `pendingAction`、`caregiving()` 等可变字段重推授权类型** |
+| `BookingExecutor` / `MemoExecutor` / `ManagedCancelExecutor` / `CaregiverBookingExecutor`（2026-09-13 4B 已建） | 各管**一种**业务写操作：开新预约、备忘、代约取消、代他人办理的开单与取消；组织调用、收尾会话。要取消/要写的是**凭据里冻结的那一条**，不是「现在查到的那一条」；代约取消与照护端取消都要求恰好一条目标，不为一条时立刻收场 | 每个只处理一种写操作，**不建大而全执行器**；**不复制数据库安全校验**（归属、当前状态、事务原子性仍由现有业务工具负责）；不决定「确认能不能通过」——那是 `ConfirmationService` 的事；**不静默取目标集合的第一条**（`singleTarget()` 在不为一条时返回 `null`）；**异常不许穿出确认流程**（写库失败收进统一 `toolError`） |
+| `ConfirmationSupport`（2026-09-13 4B 已建） | 执行器回调编排层的那二十几个收尾动作的声明（回计划、推进阶段、记工具失败、翻工具错误出口……） | **是包级私有抽象类而不是接口**——接口方法隐式 public，会让这些方法顺带变成对外 API；**按方法参数传给分派器、不进构造器**，否则 Support 的实现就是 `FollowupAgentService` 本人，Spring 直接循环依赖（见 DEC-023）；**不含 `arrangedPlan`**——「再查一遍当前那份代约安排」正是修复轮要拆掉的写法 |
 | `ToolRegistry` | 提供工具名、说明、schema 和风险级别 | 不执行工具 |
 | `ToolExecutor`（待建） | 调用真实 Java 工具、统一记录结果 | 不自行决定下一业务目标 |
 | `ResponseComposer`（待建） | 根据权威事实生成适老化回答 | 不改变工具结果和成功状态 |

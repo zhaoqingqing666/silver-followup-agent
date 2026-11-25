@@ -11,6 +11,17 @@ ALTER TABLE users DROP CONSTRAINT IF EXISTS fk_users_family_member;
 ALTER TABLE users DROP COLUMN IF EXISTS family_member;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS phone VARCHAR(32);
 
+-- 健康档案：过敏史、既往病史、身高、体重（当前值），以及"最近是谁填的、什么时候"。
+-- 用 ADD COLUMN IF NOT EXISTS 追加，已有的库重启就自动加上，不用清数据。
+-- 身高体重存的是**当前值**（由人填），每一次测量的历史在 health_records 里；两者可能不一致，
+-- 家属端那一页会把"最近一次记录"一起显示出来（见 HealthProfileStore 的说明）。
+ALTER TABLE users ADD COLUMN IF NOT EXISTS allergies VARCHAR(300);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS medical_history VARCHAR(500);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS height_cm INT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS weight_kg DOUBLE PRECISION;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS health_profile_updated_by VARCHAR(40);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS health_profile_updated_at TIMESTAMP;
+
 CREATE TABLE IF NOT EXISTS hospitals (
   id VARCHAR(40) PRIMARY KEY,
   name VARCHAR(100) NOT NULL,
@@ -59,6 +70,22 @@ CREATE TABLE IF NOT EXISTS clinics (
   verified_at TIMESTAMP NOT NULL,
   enabled BOOLEAN DEFAULT TRUE NOT NULL
 );
+
+-- appointments 必须先于 appointment_slots 的旧库清理语句建出来：
+-- 那条 DELETE 要判断「这条号源还有没有预约在用」，会引用本表。
+CREATE TABLE IF NOT EXISTS appointments (
+  id VARCHAR(50) PRIMARY KEY,
+  slot_id VARCHAR(40) NOT NULL,
+  user_id VARCHAR(40) NOT NULL,
+  status VARCHAR(30) NOT NULL,
+  created_at TIMESTAMP NOT NULL
+);
+
+ALTER TABLE appointments ADD COLUMN IF NOT EXISTS departure_time TIMESTAMP;
+ALTER TABLE appointments ADD COLUMN IF NOT EXISTS transport VARCHAR(40);
+ALTER TABLE appointments ADD COLUMN IF NOT EXISTS reminder_status VARCHAR(100);
+ALTER TABLE appointments ADD COLUMN IF NOT EXISTS family_status VARCHAR(100);
+ALTER TABLE appointments ADD COLUMN IF NOT EXISTS materials CLOB;
 
 -- 医院和科室改为外键引用：这张表只留编号，名称不再冗余在这里。
 -- 名称的唯一来源是 hospitals/departments，改一次名不会留下对不上的旧副本；
@@ -129,39 +156,63 @@ CREATE TABLE IF NOT EXISTS family_contacts (
   contact VARCHAR(40) NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS appointments (
-  id VARCHAR(50) PRIMARY KEY,
-  slot_id VARCHAR(40) NOT NULL,
-  user_id VARCHAR(40) NOT NULL,
-  status VARCHAR(30) NOT NULL,
-  created_at TIMESTAMP NOT NULL
-);
-
-ALTER TABLE appointments ADD COLUMN IF NOT EXISTS departure_time TIMESTAMP;
-ALTER TABLE appointments ADD COLUMN IF NOT EXISTS transport VARCHAR(40);
-ALTER TABLE appointments ADD COLUMN IF NOT EXISTS reminder_status VARCHAR(100);
-ALTER TABLE appointments ADD COLUMN IF NOT EXISTS family_status VARCHAR(100);
-ALTER TABLE appointments ADD COLUMN IF NOT EXISTS materials CLOB;
-
+-- 材料模板：department_id 为空 = 所有科室通用；否则只对那一个科室生效。
+-- 旧库的 department 列存的是中文科室名（"通用"也混在里面），这里沿用「临时兼容列」写法折算成编号，
+-- 折算不到的旧模板会刻意留下一个不存在的编号，让下面的外键在启动时报错——宁可启动失败，
+-- 也不能把一条只该给某个科室的模板悄悄改成通用模板。
 CREATE TABLE IF NOT EXISTS material_templates (
   id VARCHAR(50) PRIMARY KEY,
-  department VARCHAR(60) NOT NULL,
+  department_id VARCHAR(40),
   material_name VARCHAR(120) NOT NULL,
   required BOOLEAN NOT NULL,
   sort_order INT NOT NULL
 );
 
+ALTER TABLE material_templates ADD COLUMN IF NOT EXISTS department_id VARCHAR(40);
+ALTER TABLE material_templates ADD COLUMN IF NOT EXISTS department VARCHAR(60);
+UPDATE material_templates t SET department_id=(
+  SELECT MIN(d.id) FROM departments d WHERE d.name=t.department
+) WHERE t.department_id IS NULL AND t.department IS NOT NULL AND t.department<>'通用';
+UPDATE material_templates SET department_id='__unmapped_department__'
+WHERE department_id IS NULL AND department IS NOT NULL AND department<>'通用';
+ALTER TABLE material_templates DROP COLUMN IF EXISTS department;
+ALTER TABLE material_templates ADD CONSTRAINT IF NOT EXISTS fk_material_templates_department
+  FOREIGN KEY (department_id) REFERENCES departments(id);
+
+-- 办事知识库：医院/科室限定改为外键，NULL = 不限。旧库先用中文名列折算，
+-- 折算不到的留一个不存在的编号交给外键报错，不悄悄降级成"所有医院通用"。
 CREATE TABLE IF NOT EXISTS care_guide_articles (
   id VARCHAR(50) PRIMARY KEY,
   topic VARCHAR(50) NOT NULL,
   title VARCHAR(120) NOT NULL,
   content CLOB NOT NULL,
   keywords VARCHAR(300) NOT NULL,
-  hospital_name VARCHAR(100),
-  department VARCHAR(60),
+  hospital_id VARCHAR(40),
+  department_id VARCHAR(40),
   sort_order INT NOT NULL,
   enabled BOOLEAN DEFAULT TRUE NOT NULL
 );
+
+ALTER TABLE care_guide_articles ADD COLUMN IF NOT EXISTS hospital_id VARCHAR(40);
+ALTER TABLE care_guide_articles ADD COLUMN IF NOT EXISTS department_id VARCHAR(40);
+ALTER TABLE care_guide_articles ADD COLUMN IF NOT EXISTS hospital_name VARCHAR(100);
+ALTER TABLE care_guide_articles ADD COLUMN IF NOT EXISTS department VARCHAR(60);
+UPDATE care_guide_articles g SET hospital_id=(
+  SELECT MIN(h.id) FROM hospitals h WHERE h.name=g.hospital_name
+) WHERE g.hospital_id IS NULL AND g.hospital_name IS NOT NULL;
+UPDATE care_guide_articles g SET department_id=(
+  SELECT MIN(d.id) FROM departments d WHERE d.name=g.department
+) WHERE g.department_id IS NULL AND g.department IS NOT NULL;
+UPDATE care_guide_articles SET hospital_id='__unmapped_hospital__'
+WHERE hospital_id IS NULL AND hospital_name IS NOT NULL;
+UPDATE care_guide_articles SET department_id='__unmapped_department__'
+WHERE department_id IS NULL AND department IS NOT NULL;
+ALTER TABLE care_guide_articles DROP COLUMN IF EXISTS hospital_name;
+ALTER TABLE care_guide_articles DROP COLUMN IF EXISTS department;
+ALTER TABLE care_guide_articles ADD CONSTRAINT IF NOT EXISTS fk_care_guide_hospital
+  FOREIGN KEY (hospital_id) REFERENCES hospitals(id);
+ALTER TABLE care_guide_articles ADD CONSTRAINT IF NOT EXISTS fk_care_guide_department
+  FOREIGN KEY (department_id) REFERENCES departments(id);
 
 CREATE TABLE IF NOT EXISTS appointment_materials (
   id VARCHAR(50) PRIMARY KEY,
@@ -184,13 +235,27 @@ CREATE TABLE IF NOT EXISTS user_preferences (
   updated_at TIMESTAMP NOT NULL
 );
 
+-- 出行路线：终点直接引用医院，不再存一份医院地址字符串再按字符串去 JOIN。
+-- origin 是出发地的展示文字（"幸福小区（模拟）"），不是一个可以外键引用的实体，
+-- 所以它保留为文字；真正决定这条路线属于哪家医院的是 hospital_id。
 CREATE TABLE IF NOT EXISTS travel_routes (
   id VARCHAR(50) PRIMARY KEY,
+  hospital_id VARCHAR(40) NOT NULL,
   origin VARCHAR(200) NOT NULL,
-  destination VARCHAR(200) NOT NULL,
   transport VARCHAR(40) NOT NULL,
   duration_minutes INT NOT NULL
 );
+
+ALTER TABLE travel_routes ADD COLUMN IF NOT EXISTS hospital_id VARCHAR(40);
+ALTER TABLE travel_routes ADD COLUMN IF NOT EXISTS destination VARCHAR(200);
+UPDATE travel_routes r SET hospital_id=(
+  SELECT MIN(h.id) FROM hospitals h WHERE h.address=r.destination
+) WHERE r.hospital_id IS NULL AND r.destination IS NOT NULL;
+UPDATE travel_routes SET hospital_id='__unmapped_hospital__' WHERE hospital_id IS NULL;
+ALTER TABLE travel_routes DROP COLUMN IF EXISTS destination;
+ALTER TABLE travel_routes ALTER COLUMN hospital_id SET NOT NULL;
+ALTER TABLE travel_routes ADD CONSTRAINT IF NOT EXISTS fk_travel_routes_hospital
+  FOREIGN KEY (hospital_id) REFERENCES hospitals(id);
 
 ALTER TABLE travel_routes ADD COLUMN IF NOT EXISTS distance_meters INT;
 ALTER TABLE travel_routes ADD COLUMN IF NOT EXISTS route_steps CLOB;
@@ -381,3 +446,72 @@ ALTER TABLE family_contacts DROP COLUMN IF EXISTS user_id;
 ALTER TABLE family_contacts DROP COLUMN IF EXISTS name;
 ALTER TABLE family_contacts DROP COLUMN IF EXISTS relationship;
 ALTER TABLE family_contacts DROP COLUMN IF EXISTS phone;
+
+-- =====================================================================
+-- 业务表外键：主数据（用户/医院/科室/预约/联系人）之间的关系交给数据库兜底。
+-- 这些约束统一放在最后：迁移语句已经跑完，旧库升级和新库建表走的是同一条路径；
+-- 一旦旧库里存在指向不存在记录的行，启动会直接失败，而不是带着脏数据继续跑。
+--
+-- 工具调用日志、会话消息/附件/识图结果这几张追加型记录表刻意不加会话外键：
+-- 材料照片的 conversation_id 存的是 "appointment:<id>" 这种归属键，不是真实会话；
+-- 这些表是审计与展示用的流水，不该反过来限制会话的清理顺序。
+-- =====================================================================
+ALTER TABLE departments ADD CONSTRAINT IF NOT EXISTS fk_departments_hospital
+  FOREIGN KEY (hospital_id) REFERENCES hospitals(id);
+
+ALTER TABLE clinics ADD CONSTRAINT IF NOT EXISTS fk_clinics_hospital
+  FOREIGN KEY (hospital_id) REFERENCES hospitals(id);
+ALTER TABLE clinics ADD CONSTRAINT IF NOT EXISTS fk_clinics_department
+  FOREIGN KEY (department_id) REFERENCES departments(id);
+
+ALTER TABLE appointment_slots ADD CONSTRAINT IF NOT EXISTS fk_appointment_slots_clinic
+  FOREIGN KEY (clinic_location_id) REFERENCES clinics(id);
+
+ALTER TABLE appointments ADD CONSTRAINT IF NOT EXISTS fk_appointments_slot
+  FOREIGN KEY (slot_id) REFERENCES appointment_slots(id);
+ALTER TABLE appointments ADD CONSTRAINT IF NOT EXISTS fk_appointments_user
+  FOREIGN KEY (user_id) REFERENCES users(id);
+ALTER TABLE appointments ADD CONSTRAINT IF NOT EXISTS fk_appointments_arranged_by
+  FOREIGN KEY (arranged_by) REFERENCES users(id);
+ALTER TABLE appointments ADD CONSTRAINT IF NOT EXISTS fk_appointments_accompanied_by
+  FOREIGN KEY (accompanied_by) REFERENCES users(id);
+
+ALTER TABLE user_schedules ADD CONSTRAINT IF NOT EXISTS fk_user_schedules_user
+  FOREIGN KEY (user_id) REFERENCES users(id);
+
+-- 材料与提醒是预约的附属记录：预约被删掉时一起删，不留指向不存在预约的孤儿行。
+ALTER TABLE appointment_materials ADD CONSTRAINT IF NOT EXISTS fk_appointment_materials_appointment
+  FOREIGN KEY (appointment_id) REFERENCES appointments(id) ON DELETE CASCADE;
+
+ALTER TABLE user_preferences ADD CONSTRAINT IF NOT EXISTS fk_user_preferences_user
+  FOREIGN KEY (user_id) REFERENCES users(id);
+
+ALTER TABLE reminders ADD CONSTRAINT IF NOT EXISTS fk_reminders_user
+  FOREIGN KEY (user_id) REFERENCES users(id);
+ALTER TABLE reminders ADD CONSTRAINT IF NOT EXISTS fk_reminders_appointment
+  FOREIGN KEY (appointment_id) REFERENCES appointments(id) ON DELETE CASCADE;
+
+ALTER TABLE family_notifications ADD CONSTRAINT IF NOT EXISTS fk_family_notifications_contact
+  FOREIGN KEY (contact_id) REFERENCES family_contacts(id);
+
+ALTER TABLE conversation_sessions ADD CONSTRAINT IF NOT EXISTS fk_conversation_sessions_user
+  FOREIGN KEY (user_id) REFERENCES users(id);
+
+ALTER TABLE care_relations ADD CONSTRAINT IF NOT EXISTS fk_care_relations_caregiver
+  FOREIGN KEY (caregiver_id) REFERENCES users(id);
+ALTER TABLE care_relations ADD CONSTRAINT IF NOT EXISTS fk_care_relations_elder
+  FOREIGN KEY (elder_user_id) REFERENCES users(id);
+
+ALTER TABLE care_notifications ADD CONSTRAINT IF NOT EXISTS fk_care_notifications_caregiver
+  FOREIGN KEY (caregiver_id) REFERENCES users(id);
+ALTER TABLE care_notifications ADD CONSTRAINT IF NOT EXISTS fk_care_notifications_elder
+  FOREIGN KEY (elder_user_id) REFERENCES users(id);
+
+ALTER TABLE memos ADD CONSTRAINT IF NOT EXISTS fk_memos_user
+  FOREIGN KEY (user_id) REFERENCES users(id);
+
+ALTER TABLE health_records ADD CONSTRAINT IF NOT EXISTS fk_health_records_user
+  FOREIGN KEY (user_id) REFERENCES users(id);
+
+ALTER TABLE user_memories ADD CONSTRAINT IF NOT EXISTS fk_user_memories_user
+  FOREIGN KEY (user_id) REFERENCES users(id);

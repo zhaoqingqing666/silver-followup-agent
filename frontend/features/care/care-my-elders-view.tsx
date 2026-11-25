@@ -1,18 +1,20 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { LoaderCircle, RefreshCw, UserRound, UsersRound } from 'lucide-react';
+import { ChevronRight, LoaderCircle, RefreshCw, UserRound, UsersRound } from 'lucide-react';
 import { PageHeader } from '@/components/common/page-header';
 import { getCareElders } from '@/lib/care-api';
 import type { CareElder } from '@/types/domain';
 
 interface CareMyEldersProps {
   caregiverId: string;
+  /** 点一位长辈看他的「长辈信息」；没有的话这份名单就是个死胡同，看完没有下一步。 */
+  onOpen: (elder: CareElder) => void;
   onBack: () => void;
 }
 
-/** 我的页里“我协同的长辈”：展示与该照护者绑定的长辈及其关系。 */
-export function CareMyEldersView({ caregiverId, onBack }: CareMyEldersProps) {
+/** 我的页里“我协同的长辈”：展示与该照护者绑定的长辈及其关系，可点进长辈信息。 */
+export function CareMyEldersView({ caregiverId, onOpen, onBack }: CareMyEldersProps) {
   const [elders, setElders] = useState<CareElder[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -61,13 +63,19 @@ export function CareMyEldersView({ caregiverId, onBack }: CareMyEldersProps) {
           <p className="px-1 text-base text-muted-foreground">共 {elders.length} 位长辈。</p>
           <section className="grid gap-3">
             {elders.map(elder => (
-              <article key={elder.elderId} className="flex items-center gap-4 rounded-3xl border bg-card p-4 shadow-sm">
+              <button
+                key={elder.elderId}
+                type="button"
+                onClick={() => onOpen(elder)}
+                className="flex w-full items-center gap-4 rounded-3xl border bg-card p-4 text-left shadow-sm transition active:scale-[0.99]"
+              >
                 <span className="grid size-12 shrink-0 place-items-center rounded-full bg-secondary text-primary"><UserRound className="size-6" /></span>
-                <div className="min-w-0 flex-1">
-                  <h2 className="text-lg font-bold">{elder.name}</h2>
-                  <p className="mt-0.5 truncate text-base text-muted-foreground">与您的关系：{elder.relationship ?? '协同的就诊人'}</p>
-                </div>
-              </article>
+                <span className="min-w-0 flex-1">
+                  <strong className="block text-lg font-bold">{elder.name}</strong>
+                  <span className="mt-0.5 block truncate text-base text-muted-foreground">与您的关系：{elder.relationship ?? '协同的就诊人'}</span>
+                </span>
+                <ChevronRight className="size-5 shrink-0 text-muted-foreground" aria-hidden="true" />
+              </button>
             ))}
           </section>
         </>

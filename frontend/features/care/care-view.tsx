@@ -5,6 +5,7 @@ import { CareBottomNav, type CareTabId } from '@/components/navigation/care-bott
 import { CARE_CID_BY_ROLE, getCareElders } from '@/lib/care-api';
 import { getUserProfile } from '@/lib/appointment-api';
 import type { CareElder, CareRole } from '@/types/domain';
+import { HealthProfileView } from '@/features/health-profile/health-profile-view';
 import { CareAppointmentsView } from './care-appointments-view';
 import { CareAssistantView } from './care-assistant-view';
 import { CareBookingView } from './care-booking-view';
@@ -33,8 +34,15 @@ interface PickerState {
   error: string;
 }
 
+/**
+ * 下钻到的页面。健康档案也走这条路（从「长辈信息」进），但它不是首页的那几个入口之一，
+ * 所以单独并进这个类型、不去动 {@code CareEntryKind}——那个类型是首页入口的清单，
+ * {@code CareElderPickerView} 里拿它当 Record 的键，加进去会连带要改那边。
+ */
+type DrillKind = CareEntryKind | 'healthProfile';
+
 interface DrillState {
-  kind: CareEntryKind;
+  kind: DrillKind;
   elder: CareElder;
 }
 
@@ -107,6 +115,17 @@ export function CareView({ actor, onSwitchActor }: CareViewProps) {
   /** 从长辈详情返回：仅关闭详情。多长辈时回到保留着的选长辈列表，单长辈时回到首页。 */
   const backFromDrill = () => setDrill(null);
 
+  /**
+   * 从消息点进某位长辈的就诊动态。消息里只有 elderId，下钻要的是完整的长辈对象，现查一次。
+   * 查不到（比如关系刚被解绑）就抛出去，由消息页把话说清楚——不能默默什么也不做。
+   */
+  const openElderFromInbox = async (elderId: string) => {
+    const list = await getCareElders(caregiverId);
+    const elder = list.find(item => item.elderId === elderId);
+    if (!elder) throw new Error('这位长辈已经不在您的协同名单里了');
+    setDrill({ kind: 'timeline', elder });
+  };
+
   const isRoot = !picker && !drill && !sub;
 
   return (
@@ -131,7 +150,12 @@ export function CareView({ actor, onSwitchActor }: CareViewProps) {
           onBack={backFromDrill}
           onOpenTimeline={() => setDrill({ kind: 'timeline', elder: drill.elder })}
           onOpenAppointments={() => setDrill({ kind: 'appointments', elder: drill.elder })}
+          onOpenHealthProfile={() => setDrill({ kind: 'healthProfile', elder: drill.elder })}
         />
+      )}
+      {drill?.kind === 'healthProfile' && (
+        // editorName 用照护者自己的名字：这一页是家属在填，页脚要显示「最近由小丽填写」
+        <HealthProfileView onBack={backFromDrill} userId={drill.elder.elderId} editorName={actorName} hideHelp />
       )}
 
       {picker && (
@@ -150,7 +174,16 @@ export function CareView({ actor, onSwitchActor }: CareViewProps) {
       )}
 
       {sub === 'elders' && (
-        <CareMyEldersView caregiverId={caregiverId} onBack={() => setSub(null)} />
+        // 点一位长辈进他的「长辈信息」时**保留 sub**，只把这一页藏起来（和上面 picker 同一招）：
+        // 两张页面是并列渲染的，不藏会叠在一起；可要是进入时把 sub 清掉，返回就只剩清 drill，
+        // 落到的是「我的」页——家属会以为长辈名单被跳过去了。
+        <div className={drill ? 'hidden' : undefined}>
+          <CareMyEldersView
+            caregiverId={caregiverId}
+            onBack={() => setSub(null)}
+            onOpen={elder => setDrill({ kind: 'info', elder })}
+          />
+        </div>
       )}
       {sub === 'settings' && (
         <CareSettingsView onBack={() => setSub(null)} />
@@ -160,7 +193,7 @@ export function CareView({ actor, onSwitchActor }: CareViewProps) {
         <CareHomeView caregiverId={caregiverId} onOpen={startFor} onOpenElder={(kind, elder) => setDrill({ kind, elder })} />
       )}
       {isRoot && tab === 'messages' && (
-        <CareInboxView caregiverId={caregiverId} onBack={goHome} />
+        <CareInboxView caregiverId={caregiverId} onOpenElder={openElderFromInbox} onBack={goHome} />
       )}
       {isRoot && tab === 'assistant' && (
         <CareAssistantView actor={actor} onBack={goHome} />

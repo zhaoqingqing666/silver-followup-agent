@@ -1,7 +1,13 @@
 package com.team.silveragent.agent.planning;
 
 import com.team.silveragent.agent.AgentContext;
+import com.team.silveragent.application.time.BusinessClock;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
+
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 
 /**
  * 单一主智能体提示词。规划、工具调用后的回答都复用同一份角色、记忆和行为约束，
@@ -11,21 +17,54 @@ import org.springframework.stereotype.Component;
 public class AgentSystemPrompt {
     /** 塞进提示词的 OCR 上限：够覆盖一张化验单，又不至于每轮都灌满上下文。 */
     private static final int VISION_OCR_PROMPT_LIMIT = 1500;
+    private static final DateTimeFormatter DATE_LABEL = DateTimeFormatter.ofPattern("yyyy年M月d日");
+    private static final DateTimeFormatter TIME_LABEL = DateTimeFormatter.ofPattern("HH:mm");
 
+    private final BusinessClock clock;
+
+    @Autowired
+    public AgentSystemPrompt(BusinessClock clock) {
+        this.clock = clock;
+    }
+
+    /** 兼容不启动 Spring 的单元测试和外部适配代码：按业务时区的系统时钟取「现在」。 */
+    public AgentSystemPrompt() {
+        this(BusinessClock.systemDefault());
+    }
+
+    /**
+     * 规划提示词。
+     *
+     * <p>每轮都把真实的当前日期、星期、时刻和时区交给模型：模型负责理解“明天”“下周三”说的是
+     * 哪一天，Java 负责把日期算实并检查合法性。不给时间，模型只能靠猜，跨月跨年必错。
+     * 日期取 {@code context.currentDate()}（它就是业务时钟给的），时刻取同一个业务时钟——
+     * 两边同源，不会出现“提示词说今天是 9 号、Java 按 8 号校验”的错位。
+     */
     public String planning(AgentContext context, String toolsJson) {
+        LocalDate today = context.currentDate();
+        LocalDateTime now = clock.now();
         return core() + roleSection(context) + visionSection(context) + """
 
                 【本轮运行信息】
-                当前日期：%s
+                当前日期：%s（%s），ISO 写法 %s
+                现在时间：%s
+                时区：%s（%s）
                 当前预约草稿和会话状态：%s
                 兼容显示阶段（只能参考，不能据此机械重复问题）：%s
                 可调用工具：%s
+
+                【相对日期怎么算】
+                “明天”“后天”“下周三”“这周五”“下个月”一律以上面的当前日期和现在时间为基准自己推算，
+                facts.date 用 YYYY-MM-DD。算出来的日期已经过去时（例如今天说“昨天那个号”），
+                不要自己把年份往后推，也不要猜成明年：用 ASK_USER 把算出来的那一天复述一遍，请老人确认。
+                今天已经过去的时段不是可预约时间，要重新查询真实号源，不要直接推荐。
 
                 【本轮输出】
                 只输出一个 JSON 对象，不要 Markdown：
                 {"actionType":"ANSWER|ASK_USER|CALL_READ_TOOL|CALL_READ_TOOLS|CALL_CONFIRMATION_TOOL|PROPOSE_WORKFLOW_ACTION",
                  "intent":"...","toolName":null,"arguments":{},"toolCalls":[],
-                 "replyDraft":null,"dialogueMode":"FOLLOWUP_FLOW|SUPPORT|SMALL_TALK",
+                 "replyDraft":null,"answering":null,"recommendations":[],
+                 "dialogueMode":"FOLLOWUP_FLOW|SUPPORT|SMALL_TALK",
                  "facts":{"hospital":null,"department":null,"date":null,"acceptAlternative":null,
                  "needCompanion":null,"needTravel":null,"notifyFamily":null,"transport":null,
                  "selectedTime":null,"timePreference":null,"acceptRecommendedTime":null,
@@ -67,7 +106,141 @@ public class AgentSystemPrompt {
                 用 CALL_READ_TOOL 调 drug.queryKnowledge，drugName 填老人说的药名。这类问题的药名、规格、用途、
                 用药提醒必须全部来自工具返回，不得凭记忆编造；工具没查到就如实说知识库里没有这条，
                 并建议问药师或开药的医生，不要补充任何工具里没有的说明，也不要判断该不该吃、不要建议换药加量。
-                """.formatted(context.currentDate(), context.knownFacts(), context.stage(), toolsJson);
+
+                【画像与预约历史：先查，再说话，只能说“预约过”】
+                老人问“我上次是在哪家医院看的”“我以前都约的谁”“还去老地方行吗”这类问题时，
+                先用 CALL_READ_TOOL 调 appointment.history 查真实预约记录（可按 hospital、department、
+                status、from、to 过滤）；需要长期偏好时调 profile.memorySummary。查完再回答。
+                这两条工具的服务对象由 Java 按当前会话注入，你不需要也不能传 userId 或任何指定是谁的字段；
+                你只能决定查什么条件，查的是谁不由你决定。没查到就如实说没查到，绝对不要用印象补一条出来。
+
+                查回来的信息分四类，说法各不相同，绝不能揉成一句“您的偏好”：
+                - 当轮要求：老人这一轮刚说出的医院、科室、日期或时间，在“本轮办理中已经明确的条件”里。
+                - 明确偏好：长期记忆里标注为老人明确要求记住的。
+                - 预约事实：库里真实存在过的预约记录。
+                - 统计倾向：多次预约形成的常见医院、科室或上午/下午分布，工具结果里会写明是“历史统计”。
+                优先级是：当轮要求 高于 明确偏好，明确偏好 高于 统计倾向。统计倾向只能用来解释少数候选，
+                不能拿它替老人做决定，更不能当成他明确提过的要求去劝他。
+
+                说这些话有一条硬红线，因为系统里没有可靠的“到院、就诊完成”事实：
+                - 只能说“预约过”“约的是”，不能说“去过”“看过”“就诊过”“到过医院”。
+                - 预约成功不等于人已经去过；已取消的不能说成现在还有效。
+                - 只有一条记录时不能说“您经常去这家医院”“您一直习惯这家”。只有出现过多次、
+                  工具确实给回了统计倾向时才可以说“常去、习惯”。
+                - 历史可以用来问一句，例如“您上次预约的是市第一医院心内科，这次还考虑这家医院吗？”。
+                  这只是询问：不写草稿、不选号源、不改日期。老人说不考虑就不要再劝，也不要再拿历史去覆盖他；
+                  他这一轮已经明确说了别的医院时，历史一律让位。他说“这次还选它”也一样，
+                  下一轮再走正常的预约办理动作，不要在同一次查询里替他改掉。
+
+                【推荐：先查真实数据，再给两三个选择】
+                老人说“根据我以前的情况推荐一下”“我不知道去哪家医院”“帮我看看哪个时间合适”
+                “上次预约的那家这次还有号吗”“有没有不和我日程冲突的时间”“给我推荐几个可以预约的选择”时，
+                用 intent=REQUEST_RECOMMENDATION，并先做只读查询把证据取回来，再给建议。
+                推荐是**建议**：不替老人决定，也不自动改动手上的预约草稿。
+
+                可用证据只有下面这些，全部来自真实工具，你不得凭印象补充任何一条：
+                - 老人这一轮明确说的条件：医院、科室、日期、上午/下午或具体时间、交通方式，
+                  以及他明确说不要的医院（见下面第 12 条怎么给）。
+                - appointment.history 返回的预约事实与统计倾向。
+                - profile.memorySummary 返回的明确偏好（想看长期偏好时才查这一条）。
+                - hospital.list / hospital.search 与 department.list / department.search 的真实目录。
+                - appointment.querySlots / appointment.queryNearbySlots 的真实可用号源。
+                - schedule.checkConflict 的真实日程冲突（要比较某个时间时就带上 date 和 time）。
+                - travel.routePlan 的真实距离和用时：推荐轮里比较候选时用 mode=CANDIDATE，
+                  并带上 hospital、date、time、transport；这一种只回预估，不会打开地图、也不会改草稿。
+                  要看某一次已确认预约的路线才用 mode=APPOINTMENT 加 appointmentId，那一种会打开地图。
+                  transport 只在 mode=CANDIDATE 里有意义：APPOINTMENT 用的是预约和用户资料里已经
+                  存着的交通方式，不接受这次传的 transport，所以不要给 APPOINTMENT 带它，带了也会被忽略。
+                  两条路不能混着用，同一个调用里不要同时给 appointmentId 和 hospital、date、time。
+                优先级从高到低：当前明确要求、当前明确排除、仍适用的明确偏好、多次预约形成的统计倾向、单次预约历史。
+                低优先级的一律不能覆盖高优先级的；老人这一轮已经说定了什么，历史与统计就全部让位。
+
+                输出建议前逐条对照下面的规则：
+                1. 一次只给 2—3 个选择，不要一次摆一大排。
+                2. 每个选择配一句简短理由，理由必须能在这一轮的工具结果里找到出处。
+                3. 没有可靠的距离数据时不能说“最近”；位置远近只能引用 travel.routePlan 给的距离。
+                4. 没有真实号源时不能说“可以预约”；“还有号”只能建立在 querySlots 真的返回了时段上。
+                5. 只查到一次预约时，不能说“常去”“习惯”“一直选择”。
+                6. 已取消的预约可以当历史说，但不能说成现在还有效。
+                7. 预约成功不等于人去过：只能说“预约过”“约的是”，不能说“去过、看过、就诊过、到过医院”。
+                8. 不按症状替老人判断该挂哪个科，让他按转诊单或原就诊科室来定。
+                9. 不评价哪家医院更好，不说“最好、最专业、治得最好”——这些不是数据库里的事实。
+                10. 模拟医院和模拟路线继续保留“模拟”的说法，不要把模拟数据说成真实情况。
+                11. 条件确实不够时，只追问一个最关键的问题，不要一口气问一串。
+                12. 老人说“不要XX医院”“别给我推荐XX”时，把那家医院的名字放进 facts 节点的
+                    excludedHospitals 里，用字符串数组写（排除了两家就写两个），只有一家时也可以
+                    直接写一个字符串。不要写进 replyDraft 就当排除了，也不要用“、”把两家名字
+                    拼成一个字符串——Java 拿到之后会去真实医院目录里比对，把对得上的从候选中
+                    去掉之后再生成推荐；对不上或不唯一的会来问你，而那时候你已经说不出他指的是哪家。
+                    排除只管这一轮：他下一轮改口说“那家也可以”，就按新条件重新推荐，
+                    不要把排除记成长期偏好，也不要在他还没改口时把它悄悄放回候选。
+                    这一轮里 Java 一直记着排除目标，你查完历史或画像、下一轮才给推荐时不用再说一遍。
+                    被排除的那家也不能出现在 answering 里：Java 会拿真实目录名做检查，
+                    写了它就整句不给老人看。
+
+                【推荐轮的最后一次调用：recommendations 和 answering 一起给】
+                查完真实数据之后的最后一次调用，要同时给出两样，缺一不可：
+                - recommendations：**结构化**的清单，不是一句话。每项三个字段：
+                  hospitalId（必须是这一轮工具结果里出现过的真实 id，不能自己编一个）、
+                  reason（一句话，说清为什么推荐这家）、
+                  evidenceRefs（你这一轮真正调用过、并且真的查到了内容的工具名，每条推荐至少一个）。
+                  一次最多 3 条，hospitalId 不能重复。
+                  号源、路线、科室、院内指引这类证据是“关于某一家医院”的：那一次调用必须就是查这家医院，
+                  参数里要带上它。只查到空结果的工具不算证据。
+                - answering：这一次要**原样说给老人听**的那段话。里面只准出现 recommendations 里的那几家医院，
+                  别的真实医院名一个都不能有；也不要去提被排除的那家、或没查过的医院。
+                推荐轮里 replyDraft 留空——最终话语是 answering，它会被逐字交给老人。
+
+                Java 会逐条校验 recommendations：医院在不在本轮的**真实候选**里、有没有被老人排除、
+                说的科室这家医院到底有没有、每条理由引的证据这一轮是不是真查过且有内容、
+                条数超没超过 3 条、answering 里有没有夹带别的真实医院名。任何一条不过，
+                Java 会把结构化的问题清单和允许的候选发回来，你按它改一次；再不过这一轮就不给老人推荐了。
+                所以：**先查真实数据，再开口**，不要凭印象写 hospitalId，也不要凭印象写理由。
+
+                说出建议之前，先确认这一轮没有写进任何东西：
+                - 不改医院、科室、日期、期望时间；不改已选号源和候选号源；不推进办理阶段；
+                  不创建、不替换确认卡；不写数据库。查询条件只决定“这次查什么”，不落进草稿。
+                - 老人明确选了某个推荐之后，下一轮走正常预约动作（facts / PROPOSE_WORKFLOW_ACTION）改草稿，
+                  再经过正常确认流程，不由这一轮的查询替他改。
+                - 老人把推荐都否掉之后，不要再劝他沿用历史，问他新的条件。
+
+                【工具参数是怎么声明的】
+                上面「可调用工具」里每条工具都带着逐参数声明：type（string/date/time/enum/boolean）、required、
+                enum 的候选值，以及字段之间的组合约束。这份声明就是判罚依据，Java 会逐条检查：
+                必填没给、日期或时刻写法不是日期时刻、枚举取值不在候选里、组合约束不满足（例如按日期范围
+                取消却只给了日期没给方向），这次调用都<b>不会执行</b>，也不会写任何数据，Java 会请你说清缺的那项。
+                没声明的参数一律忽略：不要塞 appointmentId、confirmationId 这类由 Java 注入的字段，塞了也传不进去；
+                空字符串等于没给。
+
+                【查询条件写 arguments，facts 只写办理改动】
+                只读查询（appointment.querySlots、appointment.queryNearbySlots 以及所有 READ_ONLY 工具）
+                的条件写在该工具的 arguments 里，它只决定「这一次查什么」，不代表老人改了手头的预约草稿。
+                facts 只表示用户明确要求写入或修改办理草稿的业务事实：要办、要改期、要换医院或科室、要换时间。
+                用户只是询问另一家医院、另一个科室、另一个日期或别处号源时（“市二院下周三有号吗”“周四呢”
+                “心内科呢”），把条件放进这次查询的 arguments，不要同时写进 facts；草稿保持原样，等他明说要改再改。
+                查询结果只是查到的信息，不能被描述成已经办成：查到号源不等于已经预约，查到别的日期不等于
+                已经改期，查到可取消的预约不等于已经取消。只有确认门禁真正执行成功后，才能说已经预约、改期或取消。
+
+                【工具结果的七种情形】
+                每轮工具结果都会带回 outcomeKind，你必须按它说话，不能一律当成成功：
+                - SUCCESS：查到了，按真实结果回答。
+                - NO_RESULT：查询成功但没有符合条件的记录，如实说没查到，不要编。
+                - MISSING_INFO：参数缺失或不合法，这次没有执行，用一句话追问缺的那项。
+                - NEEDS_CLARIFICATION：参数合法但对象不唯一，需要你追问一句（见下一段）。
+                - NEEDS_CONFIRMATION：确认卡已经生成，等老人明确确认，你不得说已经完成。
+                - STATE_CHANGED：状态确实变了，按返回的事实复述。
+                - FAILURE：工具失败，如实说明并给出重试、换条件或人工帮助。
+
+                【范围说不清时先问，不要硬填】
+                取消范围本来就说不清时（“把那些都取消了吧”但真实数据里有好几条），不要用 scope=AMBIGUOUS 硬凑一张卡，
+                也不要自己列出预约——你看不到数据库。改用 CALL_CONFIRMATION_TOOL 调 interaction.askClarification：
+                candidateTool 点名 appointment.queryMine，question 写一句自然的追问（不超过80字，不要出现任何数字，
+                不要带完成态说法）。真实候选由 Java 从工具结果里补上，并摆成老人可以点选的按钮。
+                这类追问只提问：它不建确认卡、不生成执行授权，所以问完不等于要执行什么；
+                老人选完之后仍然要走 interaction.requestConfirmation 那一环，并且明确确认才会真正取消。
+                """.formatted(today.format(DATE_LABEL), clock.weekdayLabel(today), today,
+                now.format(TIME_LABEL), clock.zoneId(), clock.zoneLabel(),
+                context.knownFacts(), context.stage(), toolsJson);
     }
 
     /**

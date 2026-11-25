@@ -86,7 +86,18 @@ final class CatalogEntityResolver {
         return value.isBlank() || containsAny(value, "不知道", "不清楚", "没想好", "忘了", "不记得", "随便");
     }
 
-    private String normalize(String value) {
+    /**
+     * 目录名的规范化形式：去掉「（模拟）」、空白和间隔号并转小写。
+     *
+     * <p>给「这句话里有没有出现某家真实医院」这类<b>包含检查</b>用：两边都用同一个口径规范化，
+     * 全名才比得准。它只做字符串层面的统一，<b>不做</b>简称、别名或模糊匹配——那是
+     * {@link #hospital} 的职责，这里既不扩词表也不放宽匹配。
+     */
+    static String canonicalName(String value) {
+        return normalize(value);
+    }
+
+    private static String normalize(String value) {
         return value == null ? "" : value.replace("（模拟）", "").replace("(模拟)", "")
                 .replaceAll("[\\s·・]", "").toLowerCase();
     }

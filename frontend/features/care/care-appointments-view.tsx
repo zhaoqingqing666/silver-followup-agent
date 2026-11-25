@@ -5,7 +5,7 @@ import { CalendarDays, ChevronRight, Clock3, LoaderCircle, RefreshCw, Route, Tri
 import { PageHeader } from '@/components/common/page-header';
 import { getAppointments } from '@/lib/appointment-api';
 import type { AppointmentSummary, CareElder } from '@/types/domain';
-import { formatDate, formatHM } from './format';
+import { appointmentStatusChip, formatDate, formatHM } from './format';
 import { CareAppointmentDetailView } from './care-appointment-detail-view';
 
 interface CareAppointmentsProps {
@@ -23,12 +23,6 @@ const todayLocal = (): string => {
   const day = String(now.getDate()).padStart(2, '0');
   return `${now.getFullYear()}-${month}-${day}`;
 };
-
-function statusChip(status: string) {
-  if (status === 'CONFIRMED') return { label: '已预约', className: 'bg-green-100 text-green-800' };
-  if (status === 'CANCELLED') return { label: '已取消', className: 'bg-gray-100 text-gray-600' };
-  return { label: '处理中', className: 'bg-amber-100 text-amber-800' };
-}
 
 /** 某位长辈的复诊预约卡片页：只有参与这次就诊的照护者才看到出发建议，其余走“查看详情”。 */
 export function CareAppointmentsView({ caregiverId, elder, onBack, onManageUpcoming }: CareAppointmentsProps) {
@@ -101,7 +95,7 @@ export function CareAppointmentsView({ caregiverId, elder, onBack, onManageUpcom
       {!loading && !error && appointments.length > 0 && (
         <section className="grid gap-3">
           {appointments.map(row => {
-            const chip = statusChip(row.status);
+            const chip = appointmentStatusChip(row.status);
             // 只有进行中且该照护者确认陪同的预约才显示出发建议
             const participating = row.status === 'CONFIRMED' && row.accompaniedBy === caregiverId;
             return (

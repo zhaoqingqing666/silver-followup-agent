@@ -37,6 +37,34 @@ public class ToolTraceStore {
         progress.toolResult(conversationId, toolName, requestJson, responseJson, success);
     }
 
+    /**
+     * 这个会话当前最大的一条追踪 id；没有记录时是 0。
+     *
+     * <p>配合 {@link #since} 用来圈出「本轮工具调用」：进循环前取一次，之后读到的都是这一轮真的跑过的。
+     * 拿它当分界，比「跑完再去对比整张表」稳——中间没有清理，也没有上一条用户消息的残留。
+     */
+    public long latestId(String conversationId) {
+        Long value = jdbc.queryForObject(
+                "SELECT COALESCE(MAX(id), 0) FROM tool_call_logs WHERE conversation_id = ?",
+                Long.class, conversationId);
+        return value == null ? 0L : value;
+    }
+
+    /**
+     * 分界之后新增的真实工具调用，按发生顺序。
+     *
+     * <p>校验模型给的证据引用时读的就是它：{@code response_json} 是唯一能回答「这次到底查到没有」
+     * 的地方——只会话里那段 {@code outcomeKind} 几乎恒为 SUCCESS，拿它当「有证据」等于没查。
+     */
+    public List<ToolTrace> since(String conversationId, long afterId) {
+        return jdbc.query("""
+                SELECT tool_name,request_json,response_json,success FROM tool_call_logs
+                WHERE conversation_id = ? AND id > ? ORDER BY id
+                """,
+                (rs, row) -> new ToolTrace(rs.getString(1), rs.getString(2), rs.getString(3), rs.getBoolean(4)),
+                conversationId, afterId);
+    }
+
     public List<ToolTrace> findByConversation(String conversationId) {
         return jdbc.query("""
                 SELECT tool_name,request_json,response_json,success FROM (

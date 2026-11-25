@@ -3,6 +3,7 @@ import type {
   BookingDateWindow,
   BookingDepartment,
   BookingHospital,
+  BookingPreview,
   CareElder,
   CareNotification,
   CareRole,
@@ -75,14 +76,27 @@ export function getBookingWindows(caregiverId: string, elderId: string, hospital
   return readJson(`${API_BASE}/api/caregivers/${caregiverId}/elders/${elderId}/book/windows?hospitalId=${hospitalId}&departmentId=${departmentId}`, '无法读取可选日期');
 }
 
-/** 帮助预约：替就诊人办理一次复诊。 */
-export function createBooking(caregiverId: string, elderId: string, request: CreateBookingRequest): Promise<BookedAppointment> {
-  return postJson(`${API_BASE}/api/caregivers/${caregiverId}/elders/${elderId}/book`, request, '代约失败，请稍后重试');
+/**
+ * 帮助预约：算出这次会办理什么并拿到票据，<b>不写任何数据</b>。
+ * 三个写操作都是两段式，提交时必须把这里返回的 confirmationId 带回去。
+ */
+export function prepareBooking(caregiverId: string, elderId: string, request: CreateBookingRequest): Promise<BookingPreview> {
+  return postJson(`${API_BASE}/api/caregivers/${caregiverId}/elders/${elderId}/book/prepare`, request, '无法生成办理确认，请稍后重试');
+}
+
+/** 帮助预约：票据核对通过后替就诊人办理一次复诊。 */
+export function createBooking(caregiverId: string, elderId: string, request: CreateBookingRequest, confirmationId: string): Promise<BookedAppointment> {
+  return postJson(`${API_BASE}/api/caregivers/${caregiverId}/elders/${elderId}/book?confirmationId=${encodeURIComponent(confirmationId)}`, request, '代约失败，请稍后重试');
+}
+
+/** 改期预览：先说明改完之后是什么样，不写数据。 */
+export function prepareModifyBooking(caregiverId: string, elderId: string, request: CreateBookingRequest): Promise<BookingPreview> {
+  return postJson(`${API_BASE}/api/caregivers/${caregiverId}/elders/${elderId}/book/modify/prepare`, request, '无法生成改期确认，请稍后重试');
 }
 
 /** 修改该长辈当前这张进行中的预约（原位更新同一条记录，不留“已取消”记录）。 */
-export function modifyBooking(caregiverId: string, elderId: string, request: CreateBookingRequest): Promise<BookedAppointment> {
-  return postJson(`${API_BASE}/api/caregivers/${caregiverId}/elders/${elderId}/book/modify`, request, '修改预约失败，请稍后重试');
+export function modifyBooking(caregiverId: string, elderId: string, request: CreateBookingRequest, confirmationId: string): Promise<BookedAppointment> {
+  return postJson(`${API_BASE}/api/caregivers/${caregiverId}/elders/${elderId}/book/modify?confirmationId=${encodeURIComponent(confirmationId)}`, request, '修改预约失败，请稍后重试');
 }
 
 /** 只切换当前照护者是否陪同这张进行中的复诊（不动预约本身）。 */
@@ -90,7 +104,12 @@ export function setBookingAccompany(caregiverId: string, elderId: string, willAc
   return postJson(`${API_BASE}/api/caregivers/${caregiverId}/elders/${elderId}/book/accompany`, { willAccompany }, '保存陪同状态失败，请稍后重试');
 }
 
+/** 取消预览：取消不可逆，先让人看清要取消的是哪一张，不写数据。 */
+export function prepareCancelBooking(caregiverId: string, elderId: string): Promise<BookingPreview> {
+  return postJson(`${API_BASE}/api/caregivers/${caregiverId}/elders/${elderId}/book/cancel/prepare`, {}, '无法生成取消确认，请稍后重试');
+}
+
 /** 帮助预约：取消该长辈当前进行中的复诊（用于“先取消旧预约，再重新代约”）。 */
-export function cancelElderBooking(caregiverId: string, elderId: string): Promise<{ message?: string }> {
-  return postJson(`${API_BASE}/api/caregivers/${caregiverId}/elders/${elderId}/book/cancel`, {}, '取消预约失败，请稍后重试');
+export function cancelElderBooking(caregiverId: string, elderId: string, confirmationId: string): Promise<{ message?: string }> {
+  return postJson(`${API_BASE}/api/caregivers/${caregiverId}/elders/${elderId}/book/cancel?confirmationId=${encodeURIComponent(confirmationId)}`, {}, '取消预约失败，请稍后重试');
 }

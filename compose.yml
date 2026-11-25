@@ -31,6 +31,9 @@ services:
       DASHSCOPE_ASR_MODEL: ${DASHSCOPE_ASR_MODEL:-qwen3-asr-flash}
       DASHSCOPE_TTS_MODEL: ${DASHSCOPE_TTS_MODEL:-qwen3-tts-flash}
       DASHSCOPE_TTS_VOICE: ${DASHSCOPE_TTS_VOICE:-Cherry}
+      # 业务时区：预约日期、号源 cutoff、「今天/明天」、周报的周一八点都按这个时区算。
+      # 容器默认是 UTC，不设的话北京时间凌晨那八小时业务日期会停在昨天。
+      BUSINESS_TIME_ZONE: ${BUSINESS_TIME_ZONE:-Asia/Shanghai}
       # CORS 白名单：允许浏览器里的前端页面跨域调用
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
     ports:

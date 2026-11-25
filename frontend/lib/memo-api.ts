@@ -3,6 +3,20 @@ import { DEMO_USER_ID } from '@/lib/app-config';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:8080';
 
+/**
+ * 后端出错时会回 400 {"message": "…"}，那句话是写给人看的（“这条备忘不存在或已经处理过了”），
+ * 比前端自己编的兜底文案有用得多——老人看到才知道是这条已经不在了，而不是网络坏了。
+ */
+async function readError(response: Response, fallback: string): Promise<Error> {
+  try {
+    const body = await response.json();
+    if (body && typeof body.message === 'string' && body.message) return new Error(body.message);
+  } catch {
+    // 非 JSON 响应，走兜底文案
+  }
+  return new Error(fallback);
+}
+
 /** 备忘分两类：timed=到点提醒的（当天的，攒不起来）；standing=长期备忘（只增不减，会越攒越多）。 */
 export type MemoKind = 'timed' | 'standing';
 
@@ -29,14 +43,21 @@ export async function getMemoCounts(userId = DEMO_USER_ID): Promise<MemoCounts> 
   return response.json();
 }
 
-export async function completeMemo(memoId: string, userId = DEMO_USER_ID): Promise<void> {
+/**
+ * 处理掉一条备忘，返回处理后的这条。
+ *
+ * <p>重复提醒的不会被结束，而是顺延到下一次，所以返回的 {@code remindAt} 是**新的**那个——
+ * 界面要拿它告诉老人“下次提醒：X月X日 08:00”。一次性提醒返回的 {@code status} 是 DONE。
+ */
+export async function completeMemo(memoId: string, userId = DEMO_USER_ID): Promise<HealthMemo> {
   const response = await fetch(`${API_BASE}/api/users/${userId}/memos/${memoId}/done`, { method: 'POST' });
-  if (!response.ok) throw new Error('标记备忘失败');
+  if (!response.ok) throw await readError(response, '标记备忘失败');
+  return response.json();
 }
 
 export async function deleteMemo(memoId: string, userId = DEMO_USER_ID): Promise<void> {
   const response = await fetch(`${API_BASE}/api/users/${userId}/memos/${memoId}`, { method: 'DELETE' });
-  if (!response.ok) throw new Error('删除备忘失败');
+  if (!response.ok) throw await readError(response, '删除备忘失败');
 }
 
 /**
@@ -50,5 +71,5 @@ export async function updateMemo(memoId: string, text: string, remindAt: string 
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ text, remindAt, repeatRule }),
   });
-  if (!response.ok) throw new Error('修改备忘失败');
+  if (!response.ok) throw await readError(response, '修改备忘失败');
 }

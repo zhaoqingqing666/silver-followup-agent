@@ -263,6 +263,23 @@ export interface FamilyContact {
   maskedPhone: string;
 }
 
+/**
+ * 健康档案：过敏史、既往病史、身高、体重（当前值）。
+ *
+ * 身高体重是「现在是多少」，由人填；每次测量的历史在健康记录里（「9月10日量了50公斤」）。
+ * 两者可能对不上，家属端那一页会把「最近一次记录」一并显示出来，不一致能当场看见。
+ */
+export interface HealthProfile {
+  userId: string;
+  heightCm: number | null;
+  weightKg: number | null;
+  allergies: string | null;
+  medicalHistory: string | null;
+  /** 最近是谁填的、什么时候：这块信息两个人都能改，得看得出是谁写的。 */
+  updatedBy: string | null;
+  updatedAt: string | null;
+}
+
 /** 登录身份：就诊人本人 / 家属 / 志愿者。 */
 export type CareActor = 'ELDER' | 'FAMILY' | 'VOLUNTEER';
 
@@ -317,6 +334,8 @@ export interface CareNotification {
   elderId: string;
   elderName: string;
   content: string;
+  /** 与就诊动态同一套色调：紧急/取消是 danger，代约成功是 success，一般的协同提醒是 info。 */
+  tone: CareTimelineEvent['tone'];
   sentAt: string;
 }
 
@@ -365,6 +384,32 @@ export interface CreateBookingRequest {
   transport: string;
   /** 这次复诊当前照护者是否陪同就诊（陪同才在卡片显示出发建议）。 */
   willAccompany: boolean;
+}
+
+/**
+ * 代约 / 改期 / 取消的确认卡。整份由后端算出来，前端只负责展示——
+ * 展示的内容和真正要执行的内容来自同一套解析，不会各算一份。
+ */
+export interface BookingPreview {
+  /** 提交时要带回来的票据；内容被改动过就对不上，会被后端拒绝。 */
+  confirmationId: string;
+  /** BOOK / MODIFY / CANCEL。 */
+  action: string;
+  /** 这次复诊是替谁办的。 */
+  serviceSubject: string;
+  /** 这份预约记在谁名下（代约归属）。 */
+  arrangement: string;
+  hospital: string;
+  department: string;
+  /** 如 2026-09-18 */
+  date: string;
+  /** 如 09:00 */
+  time: string;
+  transport: string;
+  needTravel: boolean;
+  willAccompany: boolean;
+  /** 点确认后实际会发生的事，只列真会做的。 */
+  operations: string[];
 }
 
 /** 代约成功返回的预约卡片（老人在首页/助手可见同款）。 */

@@ -1,8 +1,10 @@
 package com.team.silveragent.application.care;
 
+import com.team.silveragent.application.time.BusinessClock;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
+import java.sql.Time;
 import java.time.LocalDate;
 import java.util.List;
 import java.util.Optional;
@@ -10,9 +12,11 @@ import java.util.Optional;
 @Repository
 public class CareCatalogRepository {
     private final JdbcTemplate jdbc;
+    private final BusinessClock clock;
 
-    public CareCatalogRepository(JdbcTemplate jdbc) {
+    public CareCatalogRepository(JdbcTemplate jdbc, BusinessClock clock) {
         this.jdbc = jdbc;
+        this.clock = clock;
     }
 
     public List<Hospital> hospitals() {
@@ -69,16 +73,24 @@ public class CareCatalogRepository {
                 (rs, row) -> rs.getString(1));
     }
 
+    /**
+     * 从 {@code from} 起还有真实可约号源的日期。
+     *
+     * <p>「今天已经过去的时段不算」用业务时钟的今天/此刻做参数，不用 {@code CURRENT_DATE} /
+     * {@code CURRENT_TIME}——那两个取的是数据库连接的 JVM 默认时区，和业务时区（Asia/Shanghai）
+     * 不是一回事，在 UTC 容器里北京时间凌晨那八小时会算错日期。
+     */
     public List<LocalDate> availableDates(String hospitalId, String department, LocalDate from, int limit) {
         return jdbc.query("""
                 SELECT DISTINCT s.appointment_date FROM appointment_slots s
                 JOIN departments d ON d.id=s.department
                 WHERE s.hospital=? AND d.name=? AND s.appointment_date>=? AND s.available=TRUE
-                  AND (s.appointment_date > CURRENT_DATE
-                       OR (s.appointment_date = CURRENT_DATE AND s.appointment_time > CURRENT_TIME))
+                  AND (s.appointment_date > ? OR (s.appointment_date = ? AND s.appointment_time > ?))
                 ORDER BY s.appointment_date LIMIT ?
                 """, (rs, row) -> rs.getDate(1).toLocalDate(),
-                hospitalId, department, java.sql.Date.valueOf(from), limit);
+                hospitalId, department, java.sql.Date.valueOf(from),
+                java.sql.Date.valueOf(clock.today()), java.sql.Date.valueOf(clock.today()),
+                Time.valueOf(clock.time()), limit);
     }
 
     public Optional<UserProfile> user(String userId) {

@@ -65,8 +65,8 @@ H2 地址：`jdbc:h2:file:./data/silver-agent`；用户名 `sa`；密码留空�
 
 ## 六、材料模板与照护指南
 
-- `material_templates`：`m001`~`m008`，含 5 条通用材料（身份证、医保卡、上次病历、既往检查报告、药物清单）和心内科 / 内分泌科各一条专科材料，带必填标记与排序。
-- `care_guide_articles`：4 篇指南，`guide-process` 流程、`guide-arrival` 到院步骤、`guide-help` 求助渠道、`guide-change` 改期取消，用于「怎么办、找谁问」类问答。
+- `material_templates`：5 条通用材料（身份证、医保卡、上次病历、既往检查报告、药物清单，`department_id` 为 `NULL`），加上按科室编号分别种的专科材料（心内科 `d001`/`d006`、内分泌科 `d003`/`d005`），共 11 行。`department_id` 外键指向 `departments.id`，不再按中文科室名匹配。
+- `care_guide_articles`：4 篇指南，`guide-process` 流程、`guide-arrival` 到院步骤、`guide-help` 求助渠道、`guide-change` 改期取消，用于「怎么办、找谁问」类问答；`hospital_id` / `department_id` 为可空外键，`NULL` 表示不限。
 
 ## 七、出行路线
 
@@ -177,8 +177,8 @@ TravelPlan plan(conversationId, userId, hospital, appointmentAt, transport)
 
 按「模拟地址 + 预约时间 + 交通方式 → 建议出发时间」实现：
 
-1. 起点取 `users.home_address`，终点取 `hospitals.address`（先 `REPLACE(name,'（模拟）','')` 清洗）
-2. 按 `origin + destination + transport` 查 `travel_routes`，得到 `duration_minutes`
+1. 起点取 `users.home_address`；医院先按清洗后的名称查到 `hospitals.id` 与 `hospitals.address`
+2. 按 `origin + hospital_id + transport` 查 `travel_routes`，得到 `duration_minutes`（终点不再用地址字符串关联）
 3. `departure = appointmentAt.minusMinutes(duration + 20)`
 
 那个 **+20 分钟是刻意预留的取号时间**，返回文案会明说「预计 X 分钟，并预留 20 分钟取号时间」。

@@ -3,7 +3,8 @@
 import { CalendarDays, ChevronRight, MapPin, Route, UsersRound } from 'lucide-react';
 import { PageHeader } from '@/components/common/page-header';
 import type { AppointmentSummary, CareElder } from '@/types/domain';
-import { formatDate, formatHM } from './format';
+import { CareMaterialStatus } from './care-material-status';
+import { appointmentStatusChip, formatDate, formatHM } from './format';
 
 const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 
@@ -19,6 +20,8 @@ export function CareAppointmentDetailView({ caregiverId, elder, appointment, onB
   onManageUpcoming?: (() => void) | null;
 }) {
   const participating = appointment.accompaniedBy === caregiverId;
+  /** 已预约的不用挂标签；其余走和列表页同一份判定，免得同一条预约两张页面两个说法。 */
+  const statusChip = appointment.status !== 'CONFIRMED' ? appointmentStatusChip(appointment.status) : null;
 
   return (
     <main className="space-y-5 px-5 pb-8 pt-5">
@@ -33,8 +36,8 @@ export function CareAppointmentDetailView({ caregiverId, elder, appointment, onB
           <div className="min-w-0 flex-1">
             <p className="flex items-start justify-between gap-2">
               <span className="text-xl font-bold">{formatHM(appointment.time)} {formatDate(appointment.date)} {weekdayOf(appointment.date)} 复诊</span>
-              {appointment.status !== 'CONFIRMED' && (
-                <span className="shrink-0 rounded-full bg-gray-100 px-3 py-1 text-sm font-bold text-gray-600">已取消</span>
+              {statusChip && (
+                <span className={`shrink-0 rounded-full px-3 py-1 text-sm font-bold ${statusChip.className}`}>{statusChip.label}</span>
               )}
             </p>
             <p className="mt-1 text-base">{appointment.hospital}</p>
@@ -59,21 +62,15 @@ export function CareAppointmentDetailView({ caregiverId, elder, appointment, onB
         </div>
       </section>
 
+      {/* 材料这块从「一串名字」升级成「准备到哪一步」：家属人不在跟前，就是来远程确认东西备齐没有的 */}
+      <CareMaterialStatus
+        elderId={elder.elderId}
+        appointmentId={appointment.appointmentId}
+        fallbackLabels={appointment.materials}
+        requiredMaterials={appointment.requiredMaterials}
+      />
+
       <section className="rounded-3xl border bg-card p-5 shadow-sm">
-        <h2 className="flex items-center gap-2 text-lg font-bold"><CalendarDays className="size-5 text-primary" />需带材料</h2>
-        <p className="mt-1 text-base text-muted-foreground">提醒就诊人按此准备，无需本人到场</p>
-        {appointment.materials.length === 0 ? (
-          <p className="mt-3 text-base text-muted-foreground">这份预约没有记录到材料要求。</p>
-        ) : (
-          <ul className="mt-3 divide-y">
-            {appointment.materials.map(label => (
-              <li key={label} className="flex min-h-12 items-center gap-3 py-2 text-lg">
-                <span className="text-base">{label}</span>
-                {appointment.requiredMaterials.includes(label) && <span className="ml-auto shrink-0 rounded-full bg-primary/10 px-2.5 py-0.5 text-sm text-primary">必带</span>}
-              </li>
-            ))}
-          </ul>
-        )}
         {onManageUpcoming ? (
           <button type="button" onClick={onManageUpcoming} className="mt-5 flex min-h-12 w-full items-center justify-center gap-1 rounded-2xl bg-primary px-4 text-base font-bold text-white shadow-lg shadow-primary/25 active:scale-[0.99]">
             调整这次复诊<ChevronRight className="size-5" />

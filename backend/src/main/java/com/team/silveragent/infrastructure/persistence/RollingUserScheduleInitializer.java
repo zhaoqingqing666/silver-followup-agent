@@ -1,5 +1,6 @@
 package com.team.silveragent.infrastructure.persistence;
 
+import com.team.silveragent.application.time.BusinessClock;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -34,9 +35,11 @@ public class RollingUserScheduleInitializer implements ApplicationRunner {
     private static final String DINNER_TITLE = "和家人吃饭";
 
     private final JdbcTemplate jdbc;
+    private final BusinessClock clock;
 
-    public RollingUserScheduleInitializer(JdbcTemplate jdbc) {
+    public RollingUserScheduleInitializer(JdbcTemplate jdbc, BusinessClock clock) {
         this.jdbc = jdbc;
+        this.clock = clock;
     }
 
     @Override
@@ -46,25 +49,37 @@ public class RollingUserScheduleInitializer implements ApplicationRunner {
 
     /** 幂等：重复调用只会把两条日程挪到最新的「下周三 / 下周六」。 */
     public void seed() {
-        upsert(CHECKUP_ID, CHECKUP_TITLE, checkupDate(), LocalTime.of(10, 0), LocalTime.of(11, 0));
-        upsert(DINNER_ID, DINNER_TITLE, dinnerDate(), LocalTime.of(12, 0), LocalTime.of(13, 30));
+        LocalDate today = clock.today();
+        upsert(CHECKUP_ID, CHECKUP_TITLE, checkupDate(today), LocalTime.of(10, 0), LocalTime.of(11, 0));
+        upsert(DINNER_ID, DINNER_TITLE, dinnerDate(today), LocalTime.of(12, 0), LocalTime.of(13, 30));
     }
 
     /**
      * 演示话术「下周三」指的那一天，与 RuleFactExtractor 的口语解析一致：本周三再往后推一周。
      * 今天就是周三时同样指七天后的那个周三——两处必须一起理解，否则演示话术会落到没有日程的日期上。
+     *
+     * <p>静态版给不启动 Spring 的用例用，按业务时区取今天；真正的播种走 {@link #seed()}，
+     * 用的是注入进来的业务时钟。
      */
     public static LocalDate checkupDate() {
-        return nextWeek(DayOfWeek.WEDNESDAY);
+        return checkupDate(LocalDate.now(BusinessClock.DEFAULT_ZONE));
+    }
+
+    public static LocalDate checkupDate(LocalDate today) {
+        return nextWeek(today, DayOfWeek.WEDNESDAY);
     }
 
     /** 「下周六」：不参与冲突场景，只用来验证周末的日程不会被误报成冲突。 */
     public static LocalDate dinnerDate() {
-        return nextWeek(DayOfWeek.SATURDAY);
+        return dinnerDate(LocalDate.now(BusinessClock.DEFAULT_ZONE));
     }
 
-    private static LocalDate nextWeek(DayOfWeek day) {
-        return LocalDate.now()
+    public static LocalDate dinnerDate(LocalDate today) {
+        return nextWeek(today, DayOfWeek.SATURDAY);
+    }
+
+    private static LocalDate nextWeek(LocalDate today, DayOfWeek day) {
+        return today
                 .with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY))
                 .plusWeeks(1)
                 .plusDays(day.getValue() - 1L);

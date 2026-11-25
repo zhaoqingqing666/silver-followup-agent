@@ -5,27 +5,13 @@ import { History, LoaderCircle, RefreshCw } from 'lucide-react';
 import { PageHeader } from '@/components/common/page-header';
 import { getElderTimeline } from '@/lib/care-api';
 import type { CareElder, CareTimelineEvent } from '@/types/domain';
-import { formatDateTime } from './format';
+import { formatDateTime, TONE_DOT_COLORS as DOT_COLORS, TONE_TEXT_COLORS as TITLE_COLORS } from './format';
 
 interface ElderTimelineProps {
   caregiverId: string;
   elder: CareElder;
   onBack: () => void;
 }
-
-const DOT_COLORS: Record<CareTimelineEvent['tone'], string> = {
-  info: 'bg-primary',
-  success: 'bg-green-500',
-  warning: 'bg-amber-400',
-  danger: 'bg-red-500',
-};
-
-const TITLE_COLORS: Record<CareTimelineEvent['tone'], string> = {
-  info: 'text-foreground',
-  success: 'text-green-800',
-  warning: 'text-amber-800',
-  danger: 'text-red-700',
-};
 
 /** 某位长辈的就诊动态时间线。 */
 export function ElderTimelineView({ caregiverId, elder, onBack }: ElderTimelineProps) {

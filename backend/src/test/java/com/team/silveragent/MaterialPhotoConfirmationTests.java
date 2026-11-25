@@ -36,11 +36,11 @@ class MaterialPhotoConfirmationTests {
 
     @BeforeEach
     void seed() {
-        jdbc.update("DELETE FROM appointment_materials WHERE appointment_id=?", APPOINTMENT);
-        jdbc.update("DELETE FROM conversation_attachments WHERE conversation_id=?",
-                "appointment:" + APPOINTMENT);
+        // 用例里还有第二条预约（appt-photo-002）也占用同一个号源，先按号源清掉所有预约；
+        // 预约删掉时材料与提醒由外键级联删除。必须早于删号源，否则号源外键会拒绝。
+        jdbc.update("DELETE FROM appointments WHERE slot_id='slot-photo' OR id=?", APPOINTMENT);
+        jdbc.update("DELETE FROM conversation_attachments WHERE conversation_id LIKE 'appointment:%'");
         jdbc.update("DELETE FROM appointment_slots WHERE id='slot-photo'");
-        jdbc.update("DELETE FROM appointments WHERE id=?", APPOINTMENT);
         jdbc.update("""
                 INSERT INTO appointment_slots(id,hospital,department,
                     appointment_date,appointment_time,available)

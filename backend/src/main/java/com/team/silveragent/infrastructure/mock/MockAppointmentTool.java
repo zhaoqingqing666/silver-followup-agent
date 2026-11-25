@@ -1,5 +1,6 @@
 package com.team.silveragent.infrastructure.mock;
 
+import com.team.silveragent.application.time.BusinessClock;
 import com.team.silveragent.domain.model.ToolModels.Slot;
 import com.team.silveragent.domain.tool.AppointmentTool;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -7,6 +8,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.sql.Date;
+import java.sql.Time;
 import java.sql.Timestamp;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -18,10 +20,12 @@ import java.util.UUID;
 public class MockAppointmentTool implements AppointmentTool {
     private final JdbcTemplate jdbc;
     private final ToolTraceStore traces;
+    private final BusinessClock clock;
 
-    public MockAppointmentTool(JdbcTemplate jdbc, ToolTraceStore traces) {
+    public MockAppointmentTool(JdbcTemplate jdbc, ToolTraceStore traces, BusinessClock clock) {
         this.jdbc = jdbc;
         this.traces = traces;
+        this.clock = clock;
     }
 
     @Override
@@ -34,10 +38,14 @@ public class MockAppointmentTool implements AppointmentTool {
                 JOIN departments d ON d.id=s.department
                 WHERE s.hospital=? AND d.name=?
                   AND s.appointment_date=? AND s.available=TRUE
-                  AND (s.appointment_date > CURRENT_DATE
-                        OR (s.appointment_date = CURRENT_DATE AND s.appointment_time > CURRENT_TIME))
+                  AND (s.appointment_date > ? OR (s.appointment_date = ? AND s.appointment_time > ?))
                 ORDER BY s.appointment_time
-                """, slotMapper(), hospitalId, department, Date.valueOf(date));
+                """, slotMapper(), hospitalId, department, Date.valueOf(date),
+                // 「今天已经过去的时段不算号」这条判断必须和 Java 用同一个时钟。交给
+                // CURRENT_DATE/CURRENT_TIME 的话，用的是数据库连接的 JVM 默认时区：开发容器是
+                // UTC，北京时间 00:00–08:00 之间它眼里的“今天”还停在昨天，昨天下午已经过去的
+                // 时段会被当成可约号源端给老人。
+                Date.valueOf(clock.today()), Date.valueOf(clock.today()), Time.valueOf(clock.time()));
         traces.record(conversationId, "appointment.querySlots", input, result, true);
         return result;
     }
@@ -54,10 +62,10 @@ public class MockAppointmentTool implements AppointmentTool {
                 JOIN departments d ON d.id=s.department
                 WHERE s.hospital=? AND d.name=?
                   AND s.appointment_date BETWEEN ? AND ? AND s.available=TRUE
-                  AND (s.appointment_date > CURRENT_DATE
-                        OR (s.appointment_date = CURRENT_DATE AND s.appointment_time > CURRENT_TIME))
+                  AND (s.appointment_date > ? OR (s.appointment_date = ? AND s.appointment_time > ?))
                 ORDER BY s.appointment_date,s.appointment_time
-                """, slotMapper(), hospitalId, department, Date.valueOf(from), Date.valueOf(to));
+                """, slotMapper(), hospitalId, department, Date.valueOf(from), Date.valueOf(to),
+                Date.valueOf(clock.today()), Date.valueOf(clock.today()), Time.valueOf(clock.time()));
         traces.record(conversationId, "appointment.queryUpcomingSlots", input, result, true);
         return result;
     }
@@ -75,11 +83,11 @@ public class MockAppointmentTool implements AppointmentTool {
                 JOIN departments d ON d.id=s.department
                 WHERE s.hospital=? AND d.name=?
                   AND s.appointment_date BETWEEN ? AND ? AND s.available=TRUE
-                  AND (s.appointment_date > CURRENT_DATE
-                        OR (s.appointment_date = CURRENT_DATE AND s.appointment_time > CURRENT_TIME))
+                  AND (s.appointment_date > ? OR (s.appointment_date = ? AND s.appointment_time > ?))
                 ORDER BY s.appointment_date,s.appointment_time
                 """, slotMapper(), hospitalId, department,
-                Date.valueOf(date.plusDays(1)), Date.valueOf(date.plusDays(3)));
+                Date.valueOf(date.plusDays(1)), Date.valueOf(date.plusDays(3)),
+                Date.valueOf(clock.today()), Date.valueOf(clock.today()), Time.valueOf(clock.time()));
         traces.record(conversationId, "appointment.queryAlternatives", input, result, true);
         return result;
     }
